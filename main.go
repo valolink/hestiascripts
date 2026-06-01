@@ -1,0 +1,86 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"net/http"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+)
+
+const (
+	ListenPort = ":8084"
+	AllowedDir = "/usr/local/hestia/bin/"
+)
+
+// Strict regex: The script name must start with "v-" and contain only letters, numbers, and hyphens.
+var safeScriptRegex = regexp.MustCompile(`^v-[a-zA-Z0-9-]+$`)
+
+func executeHandler(w http.ResponseWriter, r *http.Request) {
+	// 1. Setup headers for Server-Sent Events (SSE)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // Prevents Nginx proxy buffering
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Parse query parameters
+	q := r.URL.Query()
+	scriptName := q.Get("script")
+
+	// 3. Security Validation
+	// If the script name isn't exactly like "v-clone-wp", reject it immediately.
+	if !safeScriptRegex.MatchString(scriptName) {
+		fmt.Fprintf(w, "data: ERROR: Invalid or unauthorized script name.\n\n")
+		return
+	}
+
+	// Construct absolute path securely (prevents directory traversal attacks like "../../bin/bash")
+	scriptPath := filepath.Join(AllowedDir, scriptName)
+
+	// 4. Extract dynamic arguments
+	// Go automatically groups multiple query parameters with the same name into a string slice []string.
+	// E.g., ?arg=--src-user&arg=admin becomes ["--src-user", "admin"]
+	args := q["arg"]
+
+	// 5. Execute process safely
+	// exec.Command takes the binary path and a variadic list of arguments.
+	// It does NOT invoke a shell, rendering standard injection attacks completely useless.
+	cmd := exec.Command(scriptPath, args...)
+	cmd.Stderr = cmd.Stdout // Merge stderr into stdout so we stream errors too
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprintf(w, "data: ERROR: Failed to create stdout pipe: %v\n\n", err)
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(w, "data: ERROR: Failed to start script: %v\n\n", err)
+		return
+	}
+
+	// 6. Stream output line-by-line in real-time
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
+		flusher.Flush()
+	}
+
+	cmd.Wait()
+}
+
+func main() {
+	http.HandleFunc("/execute", executeHandler)
+
+	fmt.Printf("🚀 Universal Go Streamer listening on %s...\n", ListenPort)
+	if err := http.ListenAndServe(ListenPort, nil); err != nil {
+		fmt.Printf("❌ Server failed: %v\n", err)
+	}
+}
