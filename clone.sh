@@ -86,6 +86,26 @@ if [ $? -eq 1 ]; then
   echo "Note: You must remove them from the CLI php.ini (e.g., /etc/php/X.Y/cli/php.ini), not just the FPM config."
   exit 1
 fi
+#
+# 3rd: Check if there is enough disk space
+echo "  Checking disk space..."
+
+# Get the size of the source directory in Megabytes
+OLD_SIZE_MB=$(du -sm "$OLD_DIR" | cut -f1)
+
+# Calculate required space: Old Site Size + 20% overhead (for DB dump) + 50MB flat buffer
+REQUIRED_MB=$((OLD_SIZE_MB + (OLD_SIZE_MB / 5) + 50))
+
+# Get available space on the target partition in Megabytes
+# We check /home/$HESTIA_USER because $NEW_DIR might not be created yet
+AVAILABLE_MB=$(df -m "/home/$HESTIA_USER" | awk 'NR==2 {print $4}')
+
+if [ "$AVAILABLE_MB" -lt "$REQUIRED_MB" ]; then
+  echo "❌ ERROR: Insufficient disk space to safely clone."
+  echo "   Estimated Requirement: ~${REQUIRED_MB}MB"
+  echo "   Actually Available:    ${AVAILABLE_MB}MB"
+  exit 1
+fi
 
 echo "Pre-flight checks passed."
 
@@ -138,6 +158,19 @@ if [ "$OVERWRITE_MODE" = false ]; then
   echo "[1/8] Creating new web domain ($NEW_WEB_DOMAIN) in HestiaCP..."
   v-add-web-domain "$HESTIA_USER" "$NEW_WEB_DOMAIN"
   check_status "Failed to create web domain in Hestia. Check if the domain already exists."
+
+  echo "      Checking DNS records before requesting SSL..."
+  OLD_IP=$(getent hosts "$OLD_WEB_DOMAIN" | awk '{ print $1 }' | head -n 1)
+  NEW_IP=$(getent hosts "$NEW_WEB_DOMAIN" | awk '{ print $1 }' | head -n 1)
+
+  if [ -n "$NEW_IP" ] && [ "$OLD_IP" == "$NEW_IP" ]; then
+    echo "      ✅ DNS matches ($NEW_IP). Provisioning Let's Encrypt SSL..."
+    v-add-web-domain-ssl "$HESTIA_USER" "$NEW_WEB_DOMAIN"
+    # We don't trigger check_status here because an SSL failure shouldn't kill the whole clone process
+  else
+    echo "      ⚠️ DNS for $NEW_WEB_DOMAIN does not match $OLD_WEB_DOMAIN (or hasn't propagated)."
+    echo "      Skipping SSL provisioning. You can add it later via HestiaCP."
+  fi
 fi
 
 # 2. Export the database using WP-CLI
@@ -146,19 +179,21 @@ sudo -u "$HESTIA_USER" wp --path="$OLD_DIR" db export "$DB_DUMP" --quiet
 check_status "Failed to export the old database. Check if the old site's DB credentials are valid."
 
 # 3. Copy files to the new domain
-echo "[3/8] Copying files..."
+echo "[3/8] Copying files (excluding cache and backups)..."
 if [ "$OVERWRITE_MODE" = true ]; then
   echo "      Clearing out old files in target directory..."
-  # Safely clear target directory without deleting the directory itself
   find "$NEW_DIR" -mindepth 1 -delete
 else
-  # NEW: Remove HestiaCP default files from fresh domain creations
   echo "      Removing HestiaCP default index.html..."
   rm -f "$NEW_DIR/index.html" "$NEW_DIR/robots.txt"
 fi
 
-cp -a "$OLD_DIR/." "$NEW_DIR/"
-check_status "Failed to copy files. Check disk space and permissions."
+rsync -a --exclude 'wp-content/cache/*' \
+  --exclude 'wp-content/updraft/*' \
+  --exclude 'wp-content/debug.log' \
+  "$OLD_DIR/" "$NEW_DIR/"
+check_status "Failed to sync files. Check disk space and permissions."
+
 chown -R "$HESTIA_USER:$HESTIA_USER" "$NEW_DIR"
 check_status "Failed to update ownership of the copied files."
 
@@ -213,17 +248,16 @@ echo "[7/8] Running search and replace in the database..."
 
 # Fetch the exact Site URL from the OLD WordPress installation
 OLD_WP_URL=$(sudo -u "$HESTIA_USER" wp --path="$OLD_DIR" option get home --quiet)
-
-# Define the NEW WordPress URL (Assuming https is used)
-# This retains the 'www.' because it uses the original $NEW_DOMAIN variable
 NEW_WP_URL="https://$NEW_DOMAIN"
 
-# Output what is actually being replaced for clarity in the terminal
-echo "    Replacing: $OLD_WP_URL -> $NEW_WP_URL"
-
-# Run the search-replace using the full URLs
+echo "    Replacing URLs: $OLD_WP_URL -> $NEW_WP_URL"
 sudo -u "$HESTIA_USER" wp --path="$NEW_DIR" search-replace "$OLD_WP_URL" "$NEW_WP_URL" --all-tables --quiet
 check_status "Failed to run WP-CLI search and replace for URLs."
+
+# Replace absolute server paths
+echo "    Replacing absolute server paths: $OLD_DIR -> $NEW_DIR"
+sudo -u "$HESTIA_USER" wp --path="$NEW_DIR" search-replace "$OLD_DIR" "$NEW_DIR" --all-tables --quiet
+check_status "Failed to run WP-CLI search and replace for absolute paths."
 
 # Optional: Run a secondary pass for the raw domain name to update emails/hardcoded paths.
 # Prevent double-replacement if the new domain is a subdomain of the old domain (e.g., dev.domain.com)
