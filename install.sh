@@ -99,12 +99,12 @@ echo "⚙️ Checking HestiaCP firewall rules..."
 # IMPORTANT: Change this to your Nuxt Docker server's IP
 NUXT_IP="135.181.26.201"
 
-# Check if port 8084 is already allowed in Hestia
-if ! v-list-firewall plain | grep -q "8084"; then
-  echo "  🛡️ Opening port 8084 for Nuxt IP ($NUXT_IP)..."
+# Check if port 8090 is already allowed in Hestia
+if ! v-list-firewall plain | grep -q "8090"; then
+  echo "  🛡️ Opening port 8090 for Nuxt IP ($NUXT_IP)..."
 
-  # Hestia command: v-add-firewall-rule ACTION IP PROTOCOL PORT [COMMENT]
-  v-add-firewall-rule ACCEPT "$NUXT_IP" TCP 8084 "Nuxt Streamer Endpoint"
+  # Hestia command: v-add-firewall-rule ACTION IP PORT PROTOCOL [COMMENT]
+  v-add-firewall-rule ACCEPT "$NUXT_IP" 8090 TCP "Nuxt Streamer Endpoint"
 
   if [ $? -eq 0 ]; then
     echo "  ✅ Firewall rule added successfully."
@@ -112,7 +112,7 @@ if ! v-list-firewall plain | grep -q "8084"; then
     echo "  ❌ ERROR: Failed to add firewall rule."
   fi
 else
-  echo "  ✅ Firewall rule for port 8084 already exists."
+  echo "  ✅ Firewall rule for port 8090 already exists."
 fi
 
 echo "==================================================="
