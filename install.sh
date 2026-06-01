@@ -97,7 +97,7 @@ echo "---------------------------------------------------"
 echo "⚙️ Checking HestiaCP firewall rules..."
 
 # IMPORTANT: Change this to your Nuxt Docker server's IP
-NUXT_IP="192.168.1.50"
+NUXT_IP="135.181.26.201"
 
 # Use absolute paths ($HESTIA_BIN) so bash never loses the command
 if ! $HESTIA_BIN/v-list-firewall plain | grep -q "8090"; then
