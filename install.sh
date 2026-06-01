@@ -100,11 +100,11 @@ echo "⚙️ Checking HestiaCP firewall rules..."
 NUXT_IP="135.181.26.201"
 
 # Use absolute paths ($HESTIA_BIN) so bash never loses the command
-if ! $HESTIA_BIN/v-list-firewall plain | grep -q "8090"; then
-  echo "  🛡️ Opening port 8090 for Nuxt IP ($NUXT_IP)..."
+if ! $HESTIA_BIN/v-list-firewall plain | grep -q "8091"; then
+  echo "  🛡️ Opening port 8091 for Nuxt IP ($NUXT_IP)..."
 
   # Removed spaces from the comment to guarantee it passes Hestia's strict format validation
-  $HESTIA_BIN/v-add-firewall-rule ACCEPT "$NUXT_IP" 8090 TCP "Nuxt_Streamer"
+  $HESTIA_BIN/v-add-firewall-rule ACCEPT "$NUXT_IP" 8091 TCP "Nuxt_Streamer"
 
   if [ $? -eq 0 ]; then
     echo "  ✅ Firewall rule added successfully."
@@ -112,7 +112,7 @@ if ! $HESTIA_BIN/v-list-firewall plain | grep -q "8090"; then
     echo "  ❌ ERROR: Failed to add firewall rule. (Run manually in terminal to see the exact Hestia error)"
   fi
 else
-  echo "  ✅ Firewall rule for port 8090 already exists."
+  echo "  ✅ Firewall rule for port 8091 already exists."
 fi
 
 echo "==================================================="
