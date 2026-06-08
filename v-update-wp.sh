@@ -7,6 +7,30 @@ fi
 
 export PATH=$PATH:/usr/local/hestia/bin
 
+show_help() {
+  cat <<'EOF'
+USAGE: v-update-wp [OPTIONS]
+
+Run all available WordPress updates (core, plugins, themes).
+Backs up the database to ~/backup/ before updating unless --skip-backup is set.
+Enables maintenance mode for the duration and disables it on exit.
+
+OPTIONS:
+  --user=USER      HestiaCP user who owns the site
+  --domain=DOMAIN  Domain to update
+  --skip-backup    Skip the database backup before updating
+  --dry-run        Show what would be updated without applying any changes
+  -h, --help       Show this help
+
+EXAMPLES:
+  # Check what needs updating without touching anything
+  v-update-wp --user=admin --domain=mysite.fi --dry-run
+
+  # Run all updates
+  v-update-wp --user=admin --domain=mysite.fi
+EOF
+}
+
 # --- Flag Parsing ---
 HESTIA_USER=""
 DOMAIN=""
@@ -19,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --domain=*)    DOMAIN="${1#*=}" ;;
     --skip-backup) SKIP_BACKUP=true ;;
     --dry-run)     DRY_RUN=true ;;
+    -h|--help)     show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
   shift

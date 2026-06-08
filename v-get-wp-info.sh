@@ -7,6 +7,28 @@ fi
 
 export PATH=$PATH:/usr/local/hestia/bin
 
+show_help() {
+  cat <<'EOF'
+USAGE: v-get-wp-info [OPTIONS]
+
+Print a full diagnostic report for a WordPress site: versions, available
+updates, active theme, PHP environment, database, security posture, admin
+users, object cache status, plugin list, and content counts.
+
+OPTIONS:
+  --user=USER      HestiaCP user who owns the site
+  --domain=DOMAIN  Domain to inspect
+  -h, --help       Show this help
+
+EXAMPLES:
+  # Run interactively over SSH
+  v-get-wp-info
+
+  # Direct (e.g. via hestia-streamer)
+  v-get-wp-info --user=admin --domain=mysite.fi
+EOF
+}
+
 # --- Flag Parsing ---
 HESTIA_USER=""
 DOMAIN=""
@@ -15,6 +37,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --user=*)   HESTIA_USER="${1#*=}" ;;
     --domain=*) DOMAIN="${1#*=}" ;;
+    -h|--help)  show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
   shift

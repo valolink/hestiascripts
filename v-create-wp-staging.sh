@@ -15,6 +15,42 @@ check_status() {
   fi
 }
 
+show_help() {
+  cat <<'EOF'
+USAGE: v-create-wp-staging [OPTIONS]
+
+Create a staging copy of a WordPress site, or tear one down with --teardown.
+
+Live uploads are bind-mounted read-only into the staging site — images display
+normally but any write attempt fails at the OS level. The staging domain is
+saved as WP_STAGING_URL in the live wp-config and reused automatically on
+subsequent runs, so you can refresh staging without specifying the domain again.
+
+OPTIONS:
+  --src-user=USER      HestiaCP user who owns the live site
+  --src-domain=DOMAIN  Live domain to stage
+  --dest-user=USER     HestiaCP user for the staging site (default: same as src-user)
+  --new-domain=DOMAIN  Staging domain (e.g. customer.demolink.fi); saved to live
+                       wp-config as WP_STAGING_URL for reuse on next run
+  --force              Skip overwrite confirmation
+  --teardown           Remove the staging site: unmounts uploads, deletes the
+                       domain and database; pass --src-user and --src-domain too
+                       to also remove WP_STAGING_URL from the live wp-config
+  -h, --help           Show this help
+
+EXAMPLES:
+  # Create staging — domain is remembered for next time
+  v-create-wp-staging --src-user=admin --src-domain=mysite.fi --new-domain=mysite.demolink.fi
+
+  # Refresh existing staging (domain already stored in live wp-config)
+  v-create-wp-staging --src-user=admin --src-domain=mysite.fi --force
+
+  # Tear down and clean up WP_STAGING_URL from the live site
+  v-create-wp-staging --teardown --dest-user=admin --new-domain=mysite.demolink.fi \
+    --src-user=admin --src-domain=mysite.fi
+EOF
+}
+
 # --- Flag Parsing ---
 SRC_USER=""
 OLD_WEB_DOMAIN=""
@@ -31,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     --new-domain=*) NEW_DOMAIN="${1#*=}" ;;
     --force)        FORCE=true ;;
     --teardown)     TEARDOWN=true ;;
+    -h|--help)      show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
   shift

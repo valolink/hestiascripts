@@ -15,6 +15,30 @@ check_status() {
   fi
 }
 
+show_help() {
+  cat <<'EOF'
+USAGE: v-clone-wp [OPTIONS]
+
+Clone a WordPress site to a new domain within HestiaCP.
+Omit any flag to be prompted interactively.
+
+OPTIONS:
+  --src-user=USER      HestiaCP user who owns the source site
+  --src-domain=DOMAIN  Domain to clone
+  --dest-user=USER     HestiaCP user for the new site (must already exist)
+  --new-domain=DOMAIN  Domain name for the cloned site
+  --force              Skip overwrite confirmation if destination domain exists
+  -h, --help           Show this help
+
+EXAMPLES:
+  # Run interactively over SSH
+  v-clone-wp
+
+  # Clone in one command (e.g. via hestia-streamer)
+  v-clone-wp --src-user=admin --src-domain=mysite.fi --dest-user=admin --new-domain=newsite.fi
+EOF
+}
+
 # --- Flag Parsing ---
 SRC_USER=""
 OLD_WEB_DOMAIN=""
@@ -29,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     --dest-user=*)  DEST_USER="${1#*=}" ;;
     --new-domain=*) NEW_DOMAIN="${1#*=}" ;;
     --force)        FORCE=true ;;
+    -h|--help)      show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
   shift
