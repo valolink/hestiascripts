@@ -9,14 +9,35 @@ WordPress automation and streaming toolkit for **HestiaCP** (Hestia Control Pane
 1. **hestia-streamer** — Go HTTP server that streams custom `v-script` output in real time via Server-Sent Events (SSE). HestiaCP's own API only responds after a script finishes, so this streamer exists to surface progress output while the script is still running.
 2. **Custom `v-scripts`** — Bash scripts placed in `/usr/local/hestia/bin/` that extend HestiaCP with WordPress-specific operations (cloning, info gathering, updates, etc.)
 
+## Repo structure
+
+```
+hestia-setup.sh        # Server setup / maintenance entry point (run as root)
+install-scripts.sh     # Deploys v-scripts + hestia-streamer (also callable from hestia-setup)
+setup/                 # Modules sourced by hestia-setup.sh
+  common.sh            # Shared utilities (colors, status_line, confirm, run_action, helpers)
+  status.sh            # Status dashboard printed on every launch
+  wpcli.sh / redis.sh / fail2ban.sh / maldet.sh / netdata.sh / security.sh
+  php-fpm.sh / opcache.sh / mariadb.sh / nginx-templates.sh / maintenance.sh
+templates/
+  nginx/
+    wp-rocket.tpl/.stpl      # WP Rocket cache-proxy templates (complete, version-controlled)
+    wp-secure-snippet.conf   # Security rules injected into HestiaCP default nginx template
+  php-fpm/
+    production.conf / standard.conf / staging.conf / small.conf  # pm settings per profile
+```
+
 ## Build & Run
 
 ```bash
 # Build static Linux binary (target: Debian 12, amd64)
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hestia-streamer main.go
 
-# Deploy everything (systemd service, firewall rules, script symlinks)
-sudo bash install.sh
+# Server setup / maintenance (interactive menu)
+sudo bash hestia-setup.sh
+
+# Deploy v-scripts + streamer only
+sudo bash install-scripts.sh
 
 # Restart the service after changes
 systemctl restart hestia-streamer

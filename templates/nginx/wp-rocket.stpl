@@ -1,0 +1,60 @@
+server {
+    listen      %ip%:%proxy_ssl_port% ssl;
+    server_name %domain_idn% %alias_idn%;
+    error_log   /var/log/%web_system%/domains/%domain%.error.log error;
+
+    ssl_certificate     %ssl_pem%;
+    ssl_certificate_key %ssl_key%;
+
+    if ($anti_replay = 307) { return 307 https://$host$request_uri; }
+    if ($anti_replay = 425) { return 425; }
+
+    include %home%/%user%/conf/web/%domain%/nginx.hsts.conf*;
+
+    set $rocket_file "/wp-content/cache/wp-rocket/$host${uri}index-https.html";
+
+    if ($request_method !~ ^(GET|HEAD)$)                                               { set $rocket_file "/rocket-no-cache"; }
+    if ($query_string != "")                                                            { set $rocket_file "/rocket-no-cache"; }
+    if ($request_uri ~* "/(wp-admin/|wp-login\.php|wp-cron\.php|xmlrpc\.php|wp-json/|index\.php|feed/|sitemap.*\.xml|.*\.php)") { set $rocket_file "/rocket-no-cache"; }
+    if ($http_cookie ~* "(wordpress_logged_in_|wp-postpass_|comment_author_)")         { set $rocket_file "/rocket-no-cache"; }
+
+    location ~ /\.(?!well-known\/|file) {
+        deny all;
+        return 404;
+    }
+
+    location / {
+        root %sdocroot%;
+
+        location ~* ^.+\.(%proxy_extensions%)$ {
+            try_files  $uri @fallback;
+            root       %sdocroot%;
+            access_log /var/log/%web_system%/domains/%domain%.log combined;
+            access_log /var/log/%web_system%/domains/%domain%.bytes bytes;
+            expires    max;
+        }
+
+        try_files  $rocket_file @backend;
+        access_log /var/log/%web_system%/domains/%domain%.log combined;
+    }
+
+    location @backend {
+        proxy_ssl_server_name on;
+        proxy_ssl_name        $host;
+        proxy_pass            https://%ip%:%web_ssl_port%;
+    }
+
+    location @fallback {
+        proxy_ssl_server_name on;
+        proxy_ssl_name        $host;
+        proxy_pass            https://%ip%:%web_ssl_port%;
+    }
+
+    location /error/ {
+        alias %home%/%user%/web/%domain%/document_errors/;
+    }
+
+    proxy_hide_header Upgrade;
+
+    include %home%/%user%/conf/web/%domain%/nginx.ssl.conf_*;
+}
