@@ -11,6 +11,13 @@ menu_smtp() {
     echo -e "  ${BOLD}SMTP Relay — Resend${NC}"
     echo "$DIV"
 
+    # Dependencies
+    _smtp_dep_status "postfix"          "postfix"
+    _smtp_dep_status "libsasl2-modules" "libsasl2-modules"
+    _smtp_dep_status "mailutils"        "mailutils"
+
+    # Relay config
+    echo ""
     local relay
     relay=$(postconf -h relayhost 2>/dev/null)
     if echo "$relay" | grep -q "smtp.resend.com"; then
@@ -29,23 +36,54 @@ menu_smtp() {
     fi
 
     echo ""
-    echo "  1) Configure Resend relay"
-    echo "  2) Send test email"
+    echo "  1) Install dependencies"
+    echo "  2) Configure Resend relay"
+    echo "  3) Send test email"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
 
     case "$choice" in
-      1) _smtp_configure ;;
-      2) _smtp_test ;;
+      1) _smtp_install_deps ;;
+      2) _smtp_configure ;;
+      3) _smtp_test ;;
       0) return ;;
     esac
   done
 }
 
+_smtp_dep_status() {
+  local label="$1" pkg="$2"
+  if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+    status_line "$label" OK "installed"
+  else
+    status_line "$label" ERR "not installed"
+  fi
+}
+
+_smtp_install_deps() {
+  local missing=()
+  for pkg in postfix libsasl2-modules mailutils; do
+    dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" || missing+=("$pkg")
+  done
+
+  if [ ${#missing[@]} -eq 0 ]; then
+    echo ""
+    echo "  All dependencies are already installed."
+    press_enter; return
+  fi
+
+  run_action "Install SMTP dependencies" \
+    "apt-get install -y ${missing[*]}"
+}
+
 _smtp_configure() {
   if ! command -v postconf &>/dev/null; then
-    echo "  Postfix is not installed."
+    echo "  Postfix is not installed. Use option 1 first."
+    press_enter; return
+  fi
+  if ! dpkg -l libsasl2-modules 2>/dev/null | grep -q "^ii"; then
+    echo "  libsasl2-modules is not installed. Use option 1 first."
     press_enter; return
   fi
 
@@ -57,7 +95,7 @@ _smtp_configure() {
   echo "  Password:     your Resend API key"
   echo ""
   echo "  You need a verified sending domain in your Resend account."
-  echo "  API keys: https://resend.com/api-keys"
+  echo "  API keys: resend.com/api-keys"
   echo ""
 
   read -r -s -p "  Resend API key (re_...): " api_key
@@ -72,12 +110,6 @@ _smtp_configure() {
   read -r -p "  Sender address for rewriting (e.g. noreply@yourdomain.fi): " sender_email
 
   echo ""
-
-  # libsasl2-modules needed for SMTP SASL auth
-  if ! dpkg -l libsasl2-modules 2>/dev/null | grep -q "^ii"; then
-    echo -e "  ${CYAN}→${NC} Installing libsasl2-modules..."
-    apt-get install -y libsasl2-modules -qq
-  fi
 
   # Backup main.cf once
   local cf="/etc/postfix/main.cf"
@@ -123,7 +155,7 @@ _smtp_configure() {
   echo ""
   echo -e "  ${GREEN}✓ Done${NC}"
   echo ""
-  echo "  Use option 2 to send a test email."
+  echo "  Use option 3 to send a test email."
   press_enter
 }
 
