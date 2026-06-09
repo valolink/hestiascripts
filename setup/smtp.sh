@@ -3,6 +3,7 @@
 
 _SASL_PASSWD="/etc/postfix/sasl_passwd"
 _GENERIC_MAP="/etc/postfix/generic"
+_POSTFIX_CF="/etc/postfix/main.cf"
 
 menu_smtp() {
   while true; do
@@ -12,31 +13,35 @@ menu_smtp() {
     echo "$DIV"
 
     # Dependencies
-    _smtp_dep_status "postfix"          "postfix"
-    _smtp_dep_status "libsasl2-modules" "libsasl2-modules"
-    _smtp_dep_status "mailutils"        "mailutils"
+    _smtp_dep_line "postfix"
+    _smtp_dep_line "libsasl2-modules"
+    _smtp_dep_line "mailutils"
 
     # Relay config
     echo ""
-    local relay
-    relay=$(postconf -h relayhost 2>/dev/null)
-    if echo "$relay" | grep -q "smtp.resend.com"; then
-      status_line "SMTP relay" OK "smtp.resend.com:587"
-      if postconf -h smtp_generic_maps 2>/dev/null | grep -q "generic"; then
-        local rewrite_to
-        rewrite_to=$(grep -v '^#' "$_GENERIC_MAP" 2>/dev/null | awk 'NR==1{print $2}')
-        sub_line "  Sender rewrite" "${rewrite_to:-(configured)}"
+    if [ -f "$_POSTFIX_CF" ]; then
+      local relay
+      relay=$(postconf -h relayhost 2>/dev/null)
+      if echo "$relay" | grep -q "smtp.resend.com"; then
+        status_line "SMTP relay" OK "smtp.resend.com:587"
+        if postconf -h smtp_generic_maps 2>/dev/null | grep -q "generic"; then
+          local rewrite_to
+          rewrite_to=$(grep -v '^#' "$_GENERIC_MAP" 2>/dev/null | awk 'NR==1{print $2}')
+          sub_line "  Sender rewrite" "${rewrite_to:-(configured)}"
+        else
+          sub_line "  Sender rewrite" "not configured"
+        fi
+      elif [ -n "$relay" ] && [ "$relay" != "[]" ] && [ "$relay" != "" ]; then
+        status_line "SMTP relay" WARN "relayhost = $relay  (not Resend)"
       else
-        sub_line "  Sender rewrite" "not configured"
+        status_line "SMTP relay" ERR "no relay configured"
       fi
-    elif [ -n "$relay" ] && [ "$relay" != "[]" ] && [ "$relay" != "" ]; then
-      status_line "SMTP relay" WARN "relayhost = $relay  (not Resend)"
     else
-      status_line "SMTP relay" ERR "no relay configured"
+      status_line "SMTP relay" ERR "Postfix not configured  (run option 1)"
     fi
 
     echo ""
-    echo "  1) Install dependencies"
+    echo "  1) Install / fix dependencies"
     echo "  2) Configure Resend relay"
     echo "  3) Send test email"
     echo "  0) Back"
@@ -52,34 +57,86 @@ menu_smtp() {
   done
 }
 
-_smtp_dep_status() {
-  local label="$1" pkg="$2"
-  if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
-    status_line "$label" OK "installed"
+_smtp_dep_line() {
+  local pkg="$1"
+  if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+    status_line "$pkg" ERR "not installed"
+  elif [ "$pkg" = "postfix" ] && [ ! -f "$_POSTFIX_CF" ]; then
+    status_line "$pkg" WARN "installed but not configured"
   else
-    status_line "$label" ERR "not installed"
+    status_line "$pkg" OK "installed"
   fi
 }
 
 _smtp_install_deps() {
   local missing=()
+  local needs_configure=false
+
   for pkg in postfix libsasl2-modules mailutils; do
-    dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" || missing+=("$pkg")
+    if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+      missing+=("$pkg")
+    fi
   done
 
-  if [ ${#missing[@]} -eq 0 ]; then
+  # Postfix installed but no main.cf — needs reconfigure
+  if dpkg -l postfix 2>/dev/null | grep -q "^ii" && [ ! -f "$_POSTFIX_CF" ]; then
+    needs_configure=true
+  fi
+
+  if [ ${#missing[@]} -eq 0 ] && [ "$needs_configure" = false ]; then
     echo ""
     echo "  All dependencies are already installed."
     press_enter; return
   fi
 
-  run_action "Install SMTP dependencies" \
-    "apt-get install -y ${missing[*]}"
+  echo ""
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "  Missing packages: ${missing[*]}"
+  fi
+  if [ "$needs_configure" = true ]; then
+    echo "  Postfix is installed but has no main.cf — will reconfigure."
+    echo "  This runs a non-interactive dpkg-reconfigure to create a basic config."
+  fi
+
+  if ! confirm "Proceed?"; then return; fi
+
+  echo ""
+
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo -e "  ${CYAN}→${NC} apt-get install -y ${missing[*]}"
+    apt-get install -y "${missing[@]}"
+    if [ $? -ne 0 ]; then
+      echo -e "  ${RED}✗ Install failed${NC}"; press_enter; return
+    fi
+  fi
+
+  if [ "$needs_configure" = true ] || { [[ " ${missing[*]} " =~ " postfix " ]] && [ ! -f "$_POSTFIX_CF" ]; }; then
+    echo -e "  ${CYAN}→${NC} Configuring Postfix (non-interactive)..."
+    local fqdn
+    fqdn=$(hostname -f)
+    echo "postfix postfix/mailname string $fqdn" | debconf-set-selections
+    echo "postfix postfix/main_mailer_type string 'Internet Site'" | debconf-set-selections
+    DEBIAN_FRONTEND=noninteractive dpkg-reconfigure postfix
+    if [ ! -f "$_POSTFIX_CF" ]; then
+      echo -e "  ${RED}✗ main.cf still missing after reconfigure — try manually:${NC}"
+      echo "    dpkg-reconfigure postfix"
+      press_enter; return
+    fi
+  fi
+
+  echo ""
+  echo -e "  ${GREEN}✓ Done${NC}"
+  press_enter
 }
 
 _smtp_configure() {
   if ! command -v postconf &>/dev/null; then
     echo "  Postfix is not installed. Use option 1 first."
+    press_enter; return
+  fi
+  if [ ! -f "$_POSTFIX_CF" ]; then
+    echo "  Postfix is installed but not configured (/etc/postfix/main.cf missing)."
+    echo "  Use option 1 to fix this."
     press_enter; return
   fi
   if ! dpkg -l libsasl2-modules 2>/dev/null | grep -q "^ii"; then
@@ -112,9 +169,8 @@ _smtp_configure() {
   echo ""
 
   # Backup main.cf once
-  local cf="/etc/postfix/main.cf"
-  if [ ! -f "${cf}.bak" ]; then
-    cp "$cf" "${cf}.bak"
+  if [ ! -f "${_POSTFIX_CF}.bak" ]; then
+    cp "$_POSTFIX_CF" "${_POSTFIX_CF}.bak"
     echo -e "  ${CYAN}→${NC} Backed up main.cf → main.cf.bak"
   fi
 
@@ -150,7 +206,7 @@ _smtp_configure() {
   fi
 
   echo -e "  ${CYAN}→${NC} Reloading Postfix"
-  systemctl reload postfix
+  systemctl reload postfix 2>/dev/null || systemctl restart postfix
 
   echo ""
   echo -e "  ${GREEN}✓ Done${NC}"
