@@ -9,8 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SCRIPT_DIR
 
 # Source all modules
-for mod in common status wpcli redis fail2ban maldet netdata security \
-           php-fpm opcache mariadb nginx-templates maintenance; do
+for mod in common status wpcli redis fail2ban maldet netdata security smtp \
+           php-fpm opcache mariadb nginx-templates maintenance disk; do
   source "$SCRIPT_DIR/setup/${mod}.sh" || { echo "Failed to load setup/${mod}.sh"; exit 1; }
 done
 
@@ -28,18 +28,20 @@ show_menu() {
   echo "    5) Maldet    (malware scanning)"
   echo "    6) Netdata   (monitoring)"
   echo "    7) Security  (unattended upgrades, swap, SSH)"
+  echo "    8) SMTP relay  (Resend)"
   echo ""
   echo "  Performance"
-  echo "    8) PHP-FPM profiles"
-  echo "    9) OpCache"
-  echo "   10) MariaDB"
+  echo "    9) PHP-FPM profiles"
+  echo "   10) OpCache"
+  echo "   11) MariaDB"
   echo ""
   echo "  Nginx Templates"
-  echo "   11) wp-secure  (security hardening)"
-  echo "   12) wp-rocket  (WP Rocket cache proxy)"
+  echo "   12) wp-secure  (security hardening)"
+  echo "   13) wp-rocket  (WP Rocket cache proxy)"
   echo ""
   echo "  Maintenance"
-  echo "   13) System updates / HestiaCP update / filemanager fix"
+  echo "   14) System updates / HestiaCP update / filemanager fix"
+  echo "   15) Disk usage & cleanup / ncdu"
   echo ""
   echo "    0) Exit"
   echo ""
@@ -60,12 +62,14 @@ while true; do
     5)  menu_maldet ;;
     6)  menu_netdata ;;
     7)  menu_security ;;
-    8)  menu_php_fpm ;;
-    9)  menu_opcache ;;
-    10) menu_mariadb ;;
-    11) _nginx_install_wpsecure ;;
-    12) _nginx_install_wprocket ;;
-    13) menu_maintenance ;;
+    8)  menu_smtp ;;
+    9)  menu_php_fpm ;;
+    10) menu_opcache ;;
+    11) menu_mariadb ;;
+    12) _nginx_install_wpsecure ;;
+    13) _nginx_install_wprocket ;;
+    14) menu_maintenance ;;
+    15) menu_disk ;;
     0)  echo "  Bye!"; exit 0 ;;
     *)  echo "  Invalid option."; sleep 1 ;;
   esac

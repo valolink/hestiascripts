@@ -96,6 +96,18 @@ _status_maldet() {
   fi
 }
 
+_status_smtp() {
+  local relay
+  relay=$(postconf -h relayhost 2>/dev/null)
+  if echo "$relay" | grep -q "smtp.resend.com"; then
+    status_line "SMTP relay" OK "Resend"
+  elif [ -n "$relay" ] && [ "$relay" != "[]" ] && [ "$relay" != "" ]; then
+    status_line "SMTP relay" WARN "$relay"
+  else
+    status_line "SMTP relay" ERR "no relay — outbound mail may not work"
+  fi
+}
+
 _status_netdata() {
   if ! command -v netdata &>/dev/null; then
     status_line "Netdata" ERR "not installed"
@@ -103,6 +115,19 @@ _status_netdata() {
     status_line "Netdata" OK "running  port 19999"
   else
     status_line "Netdata" WARN "installed but not running"
+  fi
+}
+
+_status_disk() {
+  local used_pct info
+  used_pct=$(df / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+  info=$(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
+  if [ "${used_pct:-0}" -ge 90 ]; then
+    status_line "Disk (/)" ERR "$info"
+  elif [ "${used_pct:-0}" -ge 75 ]; then
+    status_line "Disk (/)" WARN "$info"
+  else
+    status_line "Disk (/)" OK "$info"
   fi
 }
 
@@ -231,10 +256,12 @@ print_status() {
   _status_vscripts
 
   section "Core Tools"
+  _status_disk
   _status_wpcli
   _status_redis
   _status_fail2ban
   _status_maldet
+  _status_smtp
   _status_netdata
   _status_swap
   _status_unattended
