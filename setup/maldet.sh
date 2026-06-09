@@ -41,7 +41,7 @@ _maldet_install() {
   run_action "Install Maldet" \
     "cd /usr/local/src && wget -q http://www.rfxn.com/downloads/maldetect-current.tar.gz" \
     "cd /usr/local/src && tar -xzf maldetect-current.tar.gz" \
-    "bash \$(find /usr/local/src -maxdepth 1 -name 'maldetect-[0-9]*' -type d | head -1)/install.sh" \
+    "cd \$(find /usr/local/src -maxdepth 1 -name 'maldetect-[0-9]*' -type d | head -1) && bash install.sh" \
     "rm -rf /usr/local/src/maldetect-* /usr/local/src/maldetect-current.tar.gz"
 }
 
