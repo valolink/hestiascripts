@@ -40,10 +40,15 @@ menu_smtp() {
       status_line "SMTP relay" ERR "Postfix not configured  (run option 1)"
     fi
 
+    # Notification recipients summary
+    echo ""
+    _smtp_recipient_summary
+
     echo ""
     echo "  1) Install / fix dependencies"
     echo "  2) Configure Resend relay"
-    echo "  3) Send test email"
+    echo "  3) Configure notification recipients"
+    echo "  4) Send test email"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
@@ -51,7 +56,8 @@ menu_smtp() {
     case "$choice" in
       1) _smtp_install_deps ;;
       2) _smtp_configure ;;
-      3) _smtp_test ;;
+      3) _smtp_recipients ;;
+      4) _smtp_test ;;
       0) return ;;
     esac
   done
@@ -68,17 +74,138 @@ _smtp_dep_line() {
   fi
 }
 
+_smtp_recipient_summary() {
+  local root_addr maldet_addr f2b_addr uu_addr hestia_addr
+
+  root_addr=$(grep "^root:" /etc/aliases 2>/dev/null | awk '{$1=""; print $0}' | xargs)
+  [ -f /usr/local/maldetect/conf.maldet ] && \
+    maldet_addr=$(grep "^email_addr=" /usr/local/maldetect/conf.maldet | cut -d'"' -f2)
+  [ -f /etc/fail2ban/jail.local ] && \
+    f2b_addr=$(grep "^destemail" /etc/fail2ban/jail.local | awk '{print $3}')
+  [ -f /etc/apt/apt.conf.d/50unattended-upgrades ] && \
+    uu_addr=$(grep -oP '(?<=^Unattended-Upgrade::Mail ")[^"]+' \
+      /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null | head -1)
+  [ -f /usr/local/hestia/data/users/admin/user.conf ] && \
+    hestia_addr=$(grep "^CONTACT=" /usr/local/hestia/data/users/admin/user.conf \
+      | cut -d"'" -f2)
+
+  sub_line "  System/cron (root alias)" "${root_addr:-(not set)}"
+  [ -f /usr/local/maldetect/conf.maldet ]              && sub_line "  Maldet"              "${maldet_addr:-(not set)}"
+  [ -f /etc/fail2ban/jail.local ]                      && sub_line "  Fail2ban"            "${f2b_addr:-(not set)}"
+  [ -f /etc/apt/apt.conf.d/50unattended-upgrades ]     && sub_line "  Unattended upgrades" "${uu_addr:-(not set)}"
+  [ -f /usr/local/hestia/data/users/admin/user.conf ]  && sub_line "  HestiaCP admin"      "${hestia_addr:-(not set)}"
+}
+
+_smtp_recipients() {
+  clear
+  echo ""
+  echo -e "  ${BOLD}Notification Recipients${NC}"
+  echo "$DIV"
+  echo "  Current settings:"
+  echo ""
+  _smtp_recipient_summary
+
+  echo ""
+  read -r -p "  Notification email address: " email
+  [ -z "$email" ] && { echo "  Cancelled."; press_enter; return; }
+
+  # Build list of what will be changed
+  echo ""
+  echo "  Will configure → $email for:"
+  echo "    • System/cron mail  (root alias in /etc/aliases)"
+  [ -f /usr/local/maldetect/conf.maldet ]             && echo "    • Maldet"
+  [ -f /etc/fail2ban/jail.d/wordpress.conf ] || \
+  [ -f /etc/fail2ban/jail.local ]                     && echo "    • Fail2ban  (destemail + action_mwl)"
+  [ -f /etc/apt/apt.conf.d/50unattended-upgrades ]    && echo "    • Unattended upgrades"
+  command -v v-change-user-contact &>/dev/null        && echo "    • HestiaCP admin contact"
+
+  if ! confirm "Apply?"; then return; fi
+
+  echo ""
+
+  # --- System/cron: root alias ---
+  echo -e "  ${CYAN}→${NC} /etc/aliases  (root → $email)"
+  if grep -q "^root:" /etc/aliases 2>/dev/null; then
+    sed -i "s|^root:.*|root:     $email|" /etc/aliases
+  else
+    echo "root:     $email" >> /etc/aliases
+  fi
+  newaliases
+
+  # --- Maldet ---
+  if [ -f /usr/local/maldetect/conf.maldet ]; then
+    echo -e "  ${CYAN}→${NC} Maldet"
+    sed -i 's/^email_alert=.*/email_alert="1"/' /usr/local/maldetect/conf.maldet
+    sed -i "s|^email_addr=.*|email_addr=\"$email\"|" /usr/local/maldetect/conf.maldet
+  fi
+
+  # --- Fail2ban ---
+  local f2b_conf="/etc/fail2ban/jail.local"
+  if [ -f "$f2b_conf" ] || command -v fail2ban-client &>/dev/null; then
+    echo -e "  ${CYAN}→${NC} Fail2ban"
+    if [ ! -f "$f2b_conf" ]; then
+      printf '[DEFAULT]\ndestemail = %s\naction = %%(action_mwl)s\n' "$email" > "$f2b_conf"
+    else
+      # destemail
+      if grep -q "^destemail" "$f2b_conf"; then
+        sed -i "s|^destemail.*|destemail = $email|" "$f2b_conf"
+      else
+        _ini_insert "$f2b_conf" "DEFAULT" "destemail = $email"
+      fi
+      # action — set to action_mwl (ban + email with whois + log)
+      if grep -q "^action\b" "$f2b_conf"; then
+        sed -i 's|^action\b.*|action = %(action_mwl)s|' "$f2b_conf"
+      else
+        _ini_insert "$f2b_conf" "DEFAULT" "action = %(action_mwl)s"
+      fi
+    fi
+    systemctl is-active --quiet fail2ban && systemctl reload fail2ban
+  fi
+
+  # --- Unattended upgrades ---
+  if [ -f /etc/apt/apt.conf.d/50unattended-upgrades ]; then
+    echo -e "  ${CYAN}→${NC} Unattended upgrades"
+    local uu_file="/etc/apt/apt.conf.d/50unattended-upgrades"
+    if grep -q 'Unattended-Upgrade::Mail ' "$uu_file"; then
+      sed -i "s|.*Unattended-Upgrade::Mail \".*\"|Unattended-Upgrade::Mail \"$email\";|" "$uu_file"
+    else
+      echo "Unattended-Upgrade::Mail \"$email\";" >> "$uu_file"
+    fi
+    # Also enable MailReport if not set
+    if ! grep -q '^Unattended-Upgrade::MailReport' "$uu_file"; then
+      echo 'Unattended-Upgrade::MailReport "on-change";' >> "$uu_file"
+    fi
+  fi
+
+  # --- HestiaCP admin contact ---
+  if command -v v-change-user-contact &>/dev/null; then
+    echo -e "  ${CYAN}→${NC} HestiaCP admin contact"
+    v-change-user-contact admin "$email"
+  fi
+
+  echo ""
+  echo -e "  ${GREEN}✓ Done${NC}"
+  press_enter
+}
+
+# Insert a line after a [SECTION] header in an ini-style file
+_ini_insert() {
+  local file="$1" section="$2" line="$3"
+  if grep -q "^\[${section}\]" "$file"; then
+    sed -i "/^\[${section}\]/a ${line}" "$file"
+  else
+    printf '\n[%s]\n%s\n' "$section" "$line" >> "$file"
+  fi
+}
+
 _smtp_install_deps() {
   local missing=()
   local needs_configure=false
 
   for pkg in postfix libsasl2-modules mailutils; do
-    if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
-      missing+=("$pkg")
-    fi
+    dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" || missing+=("$pkg")
   done
 
-  # Postfix installed but no main.cf — needs reconfigure
   if dpkg -l postfix 2>/dev/null | grep -q "^ii" && [ ! -f "$_POSTFIX_CF" ]; then
     needs_configure=true
   fi
@@ -90,13 +217,9 @@ _smtp_install_deps() {
   fi
 
   echo ""
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo "  Missing packages: ${missing[*]}"
-  fi
-  if [ "$needs_configure" = true ]; then
+  [ ${#missing[@]} -gt 0 ] && echo "  Missing packages: ${missing[*]}"
+  [ "$needs_configure" = true ] && \
     echo "  Postfix is installed but has no main.cf — will reconfigure."
-    echo "  This runs a non-interactive dpkg-reconfigure to create a basic config."
-  fi
 
   if ! confirm "Proceed?"; then return; fi
 
@@ -118,8 +241,7 @@ _smtp_install_deps() {
     echo "postfix postfix/main_mailer_type string 'Internet Site'" | debconf-set-selections
     DEBIAN_FRONTEND=noninteractive dpkg-reconfigure postfix
     if [ ! -f "$_POSTFIX_CF" ]; then
-      echo -e "  ${RED}✗ main.cf still missing after reconfigure — try manually:${NC}"
-      echo "    dpkg-reconfigure postfix"
+      echo -e "  ${RED}✗ main.cf still missing — try manually: dpkg-reconfigure postfix${NC}"
       press_enter; return
     fi
   fi
@@ -135,8 +257,7 @@ _smtp_configure() {
     press_enter; return
   fi
   if [ ! -f "$_POSTFIX_CF" ]; then
-    echo "  Postfix is installed but not configured (/etc/postfix/main.cf missing)."
-    echo "  Use option 1 to fix this."
+    echo "  Postfix has no main.cf. Use option 1 first."
     press_enter; return
   fi
   if ! dpkg -l libsasl2-modules 2>/dev/null | grep -q "^ii"; then
@@ -168,19 +289,16 @@ _smtp_configure() {
 
   echo ""
 
-  # Backup main.cf once
   if [ ! -f "${_POSTFIX_CF}.bak" ]; then
     cp "$_POSTFIX_CF" "${_POSTFIX_CF}.bak"
     echo -e "  ${CYAN}→${NC} Backed up main.cf → main.cf.bak"
   fi
 
-  # SASL credentials
   echo -e "  ${CYAN}→${NC} Writing $_SASL_PASSWD"
   printf '[smtp.resend.com]:587 resend:%s\n' "$api_key" > "$_SASL_PASSWD"
   postmap "$_SASL_PASSWD"
   chmod 600 "$_SASL_PASSWD" "${_SASL_PASSWD}.db"
 
-  # Postfix relay settings
   echo -e "  ${CYAN}→${NC} Updating Postfix relay settings"
   postconf -e \
     "relayhost = [smtp.resend.com]:587" \
@@ -190,7 +308,6 @@ _smtp_configure() {
     "smtp_tls_security_level = encrypt" \
     "smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt"
 
-  # Sender rewriting
   if [ -n "$sender_email" ]; then
     echo -e "  ${CYAN}→${NC} Setting up sender rewriting → $sender_email"
     local fqdn
@@ -211,7 +328,7 @@ _smtp_configure() {
   echo ""
   echo -e "  ${GREEN}✓ Done${NC}"
   echo ""
-  echo "  Use option 3 to send a test email."
+  echo "  Use option 4 to send a test email."
   press_enter
 }
 
