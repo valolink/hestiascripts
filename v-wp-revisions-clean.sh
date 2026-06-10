@@ -199,4 +199,9 @@ _wp cache flush --quiet
 echo ""
 echo "  Done. $deleted revisions deleted."
 echo ""
-echo "  Tip: run 'wp db optimize' to reclaim DB space freed by deletions."
+read -r -p "  Optimize database now to reclaim freed space? [y/N] " _opt
+if [[ "$_opt" =~ ^[Yy]$ ]]; then
+  echo "  Optimizing..."
+  _wp db optimize
+  echo "  Done."
+fi
