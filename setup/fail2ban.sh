@@ -61,6 +61,7 @@ _fail2ban_wp_jail() {
 
   cat > "$_F2B_FILTER" <<'EOF'
 [Definition]
+allowipv6 = auto
 failregex = ^<HOST> .* "POST .*wp-login\.php
 ignoreregex =
 EOF
@@ -70,18 +71,43 @@ EOF
 enabled  = true
 filter   = wordpress
 logpath  = /var/log/nginx/domains/*.log
+backend  = polling
 maxretry = 5
 findtime = 60
 bantime  = 3600
 EOF
 
   echo ""
-  echo -e "  ${CYAN}→${NC} systemctl reload fail2ban"
-  systemctl reload fail2ban
-  if [ $? -eq 0 ]; then
+
+  # fail2ban refuses to reload if the glob matches no files at all
+  local log_dir="/var/log/nginx/domains"
+  if ! ls "$log_dir"/*.log &>/dev/null; then
+    echo -e "  ${YELLOW}⚠${NC}  Config written but not loaded yet."
+    echo "  No nginx domain log files found in $log_dir/"
+    echo "  fail2ban requires at least one matching log file to exist."
+    echo ""
+    echo "  The WordPress jail will become active automatically the next"
+    echo "  time fail2ban restarts (e.g. after a server reboot), or you"
+    echo "  can reload it manually once domains have been added:"
+    echo "    fail2ban-client reload"
+    press_enter; return
+  fi
+
+  echo -e "  ${CYAN}→${NC} Testing config"
+  local test_out
+  test_out=$(fail2ban-client -t 2>&1)
+  if [ $? -ne 0 ]; then
+    echo -e "  ${RED}✗ Config error — not reloading:${NC}"
+    echo "$test_out" | sed 's/^/     /'
+    press_enter; return
+  fi
+
+  echo -e "  ${CYAN}→${NC} Reloading Fail2ban"
+  fail2ban-client reload &>/dev/null
+  if fail2ban-client status wordpress &>/dev/null; then
     echo -e "  ${GREEN}✓ WordPress jail active${NC}"
   else
-    echo -e "  ${RED}✗ fail2ban reload failed — check: fail2ban-client -t${NC}"
+    echo -e "  ${RED}✗ Jail not active after reload — check: fail2ban-client status${NC}"
   fi
   press_enter
 }
