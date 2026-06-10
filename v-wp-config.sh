@@ -174,8 +174,13 @@ _show_dashboard() {
   printf '  %.0s─' {1..54}; echo ""
 }
 
+# Result is returned via $_PROMPT_RESULT to avoid command substitution
+# capturing display output along with the value.
+_PROMPT_RESULT=""
+
 _prompt_value() {
   local name="$1" type="$2" rec="$3"
+  _PROMPT_RESULT=""
   local current; current=$(_cfg_get "$name")
 
   echo ""
@@ -184,6 +189,7 @@ _prompt_value() {
   [ "$rec" != "-" ] && echo "  Recommended: $rec"
   echo ""
 
+  local _v _c
   case "$type" in
     bool)
       echo "  1) true"
@@ -192,20 +198,20 @@ _prompt_value() {
       echo ""
       read -r -p "  Choice: " _c
       case "$_c" in
-        1) echo "true" ;;
-        2) echo "false" ;;
-        *) echo ""; return 1 ;;
+        1) _PROMPT_RESULT="true" ;;
+        2) _PROMPT_RESULT="false" ;;
+        *) return 1 ;;
       esac
       ;;
     int)
       read -r -p "  Enter integer value: " _v
       [[ "$_v" =~ ^[0-9]+$ ]] || { echo "  Invalid — must be a whole number."; return 1; }
-      echo "$_v"
+      _PROMPT_RESULT="$_v"
       ;;
     intfalse)
       read -r -p "  Enter integer (or 'false' to disable): " _v
       if [[ "$_v" =~ ^[0-9]+$ ]] || [ "$_v" = "false" ]; then
-        echo "$_v"
+        _PROMPT_RESULT="$_v"
       else
         echo "  Invalid — enter a number or 'false'."; return 1
       fi
@@ -213,7 +219,7 @@ _prompt_value() {
     str)
       read -r -p "  Enter value: " _v
       [ -z "$_v" ] && { echo "  Cancelled."; return 1; }
-      echo "$_v"
+      _PROMPT_RESULT="$_v"
       ;;
     core_update)
       echo "  1) minor  — security and minor releases only  (recommended)"
@@ -223,15 +229,15 @@ _prompt_value() {
       echo ""
       read -r -p "  Choice: " _c
       case "$_c" in
-        1) echo "minor" ;;
-        2) echo "true" ;;
-        3) echo "false" ;;
-        *) echo ""; return 1 ;;
+        1) _PROMPT_RESULT="minor" ;;
+        2) _PROMPT_RESULT="true" ;;
+        3) _PROMPT_RESULT="false" ;;
+        *) return 1 ;;
       esac
       ;;
     *)
       read -r -p "  Enter value: " _v
-      echo "$_v"
+      _PROMPT_RESULT="$_v"
       ;;
   esac
 }
@@ -272,11 +278,11 @@ while true; do
   type=$(_def_field "$name" type)
   rec=$(_def_field "$name" rec)
 
-  value=$(_prompt_value "$name" "$type" "$rec")
+  _prompt_value "$name" "$type" "$rec"
   [ $? -ne 0 ] && { sleep 1; continue; }
-  [ -z "$value" ] && continue
+  [ -z "$_PROMPT_RESULT" ] && continue
 
   echo ""
-  _cfg_set "$name" "$value" "$type"
+  _cfg_set "$name" "$_PROMPT_RESULT" "$type"
   sleep 1
 done
