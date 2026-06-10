@@ -1,5 +1,5 @@
 #!/bin/bash
-# Status dashboard — sourced by setup.sh
+# Status dashboard — sourced by run.sh
 
 print_status() {
   clear

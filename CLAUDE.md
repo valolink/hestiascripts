@@ -12,9 +12,9 @@ WordPress automation and streaming toolkit for **HestiaCP** (Hestia Control Pane
 ## Repo structure
 
 ```
-setup.sh               # Server setup / maintenance entry point (run as root)
-install-scripts.sh     # Deploys v-scripts + hestia-streamer (also callable from setup.sh)
-setup/                 # Modules sourced by setup.sh
+run.sh               # Server setup / maintenance entry point (run as root)
+install-scripts.sh     # Deploys v-scripts + hestia-streamer (also callable from run.sh)
+setup/                 # Modules sourced by run.sh
   common.sh            # Shared utilities (colors, status_line, confirm, run_action, helpers)
   status.sh            # Status dashboard printed on every launch
   wpcli.sh / redis.sh / fail2ban.sh / maldet.sh / netdata.sh / security.sh
@@ -34,7 +34,7 @@ templates/
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o hestia-streamer main.go
 
 # Server setup / maintenance (interactive menu)
-sudo bash setup.sh
+sudo bash run.sh
 
 # Deploy v-scripts + streamer only
 sudo bash install-scripts.sh

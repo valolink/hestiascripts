@@ -1,5 +1,5 @@
 #!/bin/bash
-# Shared utilities — sourced by all setup modules and hestia-setup.sh
+# Shared utilities — sourced by all setup modules and run.sh
 
 # Colors (only when stdout is a terminal)
 if [ -t 1 ]; then

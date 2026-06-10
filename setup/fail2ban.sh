@@ -50,6 +50,14 @@ menu_fail2ban() {
   done
 }
 
+# Upgrade existing filter to include xmlrpc.php if it was installed before that was added.
+_fail2ban_patch_filter() {
+  [ -f "$_F2B_FILTER" ] || return 0
+  grep -q "xmlrpc" "$_F2B_FILTER" && return 0
+  sed -i '/wp-login\\\.php/a\            ^<HOST> .* "POST .*xmlrpc\\.php' "$_F2B_FILTER"
+  echo -e "  ${CYAN}→${NC} Patched WordPress filter to also cover xmlrpc.php"
+}
+
 _fail2ban_restart() {
   if ! command -v fail2ban-client &>/dev/null; then
     echo "  Fail2ban is not installed."
@@ -57,6 +65,7 @@ _fail2ban_restart() {
   fi
 
   echo ""
+  _fail2ban_patch_filter
 
   if ! _fail2ban_fix_config; then
     press_enter; return
@@ -136,7 +145,7 @@ _fail2ban_wp_jail() {
 
   echo ""
   echo "  This will create:"
-  echo "    $_F2B_FILTER  — matches POST requests to wp-login.php in nginx logs"
+  echo "    $_F2B_FILTER  — matches POST requests to wp-login.php and xmlrpc.php in nginx logs"
   echo "    $_F2B_JAIL    — 10 attempts in 60s = 1h ban, watches /var/log/nginx/domains/*.log"
   echo ""
 
@@ -151,6 +160,7 @@ _fail2ban_wp_jail() {
 [Definition]
 allowipv6 = auto
 failregex = ^<HOST> .* "POST .*wp-login\.php
+            ^<HOST> .* "POST .*xmlrpc\.php
 ignoreregex =
 EOF
 
