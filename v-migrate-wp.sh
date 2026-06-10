@@ -212,6 +212,13 @@ find "$WEB_DIR" -type f -exec chmod 644 {} \;
 chmod 640 "$WEB_DIR/wp-config.php" 2>/dev/null
 # Uploads must stay writable by PHP-FPM (runs as WEB_USER, so 755 is enough)
 find "$WEB_DIR/wp-content/uploads" -type d -exec chmod 755 {} \; 2>/dev/null
+
+# Remove stale auto_prepend_file from .user.ini (Wordfence WAF and others write
+# an absolute path here that points to the old server and fatals on every request)
+if [ -f "$WEB_DIR/.user.ini" ] && grep -q "auto_prepend_file" "$WEB_DIR/.user.ini"; then
+  echo "  Removing stale auto_prepend_file from .user.ini..."
+  sed -i '/auto_prepend_file/d' "$WEB_DIR/.user.ini"
+fi
 echo "  Done."
 
 # --- Step 2: Create database ---

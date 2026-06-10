@@ -133,8 +133,8 @@ if [ "$TEARDOWN" = true ]; then
   # Unmount uploads before deleting files
   if mountpoint -q "$STAGING_UPLOADS" 2>/dev/null; then
     echo "Unmounting read-only uploads..."
-    umount "$STAGING_UPLOADS"
-    check_status "Failed to unmount $STAGING_UPLOADS — run manually: umount $STAGING_UPLOADS"
+    umount -l "$STAGING_UPLOADS"
+    check_status "Failed to unmount $STAGING_UPLOADS — run manually: umount -l $STAGING_UPLOADS"
   fi
 
   # Read DB name before domain deletion removes the files
@@ -380,7 +380,7 @@ if v-list-web-domain "$DEST_USER" "$NEW_WEB_DOMAIN" &>/dev/null; then
   # Must unmount before we can delete or overwrite files in the uploads dir
   if mountpoint -q "$NEW_UPLOADS" 2>/dev/null; then
     echo "      Unmounting existing read-only uploads..."
-    umount "$NEW_UPLOADS"
+    umount -l "$NEW_UPLOADS"
     check_status "Failed to unmount $NEW_UPLOADS."
   fi
 
