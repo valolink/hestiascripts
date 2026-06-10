@@ -14,43 +14,8 @@ for mod in common status wpcli redis fail2ban maldet netdata security smtp \
   source "$SCRIPT_DIR/setup/${mod}.sh" || { echo "Failed to load setup/${mod}.sh"; exit 1; }
 done
 
-show_menu() {
-  echo ""
-  echo -e "  ${BOLD}What would you like to do?${NC}"
-  echo ""
-  echo "  Deploy"
-  echo "    1) Deploy v-scripts & hestia-streamer"
-  echo ""
-  echo "  Install & Configure"
-  echo "    2) WP-CLI"
-  echo "    3) Redis"
-  echo "    4) Fail2ban  (WP brute-force protection)"
-  echo "    5) Maldet    (malware scanning)"
-  echo "    6) Netdata   (monitoring)"
-  echo "    7) Security  (unattended upgrades, swap, SSH)"
-  echo "    8) SMTP relay  (Resend)"
-  echo ""
-  echo "  Performance"
-  echo "    9) PHP-FPM profiles"
-  echo "   10) OpCache"
-  echo "   11) MariaDB"
-  echo ""
-  echo "  Nginx Templates"
-  echo "   12) wp-secure  (security hardening)"
-  echo "   13) wp-rocket  (WP Rocket cache proxy)"
-  echo ""
-  echo "  Maintenance"
-  echo "   14) System updates / HestiaCP update / filemanager fix"
-  echo "   15) Disk usage & cleanup / ncdu"
-  echo ""
-  echo "    0) Exit"
-  echo ""
-  echo "$DIV"
-}
-
 while true; do
   print_status
-  show_menu
   read -r -p "  Select: " choice
   echo ""
 

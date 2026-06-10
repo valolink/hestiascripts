@@ -29,6 +29,18 @@ sub_line() {
   printf "  %-28s     %s\n" "$1" "$2"
 }
 
+# Numbered menu line with inline status: menu_status_line NUM LABEL LEVEL DETAIL
+menu_status_line() {
+  local num="$1" label="$2" level="$3" detail="$4" sym
+  case "$level" in
+    OK)   sym="✅ " ;;
+    WARN) sym="⚠️  " ;;
+    ERR)  sym="❌ " ;;
+    *)    sym="    " ;;
+  esac
+  printf "  %2s) %-22s %s%s\n" "$num" "$label" "$sym" "$detail"
+}
+
 section() {
   echo ""
   echo -e "  ${BOLD}[ $1 ]${NC}"

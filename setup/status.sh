@@ -1,282 +1,229 @@
 #!/bin/bash
 # Status dashboard — sourced by hestia-setup.sh
 
-_status_streamer() {
-  if systemctl is-active --quiet hestia-streamer 2>/dev/null; then
-    status_line "Streamer" OK "running  port 8091"
-  else
-    status_line "Streamer" ERR "not running — choose option 1 to deploy"
-  fi
-}
-
-_status_vscripts() {
-  local count=0
-  while IFS= read -r link; do
-    local target
-    target=$(readlink -f "$link" 2>/dev/null)
-    [[ "$target" == "$SCRIPT_DIR"* ]] && ((count++))
-  done < <(find /usr/local/hestia/bin/ -maxdepth 1 -name "v-*" -type l 2>/dev/null)
-  if [ "$count" -gt 0 ]; then
-    status_line "v-scripts" OK "$count linked"
-  else
-    status_line "v-scripts" ERR "none linked — choose option 1 to deploy"
-  fi
-}
-
-_status_wpcli() {
-  if command -v wp &>/dev/null; then
-    local ver
-    ver=$(wp --version --allow-root 2>/dev/null | awk '{print $2}')
-    status_line "WP-CLI" OK "$ver"
-  else
-    status_line "WP-CLI" ERR "not installed"
-  fi
-}
-
-_status_redis() {
-  if ! command -v redis-server &>/dev/null; then
-    status_line "Redis" ERR "not installed"
-    return
-  fi
-  if ! systemctl is-active --quiet redis-server 2>/dev/null; then
-    status_line "Redis" WARN "installed but not running"
-    return
-  fi
-
-  local maxmem maxmem_h policy
-  maxmem=$(redis-cli config get maxmemory 2>/dev/null | tail -1)
-  policy=$(redis-cli config get maxmemory-policy 2>/dev/null | tail -1)
-
-  if [ "${maxmem:-0}" -gt 0 ] 2>/dev/null; then
-    maxmem_h=$(bytes_to_human "$maxmem")
-    status_line "Redis" OK "running  ${maxmem_h}  ${policy}"
-  else
-    status_line "Redis" WARN "running — maxmemory not set"
-  fi
-
-  # PHP redis extensions per installed version
-  local ext_parts=""
-  for ver in $(get_php_versions); do
-    if php${ver} -r "echo extension_loaded('redis') ? 1 : 0;" 2>/dev/null | grep -q "^1$"; then
-      ext_parts+="${ver} ✅  "
-    else
-      ext_parts+="${ver} ❌  "
-    fi
-  done
-  [ -n "$ext_parts" ] && sub_line "  PHP redis ext" "$ext_parts"
-}
-
-_status_fail2ban() {
-  if ! command -v fail2ban-client &>/dev/null; then
-    status_line "Fail2ban" ERR "not installed"
-    return
-  fi
-  if ! systemctl is-active --quiet fail2ban 2>/dev/null; then
-    status_line "Fail2ban" WARN "installed but not running"
-    return
-  fi
-  if fail2ban-client status wordpress &>/dev/null; then
-    status_line "Fail2ban" OK "running  WP jail active"
-  else
-    status_line "Fail2ban" WARN "running — no WordPress jail"
-  fi
-}
-
-_status_maldet() {
-  if [ ! -f /usr/local/maldetect/maldet ]; then
-    status_line "Maldet" ERR "not installed"
-    return
-  fi
-  local last_scan
-  last_scan=$(grep "scan completed" /usr/local/maldetect/logs/event_log 2>/dev/null | tail -1 | awk '{print $1, $2}')
-  if [ -n "$last_scan" ]; then
-    status_line "Maldet" OK "last scan: $last_scan"
-  else
-    status_line "Maldet" WARN "installed — no scan on record"
-  fi
-}
-
-_status_smtp() {
-  local relay
-  relay=$(postconf -h relayhost 2>/dev/null)
-  if echo "$relay" | grep -q "smtp.resend.com"; then
-    status_line "SMTP relay" OK "Resend"
-  elif [ -n "$relay" ] && [ "$relay" != "[]" ] && [ "$relay" != "" ]; then
-    status_line "SMTP relay" WARN "$relay"
-  else
-    status_line "SMTP relay" ERR "no relay — outbound mail may not work"
-  fi
-}
-
-_status_netdata() {
-  if ! command -v netdata &>/dev/null; then
-    status_line "Netdata" ERR "not installed"
-  elif systemctl is-active --quiet netdata 2>/dev/null; then
-    status_line "Netdata" OK "running  port 19999"
-  else
-    status_line "Netdata" WARN "installed but not running"
-  fi
-}
-
-_status_disk() {
-  local used_pct info
-  used_pct=$(df / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
-  info=$(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
-  if [ "${used_pct:-0}" -ge 90 ]; then
-    status_line "Disk (/)" ERR "$info"
-  elif [ "${used_pct:-0}" -ge 75 ]; then
-    status_line "Disk (/)" WARN "$info"
-  else
-    status_line "Disk (/)" OK "$info"
-  fi
-}
-
-_status_swap() {
-  local swap_info
-  swap_info=$(swapon --show --noheadings 2>/dev/null | awk '{print $3}')
-  if [ -n "$swap_info" ]; then
-    status_line "Swap" OK "$swap_info"
-  else
-    local ram_mb suggested
-    ram_mb=$(get_ram_mb)
-    suggested=$([ "$ram_mb" -le 4096 ] && echo "2G" || echo "1G")
-    status_line "Swap" ERR "none  (recommended: ${suggested})"
-  fi
-}
-
-_status_unattended() {
-  if dpkg -l unattended-upgrades 2>/dev/null | grep -q "^ii" && \
-     systemctl is-active --quiet unattended-upgrades 2>/dev/null; then
-    status_line "Unattended upgrades" OK "enabled"
-  elif dpkg -l unattended-upgrades 2>/dev/null | grep -q "^ii"; then
-    status_line "Unattended upgrades" WARN "installed but service not active"
-  else
-    status_line "Unattended upgrades" ERR "not set up"
-  fi
-}
-
-_status_opcache() {
-  local any=false
-  for ver in $(get_php_versions); do
-    local ini="/etc/php/${ver}/fpm/php.ini"
-    [ -f "$ini" ] || continue
-    any=true
-    local enabled mem
-    enabled=$(grep -oP "(?<=opcache\.enable=)\d" "$ini" 2>/dev/null | head -1)
-    mem=$(grep -oP "(?<=opcache\.memory_consumption=)\d+" "$ini" 2>/dev/null | head -1)
-    if [ "${enabled:-0}" = "1" ] && [ "${mem:-0}" -ge 256 ] 2>/dev/null; then
-      status_line "  OpCache ${ver}" OK "${mem}MB"
-    elif [ "${enabled:-0}" = "1" ]; then
-      status_line "  OpCache ${ver}" WARN "enabled but memory low (${mem:-?}MB)"
-    else
-      status_line "  OpCache ${ver}" ERR "disabled"
-    fi
-  done
-  $any || status_line "OpCache" ERR "no PHP versions found"
-}
-
-_status_mariadb() {
-  local cnf="/etc/mysql/mariadb.conf.d/50-server.cnf"
-  if [ ! -f "$cnf" ]; then
-    status_line "MariaDB buffer" ERR "config file not found"
-    return
-  fi
-  local val
-  val=$(grep -oP "(?<=innodb_buffer_pool_size\s=\s)\S+" "$cnf" 2>/dev/null | head -1)
-  if [ -n "$val" ]; then
-    local ram_mb recommended
-    ram_mb=$(get_ram_mb)
-    recommended=$(echo "$ram_mb * 0.5 / 1024" | awk '{printf "%dG", $1}')
-    status_line "MariaDB buffer" OK "${val}  (RAM: $((ram_mb/1024))G, recommended ~${recommended})"
-  else
-    status_line "MariaDB buffer" WARN "innodb_buffer_pool_size not set"
-  fi
-}
-
-_status_fpm_templates() {
-  local tpl_dir="/usr/local/hestia/data/templates/web/php-fpm"
-  local profiles=("production" "standard" "staging" "small")
-  for ver in $(get_php_versions); do
-    local ver_tag="${ver//./_}"
-    local found=()
-    local missing=()
-    for p in "${profiles[@]}"; do
-      if [ -f "$tpl_dir/${p}-PHP-${ver_tag}.tpl" ]; then
-        found+=("$p")
-      else
-        missing+=("$p")
-      fi
-    done
-    local detail=""
-    for p in "${found[@]}";   do detail+="${p} ✅  "; done
-    for p in "${missing[@]}"; do detail+="${p} ❌  "; done
-    if [ ${#found[@]} -gt 0 ]; then
-      status_line "  PHP-FPM ${ver}" OK "$detail"
-    else
-      status_line "  PHP-FPM ${ver}" ERR "no profiles installed"
-    fi
-  done
-}
-
-_status_nginx_templates() {
-  local tpl_dir="/usr/local/hestia/data/templates/web/nginx/php-fpm"
-  for name in "wp-secure" "wp-rocket"; do
-    if [ -f "$tpl_dir/${name}.tpl" ] && [ -f "$tpl_dir/${name}.stpl" ]; then
-      status_line "  nginx ${name}" OK "installed"
-    else
-      status_line "  nginx ${name}" ERR "not installed"
-    fi
-  done
-}
-
-_status_hestia() {
-  local installed latest
-  installed=$(grep -oP "(?<=VERSION=')[^']+" /usr/local/hestia/conf/hestia.conf 2>/dev/null | head -1)
-  if [ -z "$installed" ]; then
-    status_line "HestiaCP" ERR "could not determine version"
-    return
-  fi
-  latest=$(curl -sf --max-time 4 "https://api.github.com/repos/hestiacp/hestiacp/releases/latest" \
-    | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-  if [ -n "$latest" ] && [ "$installed" != "$latest" ]; then
-    status_line "HestiaCP" WARN "installed: ${installed}  latest: ${latest}"
-  else
-    status_line "HestiaCP" OK "${installed}${latest:+  (up to date)}"
-  fi
-}
-
 print_status() {
   clear
   echo ""
   echo -e "  ${BOLD}=== HestiaCP Server Setup — $(hostname) ===${NC}"
   echo ""
 
-  section "Deployed"
-  _status_streamer
-  _status_vscripts
+  # --- Install & Configure ---
+  section "Install & Configure"
 
-  section "Core Tools"
-  _status_disk
-  _status_wpcli
-  _status_redis
-  _status_fail2ban
-  _status_maldet
-  _status_smtp
-  _status_netdata
-  _status_swap
-  _status_unattended
+  # 1) Deploy
+  if systemctl is-active --quiet hestia-streamer 2>/dev/null; then
+    local vcount=0
+    while IFS= read -r link; do
+      local target; target=$(readlink -f "$link" 2>/dev/null)
+      [[ "$target" == "$SCRIPT_DIR"* ]] && ((vcount++))
+    done < <(find /usr/local/hestia/bin/ -maxdepth 1 -name "v-*" -type l 2>/dev/null)
+    menu_status_line 1 "Deploy" OK "streamer running, ${vcount} v-scripts"
+  else
+    menu_status_line 1 "Deploy" ERR "streamer not running"
+  fi
 
+  # 2) WP-CLI
+  if command -v wp &>/dev/null; then
+    local wpver; wpver=$(wp --version --allow-root 2>/dev/null | awk '{print $2}')
+    menu_status_line 2 "WP-CLI" OK "$wpver"
+  else
+    menu_status_line 2 "WP-CLI" ERR "not installed"
+  fi
+
+  # 3) Redis
+  if ! command -v redis-server &>/dev/null; then
+    menu_status_line 3 "Redis" ERR "not installed"
+  elif ! systemctl is-active --quiet redis-server 2>/dev/null; then
+    menu_status_line 3 "Redis" WARN "installed but not running"
+  else
+    local rmaxmem rpolicy rmaxmem_h
+    rmaxmem=$(redis-cli config get maxmemory 2>/dev/null | tail -1)
+    rpolicy=$(redis-cli config get maxmemory-policy 2>/dev/null | tail -1)
+    if [ "${rmaxmem:-0}" -gt 0 ] 2>/dev/null; then
+      rmaxmem_h=$(bytes_to_human "$rmaxmem")
+      menu_status_line 3 "Redis" OK "running  ${rmaxmem_h}  ${rpolicy}"
+    else
+      menu_status_line 3 "Redis" WARN "running — maxmemory not set"
+    fi
+    local ext_parts=""
+    for ver in $(get_php_versions); do
+      if php${ver} -r "echo extension_loaded('redis') ? 1 : 0;" 2>/dev/null | grep -q "^1$"; then
+        ext_parts+="${ver} ✅  "
+      else
+        ext_parts+="${ver} ❌  "
+      fi
+    done
+    [ -n "$ext_parts" ] && sub_line "     PHP redis ext" "$ext_parts"
+  fi
+
+  # 4) Fail2ban
+  if ! command -v fail2ban-client &>/dev/null; then
+    menu_status_line 4 "Fail2ban" ERR "not installed"
+  elif ! systemctl is-active --quiet fail2ban 2>/dev/null; then
+    menu_status_line 4 "Fail2ban" WARN "installed but not running"
+  elif fail2ban-client status wordpress &>/dev/null; then
+    menu_status_line 4 "Fail2ban" OK "running  WP jail active"
+  else
+    menu_status_line 4 "Fail2ban" WARN "running — no WordPress jail"
+  fi
+
+  # 5) Maldet
+  if [ ! -f /usr/local/maldetect/maldet ]; then
+    menu_status_line 5 "Maldet" ERR "not installed"
+  else
+    local last_scan
+    last_scan=$(grep "scan completed" /usr/local/maldetect/logs/event_log 2>/dev/null | tail -1 | awk '{print $1, $2}')
+    if [ -n "$last_scan" ]; then
+      menu_status_line 5 "Maldet" OK "last scan: $last_scan"
+    else
+      menu_status_line 5 "Maldet" WARN "installed — no scan on record"
+    fi
+  fi
+
+  # 6) Netdata
+  if ! command -v netdata &>/dev/null; then
+    menu_status_line 6 "Netdata" ERR "not installed"
+  elif systemctl is-active --quiet netdata 2>/dev/null; then
+    menu_status_line 6 "Netdata" OK "running  port 19999"
+  else
+    menu_status_line 6 "Netdata" WARN "installed but not running"
+  fi
+
+  # 7) Security (swap + SSH + unattended upgrades summary)
+  local ssh_pw; ssh_pw=$(grep "^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+  local swap_ok; swap_ok=$(swapon --show --noheadings 2>/dev/null | awk '{print $3}')
+  local uu_ok; uu_ok=$(dpkg -l unattended-upgrades 2>/dev/null | grep -c "^ii")
+  local sec_issues=0
+  [ -z "$swap_ok" ] && ((sec_issues++))
+  [ "$ssh_pw" != "no" ] && ((sec_issues++))
+  [ "$uu_ok" -eq 0 ] && ((sec_issues++))
+  if [ "$sec_issues" -eq 0 ]; then
+    menu_status_line 7 "Security" OK "swap ✓  SSH key-only ✓  auto-updates ✓"
+  elif [ "$sec_issues" -eq 3 ]; then
+    menu_status_line 7 "Security" ERR "swap ✗  SSH pw ✗  auto-updates ✗"
+  else
+    local sec_detail=""
+    [ -n "$swap_ok" ] && sec_detail+="swap ✓  " || sec_detail+="swap ✗  "
+    [ "$ssh_pw" = "no" ] && sec_detail+="SSH key-only ✓  " || sec_detail+="SSH pw ⚠  "
+    [ "$uu_ok" -gt 0 ] && sec_detail+="auto-updates ✓" || sec_detail+="auto-updates ✗"
+    menu_status_line 7 "Security" WARN "$sec_detail"
+  fi
+
+  # 8) SMTP
+  local relay; relay=$(postconf -h relayhost 2>/dev/null)
+  if echo "$relay" | grep -q "smtp.resend.com"; then
+    menu_status_line 8 "SMTP relay" OK "Resend"
+  elif [ -n "$relay" ] && [ "$relay" != "[]" ] && [ "$relay" != "" ]; then
+    menu_status_line 8 "SMTP relay" WARN "$relay"
+  else
+    menu_status_line 8 "SMTP relay" ERR "no relay configured"
+  fi
+
+  # --- Performance ---
   section "Performance"
-  _status_opcache
-  _status_mariadb
-  _status_fpm_templates
 
+  # 9) PHP-FPM
+  local fpm_ok=0 fpm_err=0
+  local tpl_dir="/usr/local/hestia/data/templates/web/php-fpm"
+  local profiles=("production" "standard" "staging" "small")
+  for ver in $(get_php_versions); do
+    local ver_tag="${ver//./_}"
+    for p in "${profiles[@]}"; do
+      if [ -f "$tpl_dir/${p}-PHP-${ver_tag}.tpl" ]; then ((fpm_ok++)); else ((fpm_err++)); fi
+    done
+  done
+  if [ "$fpm_ok" -eq 0 ] && [ "$fpm_err" -eq 0 ]; then
+    menu_status_line 9 "PHP-FPM profiles" ERR "no PHP versions found"
+  elif [ "$fpm_err" -eq 0 ]; then
+    menu_status_line 9 "PHP-FPM profiles" OK "${fpm_ok} profiles installed"
+  elif [ "$fpm_ok" -eq 0 ]; then
+    menu_status_line 9 "PHP-FPM profiles" ERR "no profiles installed"
+  else
+    menu_status_line 9 "PHP-FPM profiles" WARN "${fpm_ok} installed, ${fpm_err} missing"
+  fi
+
+  # 10) OpCache (per PHP version as sub-lines)
+  local oc_any=false oc_ok=0 oc_err=0
+  for ver in $(get_php_versions); do
+    local ini="/etc/php/${ver}/fpm/php.ini"
+    [ -f "$ini" ] || continue
+    oc_any=true
+    local enabled mem
+    enabled=$(grep -oP "(?<=opcache\.enable=)\d" "$ini" 2>/dev/null | head -1)
+    mem=$(grep -oP "(?<=opcache\.memory_consumption=)\d+" "$ini" 2>/dev/null | head -1)
+    if [ "${enabled:-0}" = "1" ] && [ "${mem:-0}" -ge 256 ] 2>/dev/null; then ((oc_ok++)); else ((oc_err++)); fi
+  done
+  if ! $oc_any; then
+    menu_status_line 10 "OpCache" ERR "no PHP versions found"
+  elif [ "$oc_err" -eq 0 ]; then
+    menu_status_line 10 "OpCache" OK "${oc_ok} versions configured"
+  elif [ "$oc_ok" -eq 0 ]; then
+    menu_status_line 10 "OpCache" ERR "not configured"
+  else
+    menu_status_line 10 "OpCache" WARN "${oc_ok} ok, ${oc_err} need attention"
+  fi
+
+  # 11) MariaDB
+  local cnf="/etc/mysql/mariadb.conf.d/50-server.cnf"
+  if [ ! -f "$cnf" ]; then
+    menu_status_line 11 "MariaDB" ERR "config file not found"
+  else
+    local bval; bval=$(grep -oP "(?<=innodb_buffer_pool_size\s=\s)\S+" "$cnf" 2>/dev/null | head -1)
+    if [ -n "$bval" ]; then
+      menu_status_line 11 "MariaDB" OK "buffer pool: ${bval}"
+    else
+      menu_status_line 11 "MariaDB" WARN "buffer pool not set"
+    fi
+  fi
+
+  # --- Nginx Templates ---
   section "Nginx Templates"
-  _status_nginx_templates
+  local ntpl_dir="/usr/local/hestia/data/templates/web/nginx/php-fpm"
 
-  section "HestiaCP"
-  _status_hestia
+  if [ -f "$ntpl_dir/wp-secure.tpl" ] && [ -f "$ntpl_dir/wp-secure.stpl" ]; then
+    menu_status_line 12 "wp-secure" OK "installed"
+  else
+    menu_status_line 12 "wp-secure" ERR "not installed"
+  fi
 
+  if [ -f "$ntpl_dir/wp-rocket.tpl" ] && [ -f "$ntpl_dir/wp-rocket.stpl" ]; then
+    menu_status_line 13 "wp-rocket" OK "installed"
+  else
+    menu_status_line 13 "wp-rocket" ERR "not installed"
+  fi
+
+  # --- Maintenance ---
+  section "Maintenance"
+
+  # 14) System updates / HestiaCP
+  local installed latest hestia_ok=true
+  installed=$(grep -oP "(?<=VERSION=')[^']+" /usr/local/hestia/conf/hestia.conf 2>/dev/null | head -1)
+  if [ -z "$installed" ]; then
+    menu_status_line 14 "System updates" ERR "HestiaCP version unknown"
+  else
+    latest=$(curl -sf --max-time 4 "https://api.github.com/repos/hestiacp/hestiacp/releases/latest" \
+      | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+    if [ -n "$latest" ] && [ "$installed" != "$latest" ]; then
+      menu_status_line 14 "System updates" WARN "HestiaCP ${installed} → ${latest} available"
+    else
+      menu_status_line 14 "System updates" OK "HestiaCP ${installed}${latest:+  (up to date)}"
+    fi
+  fi
+
+  # 15) Disk
+  local used_pct disk_info
+  used_pct=$(df / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+  disk_info=$(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
+  if [ "${used_pct:-0}" -ge 90 ]; then
+    menu_status_line 15 "Disk" ERR "$disk_info"
+  elif [ "${used_pct:-0}" -ge 75 ]; then
+    menu_status_line 15 "Disk" WARN "$disk_info"
+  else
+    menu_status_line 15 "Disk" OK "$disk_info"
+  fi
+
+  echo ""
+  echo "   0) Exit"
   echo ""
   echo "$DIV"
 }
