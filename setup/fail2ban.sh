@@ -28,15 +28,37 @@ menu_fail2ban() {
 
     echo ""
     echo "  1) Configure WordPress login protection jail"
+    echo "  2) Restart Fail2ban"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
 
     case "$choice" in
       1) _fail2ban_wp_jail ;;
+      2) _fail2ban_restart ;;
       0) return ;;
     esac
   done
+}
+
+_fail2ban_restart() {
+  if ! command -v fail2ban-client &>/dev/null; then
+    echo "  Fail2ban is not installed."
+    press_enter; return
+  fi
+
+  echo ""
+  echo -e "  ${CYAN}→${NC} Restarting Fail2ban..."
+  systemctl restart fail2ban
+
+  if systemctl is-active --quiet fail2ban; then
+    echo -e "  ${GREEN}✓ Fail2ban is running${NC}"
+    echo ""
+    fail2ban-client status 2>/dev/null | grep -E "Number of jail|Jail list" | sed 's/^/     /'
+  else
+    echo -e "  ${RED}✗ Failed to start — check: journalctl -u fail2ban${NC}"
+  fi
+  press_enter
 }
 
 _fail2ban_wp_jail() {
