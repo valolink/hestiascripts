@@ -101,19 +101,13 @@ EOF
 
   echo ""
 
-  # fail2ban refuses to reload if the glob matches no files at all
+  # fail2ban hard-fails if the glob matches zero files, even with backend=polling.
+  # A permanent placeholder satisfies this; it stays empty so no false bans occur.
+  # Real domain log files are picked up by the glob as nginx creates them.
   local log_dir="/var/log/nginx/domains"
-  if ! ls "$log_dir"/*.log &>/dev/null; then
-    echo -e "  ${YELLOW}⚠${NC}  Config written but not loaded yet."
-    echo "  No nginx domain log files found in $log_dir/"
-    echo "  fail2ban requires at least one matching log file to exist."
-    echo ""
-    echo "  The WordPress jail will become active automatically the next"
-    echo "  time fail2ban restarts (e.g. after a server reboot), or you"
-    echo "  can reload it manually once domains have been added:"
-    echo "    fail2ban-client reload"
-    press_enter; return
-  fi
+  mkdir -p "$log_dir"
+  touch "$log_dir/wordpress-watch.log"
+  echo -e "  ${CYAN}→${NC} Ensured $log_dir/wordpress-watch.log exists"
 
   echo -e "  ${CYAN}→${NC} Testing config"
   local test_out
