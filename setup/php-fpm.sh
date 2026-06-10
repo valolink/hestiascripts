@@ -33,6 +33,7 @@ menu_php_fpm() {
     echo ""
     echo "  1) Install a profile for a PHP version"
     echo "  2) Show profile details"
+    echo "  3) Install a PHP version  (MultiPHP)"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
@@ -40,6 +41,7 @@ menu_php_fpm() {
     case "$choice" in
       1) _fpm_install_profile ;;
       2) _fpm_show_profiles ;;
+      3) _php_install_version ;;
       0) return ;;
     esac
   done
@@ -176,5 +178,105 @@ _fpm_show_profiles() {
     grep -v "^$" "$conf" | while IFS= read -r line; do echo "    $line"; done
   done
   echo ""
+  press_enter
+}
+
+# --- MultiPHP install ---
+
+_PHP_ALL_VERSIONS=("7.4" "8.0" "8.1" "8.2" "8.3" "8.4")
+
+_php_version_installed() {
+  [ -d "/etc/php/$1/fpm" ]
+}
+
+_php_ensure_sury_repo() {
+  if grep -rq "sury.org/php\|deb.sury.org" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    return 0
+  fi
+  echo -e "  ${CYAN}→${NC} Adding packages.sury.org/php repository..."
+  local codename; codename=$(lsb_release -sc 2>/dev/null || echo "bookworm")
+  curl -fsSL https://packages.sury.org/php/apt.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg
+  echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${codename} main" \
+    > /etc/apt/sources.list.d/php-sury.list
+  apt update -q
+}
+
+_php_install_version() {
+  clear
+  echo ""
+  echo -e "  ${BOLD}Install PHP Version${NC}"
+  echo "$DIV"
+  echo ""
+
+  local i=1
+  local available=()
+  for ver in "${_PHP_ALL_VERSIONS[@]}"; do
+    if _php_version_installed "$ver"; then
+      printf "  %s) PHP %s  ✅ installed\n" "$i" "$ver"
+    else
+      printf "  %s) PHP %s\n" "$i" "$ver"
+      available+=("$ver")
+    fi
+    ((i++))
+  done
+
+  if [ ${#available[@]} -eq 0 ]; then
+    echo ""
+    echo "  All PHP versions are already installed."
+    press_enter; return
+  fi
+
+  echo ""
+  read -r -p "  Select version number to install: " idx
+  local ver="${_PHP_ALL_VERSIONS[$((idx-1))]}"
+  if [ -z "$ver" ]; then echo "  Invalid."; press_enter; return; fi
+  if _php_version_installed "$ver"; then
+    echo "  PHP $ver is already installed."; press_enter; return
+  fi
+
+  local packages=(
+    php${ver}-fpm php${ver}-cli php${ver}-common
+    php${ver}-mysql php${ver}-xml php${ver}-mbstring
+    php${ver}-curl php${ver}-zip php${ver}-intl
+    php${ver}-gd php${ver}-bcmath php${ver}-soap
+    php${ver}-redis
+  )
+
+  echo ""
+  echo "  Will install PHP ${ver} with WordPress extensions:"
+  echo "  ${packages[*]}"
+  echo "  php-imagick (shared, version-agnostic)"
+  echo ""
+  echo "  HestiaCP will auto-detect the new version after install."
+  echo ""
+
+  if ! confirm "Install PHP ${ver}?"; then return; fi
+
+  echo ""
+  if ! _php_ensure_sury_repo; then
+    echo -e "  ${RED}✗ Failed to add repo${NC}"; press_enter; return
+  fi
+
+  echo -e "  ${CYAN}→${NC} Installing packages..."
+  if ! apt install -y "${packages[@]}"; then
+    echo -e "  ${RED}✗ Install failed — check output above${NC}"; press_enter; return
+  fi
+
+  # imagick is version-agnostic on some distros
+  apt install -y php-imagick 2>/dev/null || true
+
+  echo -e "  ${CYAN}→${NC} Enabling PHP ${ver}-FPM..."
+  systemctl enable php${ver}-fpm
+  systemctl start php${ver}-fpm
+
+  echo -e "  ${CYAN}→${NC} Restarting HestiaCP to pick up new PHP version..."
+  systemctl restart hestia
+
+  echo ""
+  echo -e "  ${GREEN}✓ PHP ${ver} installed${NC}"
+  echo ""
+  echo "  Verify in HestiaCP: Web → Edit domain → Advanced → PHP version"
+  echo "  Then use option 1 to install PHP-FPM profiles for PHP ${ver}."
   press_enter
 }

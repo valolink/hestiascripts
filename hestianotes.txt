@@ -666,3 +666,40 @@ Save the file, then repeat the exact same process for wp-secure.tpl (the HTTP ve
 5.  Save.
 
 Hestia will instantly rebuild the Nginx configurations for that specific domain using your new hardened template. Whenever you migrate a new site to this server, just select the wp-secure template, and the site is locked down from second one.
+
+
+HestiaCP Installation Options
+==============================
+
+Recommended install command (revised):
+  bash hst-install.sh --apache yes --multiphp yes --vsftpd no --bind yes \
+    --mariadb yes --exim yes --dovecot no --clamav no --spamassassin no \
+    --fail2ban yes --webterminal no
+
+Key decisions:
+
+Apache: KEEP IT. Even though the default Nginx template is in nginx/php-fpm/,
+when Apache is installed HestiaCP routes PHP through it (Nginx → Apache → PHP).
+The %backend_lsnr% variable in templates resolves to the Apache socket, not
+PHP-FPM directly. .htaccess IS read and processed — confirmed by a site
+crash caused by an interrupted .htaccess write, which was fixed by restoring
+the file. Removing Apache would break .htaccess-dependent plugins and
+WordPress permalink rewrites.
+
+MultiPHP: ENABLE. Essential for hosting multiple clients on different PHP versions.
+
+Dovecot / ClamAV / SpamAssassin: SKIP unless hosting actual mailboxes (IMAP/POP3).
+Exim is still needed as the local MTA for outbound mail (relayed via Resend).
+
+VSFTPD: SKIP. Use SFTP over SSH instead.
+
+BIND: Optional. Skip if using Cloudflare or another external DNS provider.
+Keep if HestiaCP should act as the nameserver.
+
+Web Terminal: SKIP. Security risk.
+
+Nginx template directory note:
+The templates in /usr/local/hestia/data/templates/web/nginx/php-fpm/ are named
+for Nginx+PHP-FPM but the actual backend depends on what is installed. With
+Apache present, "default" and similar templates proxy to Apache. Only wp-rocket
+and wp-secure (our custom templates) bypass Apache and go direct to PHP-FPM.
