@@ -9,7 +9,7 @@ export PATH=$PATH:/usr/local/hestia/bin
 
 show_help() {
   cat <<'EOF'
-USAGE: v-install-redis-wp [OPTIONS]
+USAGE: v-wp-redis-install [OPTIONS]
 
 Install the Redis Object Cache plugin on a WordPress site, set a unique
 WP_REDIS_PREFIX in wp-config.php, and activate the plugin.
@@ -24,10 +24,10 @@ OPTIONS:
 
 EXAMPLES:
   # Interactive
-  v-install-redis-wp
+  v-wp-redis-install
 
   # Direct (e.g. via hestia-streamer)
-  v-install-redis-wp --user=admin --domain=mysite.fi
+  v-wp-redis-install --user=admin --domain=mysite.fi
 EOF
 }
 

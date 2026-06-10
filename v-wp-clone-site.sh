@@ -17,7 +17,7 @@ check_status() {
 
 show_help() {
   cat <<'EOF'
-USAGE: v-clone-wp [OPTIONS]
+USAGE: v-wp-clone-site [OPTIONS]
 
 Clone a WordPress site to a new domain within HestiaCP.
 Omit any flag to be prompted interactively.
@@ -32,10 +32,10 @@ OPTIONS:
 
 EXAMPLES:
   # Run interactively over SSH
-  v-clone-wp
+  v-wp-clone-site
 
   # Clone in one command (e.g. via hestia-streamer)
-  v-clone-wp --src-user=admin --src-domain=mysite.fi --dest-user=admin --new-domain=newsite.fi
+  v-wp-clone-site --src-user=admin --src-domain=mysite.fi --dest-user=admin --new-domain=newsite.fi
 EOF
 }
 

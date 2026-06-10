@@ -17,7 +17,7 @@ check_status() {
 
 show_help() {
   cat <<'EOF'
-USAGE: v-create-wp-staging [OPTIONS]
+USAGE: v-wp-staging-create [OPTIONS]
 
 Create a staging copy of a WordPress site, or tear one down with --teardown.
 
@@ -40,13 +40,13 @@ OPTIONS:
 
 EXAMPLES:
   # Create staging — domain is remembered for next time
-  v-create-wp-staging --src-user=admin --src-domain=mysite.fi --new-domain=mysite.demolink.fi
+  v-wp-staging-create --src-user=admin --src-domain=mysite.fi --new-domain=mysite.demolink.fi
 
   # Refresh existing staging (domain already stored in live wp-config)
-  v-create-wp-staging --src-user=admin --src-domain=mysite.fi --force
+  v-wp-staging-create --src-user=admin --src-domain=mysite.fi --force
 
   # Tear down and clean up WP_STAGING_URL from the live site
-  v-create-wp-staging --teardown --dest-user=admin --new-domain=mysite.demolink.fi \
+  v-wp-staging-create --teardown --dest-user=admin --new-domain=mysite.demolink.fi \
     --src-user=admin --src-domain=mysite.fi
 EOF
 }
@@ -514,5 +514,5 @@ echo "   Database:     $NEW_DB_NAME"
 echo "   Uploads:      Read-only from live (bind mount)"
 echo ""
 echo "   To tear down:"
-echo "   v-create-wp-staging --teardown --dest-user=$DEST_USER --new-domain=$NEW_WEB_DOMAIN"
+echo "   v-wp-staging-create --teardown --dest-user=$DEST_USER --new-domain=$NEW_WEB_DOMAIN"
 echo "=================================================================="

@@ -9,7 +9,7 @@ export PATH=$PATH:/usr/local/hestia/bin
 
 show_help() {
   cat <<'EOF'
-USAGE: v-update-wp [OPTIONS]
+USAGE: v-wp-update [OPTIONS]
 
 Run all available WordPress updates (core, plugins, themes).
 Backs up the database to ~/backup/ before updating unless --skip-backup is set.
@@ -24,10 +24,10 @@ OPTIONS:
 
 EXAMPLES:
   # Check what needs updating without touching anything
-  v-update-wp --user=admin --domain=mysite.fi --dry-run
+  v-wp-update --user=admin --domain=mysite.fi --dry-run
 
   # Run all updates
-  v-update-wp --user=admin --domain=mysite.fi
+  v-wp-update --user=admin --domain=mysite.fi
 EOF
 }
 

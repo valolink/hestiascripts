@@ -50,6 +50,19 @@ if [ "$COUNT" -eq 0 ]; then
   echo "  ⚠️ No 'v-' scripts found to deploy."
 fi
 
+# Remove symlinks in HESTIA_BIN that point into our repo but whose target no longer exists
+STALE=0
+for LINK in "$HESTIA_BIN"/v-*; do
+  [ -L "$LINK" ] || continue
+  TARGET=$(readlink "$LINK")
+  if [[ "$TARGET" == "$GIT_DIR"* ]] && [ ! -e "$LINK" ]; then
+    echo "  🗑️  Removed stale symlink: $(basename "$LINK")  (→ $TARGET)"
+    rm "$LINK"
+    ((STALE++))
+  fi
+done
+[ "$STALE" -eq 0 ] && echo "  ✅ No stale symlinks found."
+
 # --- 2. Register Go Binary Service ---
 STREAMER_BIN="$GIT_DIR/hestia-streamer"
 

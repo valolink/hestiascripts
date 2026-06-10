@@ -1,5 +1,5 @@
 #!/bin/bash
-# v-fix-wp-permissions — fix file ownership and permissions for a HestiaCP WordPress domain
+# v-wp-fix-permissions — fix file ownership and permissions for a HestiaCP WordPress domain
 
 if [ "$EUID" -ne 0 ]; then
   echo "ERROR: Please run as root."
@@ -10,7 +10,7 @@ export PATH=$PATH:/usr/local/hestia/bin
 
 show_help() {
   cat <<'EOF'
-USAGE: v-fix-wp-permissions [OPTIONS]
+USAGE: v-wp-fix-permissions [OPTIONS]
 
 Fix file ownership and permissions for a WordPress site on HestiaCP.
 

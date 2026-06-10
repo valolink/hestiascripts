@@ -1,5 +1,5 @@
 #!/bin/bash
-# Status dashboard — sourced by hestia-setup.sh
+# Status dashboard — sourced by setup.sh
 
 print_status() {
   clear

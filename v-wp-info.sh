@@ -9,7 +9,7 @@ export PATH=$PATH:/usr/local/hestia/bin
 
 show_help() {
   cat <<'EOF'
-USAGE: v-get-wp-info [OPTIONS]
+USAGE: v-wp-info [OPTIONS]
 
 Print a full diagnostic report for a WordPress site: versions, available
 updates, active theme, PHP environment, database, security posture, admin
@@ -22,10 +22,10 @@ OPTIONS:
 
 EXAMPLES:
   # Run interactively over SSH
-  v-get-wp-info
+  v-wp-info
 
   # Direct (e.g. via hestia-streamer)
-  v-get-wp-info --user=admin --domain=mysite.fi
+  v-wp-info --user=admin --domain=mysite.fi
 EOF
 }
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# v-migrate-wp — finish importing a WordPress site rsynced to this server
+# v-wp-migrate-site — finish importing a WordPress site rsynced to this server
 #
 # Pre-conditions (do these before running):
 #   1. HestiaCP user exists
@@ -24,7 +24,7 @@ check_status() {
 
 show_help() {
   cat <<'EOF'
-USAGE: v-migrate-wp [OPTIONS]
+USAGE: v-wp-migrate-site [OPTIONS]
 
 Finish importing a WordPress site that has been rsynced to a HestiaCP domain.
 
@@ -52,8 +52,8 @@ OPTIONS:
   -h, --help        Show this help
 
 EXAMPLE:
-  v-migrate-wp --user=client1 --domain=example.com
-  v-migrate-wp --user=client1 --domain=example.com --sql=/tmp/backup.sql --old-url=https://oldhost.com
+  v-wp-migrate-site --user=client1 --domain=example.com
+  v-wp-migrate-site --user=client1 --domain=example.com --sql=/tmp/backup.sql --old-url=https://oldhost.com
 EOF
 }
 
