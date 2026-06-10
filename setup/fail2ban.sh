@@ -66,43 +66,56 @@ _fail2ban_restart() {
   press_enter
 }
 
+# Set key=value in a specific [section] of an ini-style file.
+# Replaces existing key if present, otherwise appends it inside the section.
+_ini_set_key() {
+  local file="$1" section="$2" key="$3" value="$4"
+  awk -v sec="$section" -v k="$key" -v v="$value" '
+    BEGIN { in_sec=0; done=0 }
+    /^\[/ {
+      if (in_sec && !done) { print k " = " v; done=1 }
+      in_sec = (substr($0, 2, length($0)-2) == sec)
+    }
+    in_sec && !done && $0 ~ "^"k"[[:space:]]*=" { print k " = " v; done=1; next }
+    { print }
+    END { if (in_sec && !done) print k " = " v }
+  ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
 # Test config and auto-disable any jails that reference missing log files.
-# Returns 0 if config is valid (after fixes), 1 if there are other errors.
+# fail2ban reports only the first failing jail per run, so we loop until clean.
+# jail.d/ overrides are read BEFORE jail.local, so jails defined in jail.local
+# must be disabled there directly.
 _fail2ban_fix_config() {
-  local test_out exit_code
+  local test_out jail iterations=0
 
-  test_out=$(fail2ban-client -t 2>&1)
-  exit_code=$?
+  while true; do
+    test_out=$(fail2ban-client -t 2>&1)
+    [ $? -eq 0 ] && return 0
+    ((iterations++))
+    [ $iterations -gt 15 ] && break  # safety limit
 
-  [ $exit_code -eq 0 ] && return 0
+    jail=$(echo "$test_out" | grep -oP "(?<=any log file for )\S+(?= jail)" | head -1)
 
-  # Find jails with missing log files
-  local bad_jails
-  bad_jails=$(echo "$test_out" | grep -oP "(?<=any log file for )\S+(?= jail)")
+    if [ -z "$jail" ]; then
+      # Different kind of error — stop looping
+      break
+    fi
 
-  if [ -z "$bad_jails" ]; then
-    echo -e "  ${RED}✗ Config error:${NC}"
-    echo "$test_out" | grep -v "WARNING" | sed 's/^/     /'
-    return 1
-  fi
-
-  # Disable each offending jail via a jail.d override — the standard way to
-  # turn off jails that reference services not present on this server.
-  while IFS= read -r jail; do
-    local override="/etc/fail2ban/jail.d/disable-${jail}.conf"
     echo -e "  ${CYAN}→${NC} Disabling '$jail' jail  (log files not found on this server)"
-    printf '[%s]\nenabled = false\n' "$jail" > "$override"
-  done <<< "$bad_jails"
+    if grep -q "^\[$jail\]" /etc/fail2ban/jail.local 2>/dev/null; then
+      # jail.local is read last — must fix it there, jail.d overrides won't work
+      _ini_set_key /etc/fail2ban/jail.local "$jail" "enabled" "false"
+    else
+      # Not in jail.local — a jail.d override is sufficient
+      printf '[%s]\nenabled = false\n' "$jail" > "/etc/fail2ban/jail.d/zzz-disable-${jail}.conf"
+    fi
+    rm -f "/etc/fail2ban/jail.d/disable-${jail}.conf"
+  done
 
-  # Re-test after fixes
-  test_out=$(fail2ban-client -t 2>&1)
-  if [ $? -ne 0 ]; then
-    echo -e "  ${RED}✗ Config still failing after auto-fix:${NC}"
-    echo "$test_out" | grep -v "WARNING" | sed 's/^/     /'
-    return 1
-  fi
-
-  return 0
+  echo -e "  ${RED}✗ Config still failing:${NC}"
+  echo "$test_out" | grep -v "WARNING" | sed 's/^/     /'
+  return 1
 }
 
 _fail2ban_wp_jail() {
