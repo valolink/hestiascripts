@@ -159,7 +159,11 @@ _smtp_recipients() {
         _ini_insert "$f2b_conf" "DEFAULT" "action = %(action_mwl)s"
       fi
     fi
-    systemctl is-active --quiet fail2ban && systemctl reload fail2ban
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+      echo -e "  ${CYAN}→${NC} Reloading Fail2ban..."
+      timeout 15 fail2ban-client reload &>/dev/null || \
+        echo "    (timed out — run manually: fail2ban-client reload)"
+    fi
   fi
 
   # --- Unattended upgrades ---
