@@ -48,6 +48,11 @@ _fail2ban_restart() {
   fi
 
   echo ""
+
+  if ! _fail2ban_fix_config; then
+    press_enter; return
+  fi
+
   echo -e "  ${CYAN}→${NC} Restarting Fail2ban..."
   systemctl restart fail2ban
 
@@ -59,6 +64,45 @@ _fail2ban_restart() {
     echo -e "  ${RED}✗ Failed to start — check: journalctl -u fail2ban${NC}"
   fi
   press_enter
+}
+
+# Test config and auto-disable any jails that reference missing log files.
+# Returns 0 if config is valid (after fixes), 1 if there are other errors.
+_fail2ban_fix_config() {
+  local test_out exit_code
+
+  test_out=$(fail2ban-client -t 2>&1)
+  exit_code=$?
+
+  [ $exit_code -eq 0 ] && return 0
+
+  # Find jails with missing log files
+  local bad_jails
+  bad_jails=$(echo "$test_out" | grep -oP "(?<=any log file for )\S+(?= jail)")
+
+  if [ -z "$bad_jails" ]; then
+    echo -e "  ${RED}✗ Config error:${NC}"
+    echo "$test_out" | grep -v "WARNING" | sed 's/^/     /'
+    return 1
+  fi
+
+  # Disable each offending jail via a jail.d override — the standard way to
+  # turn off jails that reference services not present on this server.
+  while IFS= read -r jail; do
+    local override="/etc/fail2ban/jail.d/disable-${jail}.conf"
+    echo -e "  ${CYAN}→${NC} Disabling '$jail' jail  (log files not found on this server)"
+    printf '[%s]\nenabled = false\n' "$jail" > "$override"
+  done <<< "$bad_jails"
+
+  # Re-test after fixes
+  test_out=$(fail2ban-client -t 2>&1)
+  if [ $? -ne 0 ]; then
+    echo -e "  ${RED}✗ Config still failing after auto-fix:${NC}"
+    echo "$test_out" | grep -v "WARNING" | sed 's/^/     /'
+    return 1
+  fi
+
+  return 0
 }
 
 _fail2ban_wp_jail() {
@@ -110,11 +154,7 @@ EOF
   echo -e "  ${CYAN}→${NC} Ensured $log_dir/wordpress-watch.log exists"
 
   echo -e "  ${CYAN}→${NC} Testing config"
-  local test_out
-  test_out=$(fail2ban-client -t 2>&1)
-  if [ $? -ne 0 ]; then
-    echo -e "  ${RED}✗ Config error — not reloading:${NC}"
-    echo "$test_out" | sed 's/^/     /'
+  if ! _fail2ban_fix_config; then
     press_enter; return
   fi
 
