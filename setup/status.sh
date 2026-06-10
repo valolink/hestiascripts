@@ -92,22 +92,24 @@ print_status() {
   # 7) Security (swap + SSH + unattended upgrades summary)
   local ssh_pw; ssh_pw=$(grep "^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
   local swap_ok; swap_ok=$(swapon --show --noheadings 2>/dev/null | awk '{print $3}')
-  local uu_ok; uu_ok=$(dpkg -l unattended-upgrades 2>/dev/null | grep -c "^ii")
-  local sec_issues=0
-  [ -z "$swap_ok" ] && ((sec_issues++))
-  [ "$ssh_pw" != "no" ] && ((sec_issues++))
-  [ "$uu_ok" -eq 0 ] && ((sec_issues++))
-  if [ "$sec_issues" -eq 0 ]; then
-    menu_status_line 7 "Security" OK "swap ✓  SSH key-only ✓  auto-updates ✓"
-  elif [ "$sec_issues" -eq 3 ]; then
-    menu_status_line 7 "Security" ERR "swap ✗  SSH pw ✗  auto-updates ✗"
+  local uu_installed; uu_installed=$(dpkg -l unattended-upgrades 2>/dev/null | grep -c "^ii")
+  local uu_scope; uu_scope=$(_uu_scope)
+  local sec_issues=0 sec_level="OK"
+  [ -z "$swap_ok" ]      && { ((sec_issues++)); sec_level="WARN"; }
+  [ "$ssh_pw" != "no" ]  && { ((sec_issues++)); sec_level="WARN"; }
+  [ "$uu_installed" -eq 0 ] && { ((sec_issues++)); sec_level="ERR"; }
+  [ "$uu_scope" = "all" ]   && { ((sec_issues++)); sec_level="ERR"; }
+  local sec_detail=""
+  [ -n "$swap_ok" ]         && sec_detail+="swap ✓  "    || sec_detail+="swap ✗  "
+  [ "$ssh_pw" = "no" ]      && sec_detail+="SSH key-only ✓  " || sec_detail+="SSH pw ⚠  "
+  if [ "$uu_installed" -eq 0 ]; then
+    sec_detail+="auto-updates ✗"
+  elif [ "$uu_scope" = "all" ]; then
+    sec_detail+="auto-updates: all pkgs ✗"
   else
-    local sec_detail=""
-    [ -n "$swap_ok" ] && sec_detail+="swap ✓  " || sec_detail+="swap ✗  "
-    [ "$ssh_pw" = "no" ] && sec_detail+="SSH key-only ✓  " || sec_detail+="SSH pw ⚠  "
-    [ "$uu_ok" -gt 0 ] && sec_detail+="auto-updates ✓" || sec_detail+="auto-updates ✗"
-    menu_status_line 7 "Security" WARN "$sec_detail"
+    sec_detail+="auto-updates ✓"
   fi
+  menu_status_line 7 "Security" "$sec_level" "$sec_detail"
 
   # 8) SMTP
   local relay; relay=$(postconf -h relayhost 2>/dev/null)
