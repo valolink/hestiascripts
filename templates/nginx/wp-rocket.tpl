@@ -3,6 +3,12 @@ server {
     server_name %domain_idn% %alias_idn%;
     error_log   /var/log/%web_system%/domains/%domain%.error.log error;
 
+    # --- Valolink security rules: bad-bot UA block (from wp-secure-snippet) ---
+    # Short-circuits before any cache logic so abusive crawlers cost ~nothing.
+    if ($http_user_agent ~* (SemrushBot|AhrefsBot|MJ12bot|DotBot|PetalBot|MegaIndex|HTTrack|masscan)) {
+        return 403;
+    }
+
     set $rocket_file "/wp-content/cache/wp-rocket/$host${uri}index.html";
 
     if ($request_method !~ ^(GET|HEAD)$)                                               { set $rocket_file "/rocket-no-cache"; }
@@ -13,6 +19,22 @@ server {
     location ~ /\.(?!well-known\/|file) {
         deny all;
         return 404;
+    }
+
+    # --- Valolink security rules: sensitive file extensions (from wp-secure-snippet) ---
+    location ~* (?:\.(?:bak|conf|dist|fla|in[ci]|log|psd|sh|sql|sw[op])|~)$ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    # --- Valolink security rules: xmlrpc deny (from wp-secure-snippet) ---
+    # Blocks brute-force / pingback abuse before it reaches PHP.
+    # If a site genuinely needs xmlrpc, switch its proxy template off wp-rocket.
+    location = /xmlrpc.php {
+        deny all;
+        access_log off;
+        log_not_found off;
     }
 
     location / {

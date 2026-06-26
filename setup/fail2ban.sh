@@ -197,7 +197,11 @@ EOF
 [wordpress]
 enabled  = true
 filter   = wordpress
+# Watch both possible HestiaCP layouts: the system-wide path (default in
+# fresh installs) and the per-user home-dir path (used when nginx writes
+# access logs directly into the user's web/<domain>/logs/ folder).
 logpath  = /var/log/nginx/domains/*.log
+           /home/*/web/*/logs/*.log
 backend  = polling
 # Tuned for slow brute force without being annoying for customers who
 # fat-finger their password a few times. The original 10-in-60s let an
