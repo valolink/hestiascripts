@@ -1,7 +1,12 @@
 #!/bin/bash
 # Nginx template management (wp-secure, wp-rocket)
-
-_NGINX_TPL_DIR="/usr/local/hestia/data/templates/web/nginx/php-fpm"
+#
+# wp-rocket.tpl uses %proxy_port% + proxy_pass to %web_port% — these are
+# HestiaCP proxy-mode placeholders. Proxy templates (nginx in front of Apache)
+# live in nginx/, not nginx/php-fpm/. They show up in the UI as
+# "Proxy Template (Nginx)". The php-fpm/ subdir is only relevant when the
+# site has no Apache backend.
+_NGINX_TPL_DIR="/usr/local/hestia/data/templates/web/nginx"
 
 menu_nginx_templates() {
   while true; do
@@ -19,43 +24,49 @@ menu_nginx_templates() {
     done
 
     echo ""
-    echo "  1) Install / update wp-secure  (security hardening template)"
-    echo "  2) Install / update wp-rocket  (WP Rocket cache proxy template)"
+    echo "  1) Install / update wp-secure + wp-rocket  (both proxy templates)"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
 
     case "$choice" in
-      1) _nginx_install_wpsecure ;;
-      2) _nginx_install_wprocket ;;
+      1) _nginx_install_profiles ;;
       0) return ;;
     esac
   done
 }
 
-_nginx_install_wpsecure() {
+_nginx_install_profiles() {
   local snippet="$SCRIPT_DIR/templates/nginx/wp-secure-snippet.conf"
+  local rocket_tpl="$SCRIPT_DIR/templates/nginx/wp-rocket.tpl"
+  local rocket_stpl="$SCRIPT_DIR/templates/nginx/wp-rocket.stpl"
 
-  if [ ! -f "$snippet" ]; then
-    echo "  Snippet not found: $snippet"; press_enter; return
-  fi
+  # Pre-flight: every source needs to exist before we touch anything.
+  for f in "$snippet" "$rocket_tpl" "$rocket_stpl"; do
+    if [ ! -f "$f" ]; then
+      echo "  Source not found: $f"; press_enter; return
+    fi
+  done
   if [ ! -f "$_NGINX_TPL_DIR/default.tpl" ] || [ ! -f "$_NGINX_TPL_DIR/default.stpl" ]; then
     echo "  HestiaCP default templates not found in $_NGINX_TPL_DIR"
     press_enter; return
   fi
 
   echo ""
-  echo "  This will:"
-  echo "    1. Copy default.tpl  → wp-secure.tpl"
-  echo "    2. Copy default.stpl → wp-secure.stpl"
-  echo "    3. Inject security rules from templates/nginx/wp-secure-snippet.conf"
-  echo "       (blocks hidden files, sensitive extensions, xmlrpc, bad bots)"
+  echo "  This will install both proxy templates into $_NGINX_TPL_DIR:"
+  echo ""
+  echo "    wp-secure  — default.{tpl,stpl} + injected security rules"
+  echo "                 (blocks hidden files, sensitive extensions, xmlrpc, bad bots)"
+  echo "    wp-rocket  — WP Rocket cache-proxy template"
+  echo "                 (the stpl serves cached HTML from /wp-content/cache/wp-rocket/"
+  echo "                  directly, bypassing PHP on cache hits)"
   echo ""
 
-  if ! confirm "Install wp-secure templates?"; then return; fi
+  if ! confirm "Install both?"; then return; fi
 
   echo ""
 
+  # --- wp-secure: copy default.{tpl,stpl}, inject snippet -------------------
   for ext in tpl stpl; do
     local src="$_NGINX_TPL_DIR/default.${ext}"
     local dst="$_NGINX_TPL_DIR/wp-secure.${ext}"
@@ -64,7 +75,7 @@ _nginx_install_wpsecure() {
     cp "$src" "$dst"
 
     if grep -q "Valolink security rules" "$dst"; then
-      echo "  Security rules already present in $dst, skipping injection."
+      echo "      Security rules already present, skipping injection."
     else
       echo -e "  ${CYAN}→${NC} Injecting security rules into $dst"
       # Insert snippet before the first 'location /' block
@@ -81,38 +92,17 @@ _nginx_install_wpsecure() {
   done
 
   echo ""
-  echo "  Apply in HestiaCP: Web → Edit domain → Advanced Options → Web Template (Nginx) → wp-secure"
-  press_enter
-}
 
-_nginx_install_wprocket() {
-  local src_tpl="$SCRIPT_DIR/templates/nginx/wp-rocket.tpl"
-  local src_stpl="$SCRIPT_DIR/templates/nginx/wp-rocket.stpl"
-
-  for f in "$src_tpl" "$src_stpl"; do
-    if [ ! -f "$f" ]; then
-      echo "  Template not found: $f"; press_enter; return
-    fi
-  done
-
-  echo ""
-  echo "  This will copy wp-rocket.tpl and wp-rocket.stpl from the repo"
-  echo "  into $_NGINX_TPL_DIR"
-  echo ""
-  echo "  The HTTPS template (stpl) serves WP Rocket cached HTML directly from"
-  echo "  /wp-content/cache/wp-rocket/ — bypassing PHP entirely on cache hits."
-  echo ""
-
-  if ! confirm "Install wp-rocket templates?"; then return; fi
-
-  echo ""
+  # --- wp-rocket: straight copy --------------------------------------------
   echo -e "  ${CYAN}→${NC} Copying wp-rocket.tpl"
-  cp "$src_tpl" "$_NGINX_TPL_DIR/wp-rocket.tpl"
+  cp "$rocket_tpl" "$_NGINX_TPL_DIR/wp-rocket.tpl"
   echo -e "  ${CYAN}→${NC} Copying wp-rocket.stpl"
-  cp "$src_stpl" "$_NGINX_TPL_DIR/wp-rocket.stpl"
+  cp "$rocket_stpl" "$_NGINX_TPL_DIR/wp-rocket.stpl"
+  echo -e "  ${GREEN}✓ $_NGINX_TPL_DIR/wp-rocket.{tpl,stpl}${NC}"
+
   echo ""
-  echo -e "  ${GREEN}✓ Done${NC}"
-  echo ""
-  echo "  Apply in HestiaCP: Web → Edit domain → Advanced Options → Web Template (Nginx) → wp-rocket"
+  echo "  Apply in HestiaCP: Web → Edit domain → Advanced Options → Proxy Template"
+  echo "    → wp-secure  (default security hardening)"
+  echo "    → wp-rocket  (sites using WP Rocket)"
   press_enter
 }

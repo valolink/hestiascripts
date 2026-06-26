@@ -58,6 +58,26 @@ _fail2ban_patch_filter() {
   echo -e "  ${CYAN}→${NC} Patched WordPress filter to also cover xmlrpc.php"
 }
 
+# Reload the daemon. If it doesn't return in 3 seconds the command queue is
+# stuck (typically a mail action blocked on SMTP) — force-kill the server
+# process and bring it back via systemctl. In-memory ban state is lost; the
+# jails repopulate from logs on next match.
+_fail2ban_reload_or_kill() {
+  if timeout 3 fail2ban-client reload &>/dev/null; then
+    return 0
+  fi
+  echo -e "  ${YELLOW}⚠ Reload did not return in 3s — force-killing fail2ban-server${NC}"
+  killall -9 fail2ban-server 2>/dev/null
+  sleep 1
+  systemctl restart fail2ban
+  if systemctl is-active --quiet fail2ban; then
+    echo -e "  ${GREEN}✓ Fail2ban restarted after force-kill${NC}"
+    return 0
+  fi
+  echo -e "  ${RED}✗ Fail2ban did not come back up — check: journalctl -u fail2ban${NC}"
+  return 1
+}
+
 _fail2ban_restart() {
   if ! command -v fail2ban-client &>/dev/null; then
     echo "  Fail2ban is not installed."
@@ -73,12 +93,12 @@ _fail2ban_restart() {
 
   echo -e "  ${CYAN}→${NC} Restarting Fail2ban..."
   # Stop can hang if the daemon is mid-action (mail send, slow rDNS, etc.).
-  # Bound it, then SIGKILL and re-start if the graceful path stalls.
-  if ! timeout 30 systemctl restart fail2ban; then
-    echo -e "  ${YELLOW}⚠ Graceful restart timed out (likely stuck in mail/IPC action). Forcing...${NC}"
-    systemctl kill -s SIGKILL fail2ban 2>/dev/null
+  # Match the reload pattern: bound graceful path to 3s, then force-kill.
+  if ! timeout 3 systemctl restart fail2ban; then
+    echo -e "  ${YELLOW}⚠ Graceful restart did not return in 3s — force-killing fail2ban-server${NC}"
+    killall -9 fail2ban-server 2>/dev/null
     sleep 1
-    systemctl start fail2ban
+    systemctl restart fail2ban
   fi
 
   if systemctl is-active --quiet fail2ban; then
@@ -200,7 +220,7 @@ EOF
   fi
 
   echo -e "  ${CYAN}→${NC} Reloading Fail2ban"
-  timeout 10 fail2ban-client reload &>/dev/null
+  _fail2ban_reload_or_kill
   if timeout 3 fail2ban-client status wordpress &>/dev/null; then
     echo -e "  ${GREEN}✓ WordPress jail active${NC}"
   else
@@ -264,7 +284,7 @@ _fail2ban_adjust_jail() {
 
   echo ""
   echo -e "  ${CYAN}→${NC} Reloading Fail2ban..."
-  timeout 10 fail2ban-client reload &>/dev/null
+  _fail2ban_reload_or_kill
   echo -e "  ${GREEN}✓ Done${NC}"
   press_enter
 }
