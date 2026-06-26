@@ -175,7 +175,7 @@ _fail2ban_wp_jail() {
   echo ""
   echo "  This will create:"
   echo "    $_F2B_FILTER  — matches POST requests to wp-login.php and xmlrpc.php in nginx logs"
-  echo "    $_F2B_JAIL    — 10 attempts in 60s = 1h ban, watches /var/log/nginx/domains/*.log"
+  echo "    $_F2B_JAIL    — 10 attempts in 1h = 24h ban, watches /var/log/nginx/domains/*.log"
   echo ""
 
   if [ -f "$_F2B_FILTER" ] || [ -f "$_F2B_JAIL" ]; then
@@ -199,9 +199,14 @@ enabled  = true
 filter   = wordpress
 logpath  = /var/log/nginx/domains/*.log
 backend  = polling
+# Tuned for slow brute force without being annoying for customers who
+# fat-finger their password a few times. The original 10-in-60s let an
+# attacker pacing one attempt every ~10s slip past indefinitely; widening
+# the rolling window to an hour catches sustained guessing campaigns while
+# still tolerating normal login mistakes.
 maxretry = 10
-findtime = 60
-bantime  = 3600
+findtime = 3600
+bantime  = 86400
 EOF
 
   echo ""
