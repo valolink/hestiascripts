@@ -37,7 +37,8 @@ _wpcli_install() {
   run_action "Install WP-CLI" \
     "curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" \
     "chmod +x wp-cli.phar" \
-    "mv wp-cli.phar /usr/local/bin/wp"
+    "mv wp-cli.phar /usr/local/bin/wp" \
+    "wp --allow-root package install wp-media/wp-rocket-cli:trunk"
 }
 
 _wpcli_update() {

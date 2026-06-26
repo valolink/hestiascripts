@@ -72,12 +72,21 @@ _fail2ban_restart() {
   fi
 
   echo -e "  ${CYAN}→${NC} Restarting Fail2ban..."
-  systemctl restart fail2ban
+  # Stop can hang if the daemon is mid-action (mail send, slow rDNS, etc.).
+  # Bound it, then SIGKILL and re-start if the graceful path stalls.
+  if ! timeout 30 systemctl restart fail2ban; then
+    echo -e "  ${YELLOW}⚠ Graceful restart timed out (likely stuck in mail/IPC action). Forcing...${NC}"
+    systemctl kill -s SIGKILL fail2ban 2>/dev/null
+    sleep 1
+    systemctl start fail2ban
+  fi
 
   if systemctl is-active --quiet fail2ban; then
     echo -e "  ${GREEN}✓ Fail2ban is running${NC}"
     echo ""
-    fail2ban-client status 2>/dev/null | grep -E "Number of jail|Jail list" | sed 's/^/     /'
+    timeout 3 fail2ban-client status 2>/dev/null \
+      | grep -E "Number of jail|Jail list" | sed 's/^/     /' \
+      || echo "     (status IPC unresponsive — check: journalctl -u fail2ban)"
   else
     echo -e "  ${RED}✗ Failed to start — check: journalctl -u fail2ban${NC}"
   fi
@@ -191,8 +200,8 @@ EOF
   fi
 
   echo -e "  ${CYAN}→${NC} Reloading Fail2ban"
-  fail2ban-client reload &>/dev/null
-  if fail2ban-client status wordpress &>/dev/null; then
+  timeout 10 fail2ban-client reload &>/dev/null
+  if timeout 3 fail2ban-client status wordpress &>/dev/null; then
     echo -e "  ${GREEN}✓ WordPress jail active${NC}"
   else
     echo -e "  ${RED}✗ Jail not active after reload — check: fail2ban-client status${NC}"
@@ -255,7 +264,7 @@ _fail2ban_adjust_jail() {
 
   echo ""
   echo -e "  ${CYAN}→${NC} Reloading Fail2ban..."
-  fail2ban-client reload &>/dev/null
+  timeout 10 fail2ban-client reload &>/dev/null
   echo -e "  ${GREEN}✓ Done${NC}"
   press_enter
 }

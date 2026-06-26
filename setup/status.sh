@@ -57,14 +57,20 @@ print_status() {
   fi
 
   # 4) Fail2ban
+  # `fail2ban-client status` is IPC to the daemon socket — if the daemon is
+  # busy (mail action stalled on SMTP, ban action stalled on rDNS) the call
+  # blocks indefinitely. Bound it so the dashboard always returns.
   if ! command -v fail2ban-client &>/dev/null; then
     menu_status_line 4 "Fail2ban" ERR "not installed"
   elif ! systemctl is-active --quiet fail2ban 2>/dev/null; then
     menu_status_line 4 "Fail2ban" WARN "installed but not running"
-  elif fail2ban-client status wordpress &>/dev/null; then
-    menu_status_line 4 "Fail2ban" OK "running  WP jail active"
   else
-    menu_status_line 4 "Fail2ban" WARN "running — no WordPress jail"
+    timeout 3 fail2ban-client status wordpress &>/dev/null
+    case $? in
+      0)   menu_status_line 4 "Fail2ban" OK "running  WP jail active" ;;
+      124) menu_status_line 4 "Fail2ban" WARN "running — IPC unresponsive (mail/SMTP stall?)" ;;
+      *)   menu_status_line 4 "Fail2ban" WARN "running — no WordPress jail" ;;
+    esac
   fi
 
   # 5) Maldet
