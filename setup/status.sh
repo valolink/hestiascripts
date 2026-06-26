@@ -186,48 +186,49 @@ print_status() {
 
   # --- Nginx Templates ---
   section "Nginx Templates"
-  local ntpl_dir="/usr/local/hestia/data/templates/web/nginx/php-fpm"
+  local ntpl_dir="/usr/local/hestia/data/templates/web/nginx"
+  local secure_ok=false rocket_ok=false
+  [ -f "$ntpl_dir/wp-secure.tpl" ] && [ -f "$ntpl_dir/wp-secure.stpl" ] && secure_ok=true
+  [ -f "$ntpl_dir/wp-rocket.tpl" ] && [ -f "$ntpl_dir/wp-rocket.stpl" ] && rocket_ok=true
 
-  if [ -f "$ntpl_dir/wp-secure.tpl" ] && [ -f "$ntpl_dir/wp-secure.stpl" ]; then
-    menu_status_line 12 "wp-secure" OK "installed"
+  if $secure_ok && $rocket_ok; then
+    menu_status_line 12 "Nginx Templates" OK "wp-secure ✓  wp-rocket ✓"
+  elif $secure_ok; then
+    menu_status_line 12 "Nginx Templates" WARN "wp-secure ✓  wp-rocket ✗"
+  elif $rocket_ok; then
+    menu_status_line 12 "Nginx Templates" WARN "wp-secure ✗  wp-rocket ✓"
   else
-    menu_status_line 12 "wp-secure" ERR "not installed"
-  fi
-
-  if [ -f "$ntpl_dir/wp-rocket.tpl" ] && [ -f "$ntpl_dir/wp-rocket.stpl" ]; then
-    menu_status_line 13 "wp-rocket" OK "installed"
-  else
-    menu_status_line 13 "wp-rocket" ERR "not installed"
+    menu_status_line 12 "Nginx Templates" ERR "not installed"
   fi
 
   # --- Maintenance ---
   section "Maintenance"
 
-  # 14) System updates / HestiaCP
+  # 13) System updates / HestiaCP
   local installed latest hestia_ok=true
   installed=$(grep -oP "(?<=VERSION=')[^']+" /usr/local/hestia/conf/hestia.conf 2>/dev/null | head -1)
   if [ -z "$installed" ]; then
-    menu_status_line 14 "System updates" ERR "HestiaCP version unknown"
+    menu_status_line 13 "System updates" ERR "HestiaCP version unknown"
   else
     latest=$(curl -sf --max-time 4 "https://api.github.com/repos/hestiacp/hestiacp/releases/latest" \
       | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
     if [ -n "$latest" ] && [ "$installed" != "$latest" ]; then
-      menu_status_line 14 "System updates" WARN "HestiaCP ${installed} → ${latest} available"
+      menu_status_line 13 "System updates" WARN "HestiaCP ${installed} → ${latest} available"
     else
-      menu_status_line 14 "System updates" OK "HestiaCP ${installed}${latest:+  (up to date)}"
+      menu_status_line 13 "System updates" OK "HestiaCP ${installed}${latest:+  (up to date)}"
     fi
   fi
 
-  # 15) Disk
+  # 14) Disk
   local used_pct disk_info
   used_pct=$(df / | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
   disk_info=$(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
   if [ "${used_pct:-0}" -ge 90 ]; then
-    menu_status_line 15 "Disk" ERR "$disk_info"
+    menu_status_line 14 "Disk" ERR "$disk_info"
   elif [ "${used_pct:-0}" -ge 75 ]; then
-    menu_status_line 15 "Disk" WARN "$disk_info"
+    menu_status_line 14 "Disk" WARN "$disk_info"
   else
-    menu_status_line 15 "Disk" OK "$disk_info"
+    menu_status_line 14 "Disk" OK "$disk_info"
   fi
 
   echo ""

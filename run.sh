@@ -31,10 +31,9 @@ while true; do
     9)  menu_php_fpm ;;
     10) menu_opcache ;;
     11) menu_mariadb ;;
-    12) _nginx_install_wpsecure ;;
-    13) _nginx_install_wprocket ;;
-    14) menu_maintenance ;;
-    15) menu_disk ;;
+    12) menu_nginx_templates ;;
+    13) menu_maintenance ;;
+    14) menu_disk ;;
     0)  echo "  Bye!"; exit 0 ;;
     *)  echo "  Invalid option."; sleep 1 ;;
   esac
