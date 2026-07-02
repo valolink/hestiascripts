@@ -46,13 +46,17 @@ systemctl restart hestia-streamer
 curl "http://localhost:8091/execute?script=v-wp-test-stream"
 ```
 
-The streamer runs on port **8091**. The `/execute` endpoint accepts `?script=SCRIPT_NAME&arg=ARG1&arg=ARG2`.
+The streamer runs on port **8091**. The `/execute` endpoint accepts `?script=SCRIPT_NAME&arg=ARG1&arg=ARG2`. The `/netdata/alarms` endpoint proxies the box-local Netdata raised-alarms API (see below).
 
 ## Architecture
 
 ### hestia-streamer (`main.go`)
 
-Single-endpoint Go HTTP server (`/execute`). Execution flow:
+Two-endpoint Go HTTP server. Both share the optional `X-Streamer-Token` gate (constant-time compare, disabled when `HESTIA_STREAMER_TOKEN` is unset).
+
+**`/netdata/alarms`** — plain JSON passthrough (not SSE) to box-local Netdata `http://127.0.0.1:19999/api/v1/alarms` (8s timeout, 502 on dial failure). Lets EngineLink's `poll-server-alarms` cron read raised alarms over the same token-authed channel it already uses for `/execute`, so Netdata (:19999) never needs to be reachable from the Nuxt host. If a future Netdata build drops the v1 alarms API, `NetdataAlarmsURL` is the single line to update.
+
+**`/execute`** — SSE script runner. Flow:
 - Validates script name with `^v-[a-zA-Z0-9-]+$` regex — must start with `v-`
 - Resolves script path under `/usr/local/hestia/bin/` using `filepath.Join()` (prevents directory traversal)
 - Runs script directly via `exec.Command()` — no shell invocation (prevents injection)
@@ -83,6 +87,7 @@ All scripts follow the `v-wp-<noun>-<verb>` naming convention and are symlinked 
 - **`v-wp-config.sh`** — views and manages wp-config.php defines (shows current values, lets you add or update common constants). Interactive after the initial listing — an SSH tool, not suited to the streamer. Flags: `--user` `--domain`.
 - **`v-wp-valolink-plugin-install.sh`** — installs (or upgrades) the latest published release of `valolink/valolink-plugin` from GitHub into a chosen site. Resolves the release via `https://api.github.com/repos/valolink/valolink-plugin/releases/latest`, prefers a `.zip` release asset, falls back to the auto-generated source zipball if none is published. Installs via `wp plugin install URL --force` (idempotent / overwrite-existing) and `--activate` by default. Flags: `--user` `--domain` `--no-activate` `--print-key`. `--print-key` ensures the EngineLink API key exists in the `valolink_settings` option (generating `bin2hex(random_bytes(24))` if missing, mirroring the plugin's own `ensure_api_key()`) and prints `ENGINELINK_API_KEY=<key>` — EngineLink captures it for zero-touch enrollment; treat the output as secret. Aborts on no release found, network failure, or GitHub rate-limiting (mentions the option to authenticate if hit).
 - **`v-wp-test-stream.sh`** — simulates a long-running task for testing the SSE stream.
+- **`v-server-health.sh`** — one-shot server health snapshot for EngineLink's daily Layer-2 monitoring (not WordPress-specific). Prints a single-line JSON object as its **final** stdout line: `backups` (newest backup age in hours per HestiaCP user, from `/backup/<user>.*.tar` or `/home/<user>/backup`), `services` (`systemctl is-active` for nginx/hestia/mariadb-or-mysql/first php-fpm), and `mailQueue` (postfix `mailq` count, exim fallback). Always exits 0 on a completed run; missing tools degrade to empty/null rather than failing. **Contract:** the JSON must be the last non-empty line — EngineLink parses the final `data:` frame before `event: exit`.
 
 New v-scripts for WordPress operations (info gathering, updates, etc.) should follow the same pattern: print progress line-by-line to stdout, require root, validate inputs early.
 

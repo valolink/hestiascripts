@@ -4,17 +4,36 @@ import (
 	"bufio"
 	"crypto/subtle"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"time"
 )
 
 const (
 	ListenPort = ":8091"
 	AllowedDir = "/usr/local/hestia/bin/"
+	// Box-local Netdata (setup/netdata.sh). The alarms passthrough dials this
+	// so EngineLink never needs a route to :19999 — it only ever talks to us.
+	NetdataAlarmsURL = "http://127.0.0.1:19999/api/v1/alarms"
 )
+
+// checkToken enforces the shared secret (constant-time) when configured.
+// Returns false and writes the 403 when the token is set but doesn't match.
+func checkToken(w http.ResponseWriter, r *http.Request) bool {
+	if expectedToken == "" {
+		return true
+	}
+	got := r.Header.Get("X-Streamer-Token")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(expectedToken)) != 1 {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
 
 // Strict regex: The script name must start with "v-" and contain only letters, numbers, and hyphens.
 var safeScriptRegex = regexp.MustCompile(`^v-[a-zA-Z0-9-]+$`)
@@ -25,14 +44,33 @@ var safeScriptRegex = regexp.MustCompile(`^v-[a-zA-Z0-9-]+$`)
 // installs keep working).
 var expectedToken = os.Getenv("HESTIA_STREAMER_TOKEN")
 
+// alarmsHandler proxies the box-local Netdata raised-alarms API back to
+// EngineLink. Plain JSON request/response (not SSE) — EngineLink's
+// poll-server-alarms cron reconciles the result into ServerAlarm rows and
+// notifies on newly-raised CRITICAL alarms. Same token gate as /execute; the
+// firewall already restricts :8091 to the Nuxt host.
+func alarmsHandler(w http.ResponseWriter, r *http.Request) {
+	if !checkToken(w, r) {
+		return
+	}
+
+	client := http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(NetdataAlarmsURL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Netdata unreachable: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
 func executeHandler(w http.ResponseWriter, r *http.Request) {
 	// 0. Shared-secret check (constant-time compare).
-	if expectedToken != "" {
-		got := r.Header.Get("X-Streamer-Token")
-		if subtle.ConstantTimeCompare([]byte(got), []byte(expectedToken)) != 1 {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
+	if !checkToken(w, r) {
+		return
 	}
 
 	// 1. Setup headers for Server-Sent Events (SSE)
@@ -107,6 +145,7 @@ func executeHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/execute", executeHandler)
+	http.HandleFunc("/netdata/alarms", alarmsHandler)
 
 	fmt.Printf("🚀 Universal Go Streamer listening on %s...\n", ListenPort)
 	if err := http.ListenAndServe(ListenPort, nil); err != nil {
