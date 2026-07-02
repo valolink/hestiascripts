@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,7 +29,10 @@ const (
 // Netdata param validators — we build the upstream query ourselves rather than
 // forward a raw path, so a caller can never reach arbitrary Netdata endpoints.
 var (
-	safeChartRegex = regexp.MustCompile(`^[a-zA-Z0-9_.]+$`)
+	// Slashes are allowed for disk-space chart ids (e.g. "disk_space./home");
+	// a "not-contains-.." guard in dataHandler keeps this from being a
+	// traversal vector (it's only ever a query-param value anyway).
+	safeChartRegex = regexp.MustCompile(`^[a-zA-Z0-9_./]+$`)
 	safeDimsRegex  = regexp.MustCompile(`^[a-zA-Z0-9_.,| -]+$`)
 	safeGroups     = map[string]bool{"average": true, "max": true, "min": true, "sum": true}
 )
@@ -90,7 +94,7 @@ func dataHandler(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	chart := q.Get("chart")
-	if !safeChartRegex.MatchString(chart) {
+	if !safeChartRegex.MatchString(chart) || strings.Contains(chart, "..") {
 		http.Error(w, "Invalid chart", http.StatusBadRequest)
 		return
 	}
