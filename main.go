@@ -6,19 +6,31 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"time"
 )
 
 const (
 	ListenPort = ":8091"
 	AllowedDir = "/usr/local/hestia/bin/"
-	// Box-local Netdata (setup/netdata.sh). The alarms passthrough dials this
-	// so EngineLink never needs a route to :19999 — it only ever talks to us.
-	NetdataAlarmsURL = "http://127.0.0.1:19999/api/v1/alarms"
+	// Box-local Netdata (setup/netdata.sh). The passthroughs dial this so
+	// EngineLink never needs a route to :19999 — it only ever talks to us,
+	// which means :19999 can be firewalled off from everything but localhost.
+	NetdataBase      = "http://127.0.0.1:19999"
+	NetdataAlarmsURL = NetdataBase + "/api/v1/alarms"
+)
+
+// Netdata param validators — we build the upstream query ourselves rather than
+// forward a raw path, so a caller can never reach arbitrary Netdata endpoints.
+var (
+	safeChartRegex = regexp.MustCompile(`^[a-zA-Z0-9_.]+$`)
+	safeDimsRegex  = regexp.MustCompile(`^[a-zA-Z0-9_.,| -]+$`)
+	safeGroups     = map[string]bool{"average": true, "max": true, "min": true, "sum": true}
 )
 
 // checkToken enforces the shared secret (constant-time) when configured.
@@ -56,6 +68,77 @@ func alarmsHandler(w http.ResponseWriter, r *http.Request) {
 
 	client := http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Get(NetdataAlarmsURL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Netdata unreachable: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// dataHandler proxies Netdata's read-only time-series API (/api/v1/data) so
+// EngineLink can render native charts without exposing :19999 to the browser.
+// The upstream query is rebuilt from validated params — never a forwarded raw
+// path — so this can only ever hit /api/v1/data with safe values.
+func dataHandler(w http.ResponseWriter, r *http.Request) {
+	if !checkToken(w, r) {
+		return
+	}
+
+	q := r.URL.Query()
+	chart := q.Get("chart")
+	if !safeChartRegex.MatchString(chart) {
+		http.Error(w, "Invalid chart", http.StatusBadRequest)
+		return
+	}
+
+	out := url.Values{}
+	out.Set("chart", chart)
+	out.Set("format", "json")
+
+	// after: negative window in seconds (e.g. -600 = last 10 min). Default -600.
+	after := -600
+	if v := q.Get("after"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n >= 0 || n < -31_536_000 {
+			http.Error(w, "Invalid after", http.StatusBadRequest)
+			return
+		}
+		after = n
+	}
+	out.Set("after", strconv.Itoa(after))
+
+	// points: capped so a caller can't ask Netdata for an unbounded series.
+	if v := q.Get("points"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 2000 {
+			http.Error(w, "Invalid points", http.StatusBadRequest)
+			return
+		}
+		out.Set("points", strconv.Itoa(n))
+	}
+
+	if v := q.Get("group"); v != "" {
+		if !safeGroups[v] {
+			http.Error(w, "Invalid group", http.StatusBadRequest)
+			return
+		}
+		out.Set("group", v)
+	}
+
+	if v := q.Get("dimensions"); v != "" {
+		if !safeDimsRegex.MatchString(v) {
+			http.Error(w, "Invalid dimensions", http.StatusBadRequest)
+			return
+		}
+		out.Set("dimensions", v)
+	}
+
+	client := http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(NetdataBase + "/api/v1/data?" + out.Encode())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Netdata unreachable: %v", err), http.StatusBadGateway)
 		return
@@ -146,6 +229,7 @@ func executeHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	http.HandleFunc("/execute", executeHandler)
 	http.HandleFunc("/netdata/alarms", alarmsHandler)
+	http.HandleFunc("/netdata/data", dataHandler)
 
 	fmt.Printf("🚀 Universal Go Streamer listening on %s...\n", ListenPort)
 	if err := http.ListenAndServe(ListenPort, nil); err != nil {

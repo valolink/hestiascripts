@@ -56,6 +56,8 @@ Two-endpoint Go HTTP server. Both share the optional `X-Streamer-Token` gate (co
 
 **`/netdata/alarms`** — plain JSON passthrough (not SSE) to box-local Netdata `http://127.0.0.1:19999/api/v1/alarms` (8s timeout, 502 on dial failure). Lets EngineLink's `poll-server-alarms` cron read raised alarms over the same token-authed channel it already uses for `/execute`, so Netdata (:19999) never needs to be reachable from the Nuxt host. If a future Netdata build drops the v1 alarms API, `NetdataAlarmsURL` is the single line to update.
 
+**`/netdata/data`** — read-only proxy to Netdata's `/api/v1/data` time-series API so EngineLink renders native charts (CPU/RAM/load/disk) instead of iframing :19999 into the browser. The upstream query is **rebuilt from validated params** (`chart` `^[a-zA-Z0-9_.]+$`, `after` negative-int window, `points` 1–2000, `group` average/max/min/sum, `dimensions` safe chars) — never a forwarded raw path, so a caller can only ever reach `/api/v1/data` with safe values. With both passthroughs in place, **:19999 can be firewalled off from everything but localhost** — EngineLink reaches a box only through this streamer (:8091, token-authed).
+
 **`/execute`** — SSE script runner. Flow:
 - Validates script name with `^v-[a-zA-Z0-9-]+$` regex — must start with `v-`
 - Resolves script path under `/usr/local/hestia/bin/` using `filepath.Join()` (prevents directory traversal)
