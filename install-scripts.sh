@@ -73,6 +73,23 @@ if [ -f "$STREAMER_BIN" ]; then
   # Ensure the compiled binary is executable
   chmod +x "$STREAMER_BIN"
 
+  # Shared-secret token: second factor on top of the firewall IP rule.
+  # Generated once, persisted in /etc/hestia-streamer.env, loaded by the
+  # unit below. Paste the printed token into EngineLink's server settings
+  # (Streamer token field) — requests without it get a 403.
+  STREAMER_ENV="/etc/hestia-streamer.env"
+  if [ ! -f "$STREAMER_ENV" ]; then
+    STREAMER_TOKEN=$(openssl rand -hex 24)
+    echo "HESTIA_STREAMER_TOKEN=$STREAMER_TOKEN" > "$STREAMER_ENV"
+    chmod 600 "$STREAMER_ENV"
+    echo "  🔑 Generated new streamer token."
+  else
+    STREAMER_TOKEN=$(grep -oP '^HESTIA_STREAMER_TOKEN=\K.*' "$STREAMER_ENV")
+    echo "  🔑 Using existing streamer token."
+  fi
+  echo "  ➡️  EngineLink server settings → Streamer token:"
+  echo "      $STREAMER_TOKEN"
+
   # Create the systemd service file dynamically
   cat <<EOF >"$SYSTEMD_DIR/hestia-streamer.service"
 [Unit]
@@ -82,6 +99,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
+EnvironmentFile=-$STREAMER_ENV
 ExecStart=$STREAMER_BIN
 Restart=always
 RestartSec=3

@@ -58,6 +58,7 @@ Single-endpoint Go HTTP server (`/execute`). Execution flow:
 - Runs script directly via `exec.Command()` — no shell invocation (prevents injection)
 - Streams stdout line-by-line as SSE events using `http.Flusher`
 - Ends every run with a named SSE event `event: exit` carrying the script's exit code (consumers use it to distinguish success from failure — EngineLink auto-logs maintenance events / stores enrollment keys only on exit 0)
+- Optional shared-secret auth: when the `HESTIA_STREAMER_TOKEN` env is set (systemd loads `/etc/hestia-streamer.env`, generated + printed by `install-scripts.sh`), requests must carry a matching `X-Streamer-Token` header or get a 403 (constant-time compare). Unset = auth disabled, for pre-token installs.
 - Sets `X-Accel-Buffering: no` to disable nginx proxy buffering
 
 ### Custom v-scripts
