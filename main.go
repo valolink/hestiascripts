@@ -73,7 +73,19 @@ func executeHandler(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	cmd.Wait()
+	// 7. Report the script's exit code as a named SSE event so the caller
+	// can distinguish success from failure (EngineLink logs maintenance
+	// events / stores captured keys only on exit 0).
+	exitCode := 0
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	fmt.Fprintf(w, "event: exit\ndata: %d\n\n", exitCode)
+	flusher.Flush()
 }
 
 func main() {

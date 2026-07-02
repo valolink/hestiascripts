@@ -57,6 +57,7 @@ Single-endpoint Go HTTP server (`/execute`). Execution flow:
 - Resolves script path under `/usr/local/hestia/bin/` using `filepath.Join()` (prevents directory traversal)
 - Runs script directly via `exec.Command()` — no shell invocation (prevents injection)
 - Streams stdout line-by-line as SSE events using `http.Flusher`
+- Ends every run with a named SSE event `event: exit` carrying the script's exit code (consumers use it to distinguish success from failure — EngineLink auto-logs maintenance events / stores enrollment keys only on exit 0)
 - Sets `X-Accel-Buffering: no` to disable nginx proxy buffering
 
 ### Custom v-scripts
@@ -79,7 +80,7 @@ All scripts follow the `v-wp-<noun>-<verb>` naming convention and are symlinked 
 - **`v-wp-fix-permissions.sh`** — fixes file ownership (`chown -R user:user`) and permissions (dirs 755, files 644, wp-config 640) for a domain. Flags: `--user` `--domain`.
 - **`v-wp-revisions-clean.sh`** — trims post revisions via WP-CLI. Flags: `--user` `--domain` `--keep=N` `--dry-run`.
 - **`v-wp-config.sh`** — views and manages wp-config.php defines (shows current values, lets you add or update common constants). Interactive after the initial listing — an SSH tool, not suited to the streamer. Flags: `--user` `--domain`.
-- **`v-wp-valolink-plugin-install.sh`** — installs (or upgrades) the latest published release of `valolink/valolink-plugin` from GitHub into a chosen site. Resolves the release via `https://api.github.com/repos/valolink/valolink-plugin/releases/latest`, prefers a `.zip` release asset, falls back to the auto-generated source zipball if none is published. Installs via `wp plugin install URL --force` (idempotent / overwrite-existing) and `--activate` by default. Flags: `--user` `--domain` `--no-activate`. Aborts on no release found, network failure, or GitHub rate-limiting (mentions the option to authenticate if hit).
+- **`v-wp-valolink-plugin-install.sh`** — installs (or upgrades) the latest published release of `valolink/valolink-plugin` from GitHub into a chosen site. Resolves the release via `https://api.github.com/repos/valolink/valolink-plugin/releases/latest`, prefers a `.zip` release asset, falls back to the auto-generated source zipball if none is published. Installs via `wp plugin install URL --force` (idempotent / overwrite-existing) and `--activate` by default. Flags: `--user` `--domain` `--no-activate` `--print-key`. `--print-key` ensures the EngineLink API key exists in the `valolink_settings` option (generating `bin2hex(random_bytes(24))` if missing, mirroring the plugin's own `ensure_api_key()`) and prints `ENGINELINK_API_KEY=<key>` — EngineLink captures it for zero-touch enrollment; treat the output as secret. Aborts on no release found, network failure, or GitHub rate-limiting (mentions the option to authenticate if hit).
 - **`v-wp-test-stream.sh`** — simulates a long-running task for testing the SSE stream.
 
 New v-scripts for WordPress operations (info gathering, updates, etc.) should follow the same pattern: print progress line-by-line to stdout, require root, validate inputs early.

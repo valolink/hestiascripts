@@ -25,6 +25,10 @@ OPTIONS:
   --user=USER      HestiaCP user who owns the site
   --domain=DOMAIN  Domain to install into
   --no-activate    Install but don't activate the plugin
+  --print-key      After install, ensure the EngineLink API key exists
+                   (generating it if needed) and print it as
+                   ENGINELINK_API_KEY=<key>. Used by EngineLink for
+                   zero-touch enrollment; treat the output as secret.
   -h, --help       Show this help
 
 EXAMPLES:
@@ -40,12 +44,14 @@ EOF
 HESTIA_USER=""
 DOMAIN=""
 ACTIVATE=true
+PRINT_KEY=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --user=*)     HESTIA_USER="${1#*=}" ;;
     --domain=*)   DOMAIN="${1#*=}" ;;
     --no-activate) ACTIVATE=false ;;
+    --print-key)  PRINT_KEY=true ;;
     -h|--help)    show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
@@ -140,6 +146,30 @@ $WP plugin install "$ASSET_URL" $INSTALL_FLAGS
 if [ $? -ne 0 ]; then
   echo "❌ ERROR: wp plugin install failed."
   exit 1
+fi
+
+# --- EngineLink key handout (zero-touch enrollment) ---
+# Mirrors the plugin's own ensure_api_key(): the key lives in the
+# non-autoloaded valolink_settings option under ["enginelink"]["api_key"]
+# and is generated as bin2hex(random_bytes(24)) if missing. Works whether
+# or not the plugin is active — it's plain option storage.
+if $PRINT_KEY; then
+  echo ""
+  echo "  Ensuring EngineLink API key ..."
+  EL_KEY=$($WP eval '
+    $s = get_option("valolink_settings");
+    if (!is_array($s)) { $s = []; }
+    if (empty($s["enginelink"]["api_key"])) {
+      $s["enginelink"]["api_key"] = bin2hex(random_bytes(24));
+      update_option("valolink_settings", $s, "no");
+    }
+    echo $s["enginelink"]["api_key"];
+  ' 2>/dev/null)
+  if [ -n "$EL_KEY" ]; then
+    echo "ENGINELINK_API_KEY=$EL_KEY"
+  else
+    echo "⚠️  WARNING: Could not read or create the EngineLink API key."
+  fi
 fi
 
 echo ""
