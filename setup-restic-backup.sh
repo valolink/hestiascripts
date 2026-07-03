@@ -116,8 +116,11 @@ else
   fi
 
   sb_key_works() {
+    # Run 'pwd', not 'exit' — a Storage Box has no shell, only a fixed command
+    # allowlist (pwd/ls/mkdir/…). 'exit' isn't on it, so it'd return non-zero
+    # even when the key IS authorized, sending us into a needless reinstall.
     ssh -p "$PORT" -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 \
-        -o StrictHostKeyChecking=accept-new "$USER_SB@$HOST" exit 2>/dev/null
+        -o StrictHostKeyChecking=accept-new "$USER_SB@$HOST" pwd >/dev/null 2>&1
   }
   if sb_key_works; then
     log "Key already authorized on the Storage Box."
@@ -150,10 +153,22 @@ if ! rclone config create "$REMOTE" sftp \
 fi
 log "rclone remote '$REMOTE:' configured."
 
+# Connectivity check with an IPv4 fallback. Hetzner Storage Box SSH (:23) is
+# refused over IPv6 on many boxes, and rclone's Go SSH dials the AAAA record
+# without falling back to IPv4 the way openssh does. If the first attempt fails,
+# pin the host to its IPv4 in /etc/hosts (host-key stays valid — still keyed on
+# the hostname) and retry.
+if ! rclone lsd "$REMOTE:$REPO_PATH" >/dev/null 2>&1; then
+  ipv4=$(getent ahostsv4 "$HOST" 2>/dev/null | awk '{print $1; exit}')
+  if [ -n "$ipv4" ] && ! grep -qF " $HOST" /etc/hosts; then
+    echo "$ipv4 $HOST" >> /etc/hosts
+    log "rclone couldn't connect (likely IPv6) — pinned $HOST -> $ipv4 in /etc/hosts, retrying."
+  fi
+fi
 rclone mkdir "$REMOTE:$REPO_PATH" 2>/dev/null || true
 rclone lsd "$REMOTE:$REPO_PATH" >/dev/null 2>&1 \
-  || die "rclone can't reach $REMOTE:$REPO_PATH — check Storage Box path/permissions."
-log "Verified rclone can write to $REMOTE:$REPO_PATH"
+  || die "rclone still can't reach $REMOTE:$REPO_PATH. Debug: rclone lsd $REMOTE: -vv"
+log "Verified rclone can reach $REMOTE:$REPO_PATH"
 
 # ---- 5. register the per-box repo with Hestia ----
 REPO="rclone:$REMOTE:$REPO_PATH"
