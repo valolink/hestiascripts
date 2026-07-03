@@ -190,6 +190,29 @@ log "Registering restic repo with Hestia: $REPO"
 /usr/local/hestia/bin/v-add-backup-host-restic "$REPO" "$SNAPSHOTS" "$DAILY" "$WEEKLY" "$MONTHLY" "$YEARLY" \
   || die "v-add-backup-host-restic failed."
 
+# ---- 6. enable PER-USER incremental backups ----
+# v-add-backup-host-restic sets the SYSTEM flag (BACKUP_INCREMENTAL in
+# hestia.conf) but NOT the per-user one. v-backup-user-restic checks
+# BACKUPS_INCREMENTAL (note the plural) in each user's user.conf and refuses with
+# "incremental backups are disabled" when it's 'no' — the Hestia default. It's a
+# package attribute with no standalone setter, so flip it directly: in every
+# package (.pkg) so future/rebuilt users inherit 'yes', and in every existing
+# user.conf so it takes effect now (the check greps user.conf live). Surgical —
+# only this one key changes, so no other package limits are disturbed (which a
+# v-change-user-package reapply WOULD do). Add the key if a file lacks it.
+set_incremental_yes() {
+  local file=$1
+  [ -f "$file" ] || return 0
+  if grep -q "^BACKUPS_INCREMENTAL=" "$file"; then
+    sed -i "s/^BACKUPS_INCREMENTAL=.*/BACKUPS_INCREMENTAL='yes'/" "$file"
+  else
+    echo "BACKUPS_INCREMENTAL='yes'" >> "$file"
+  fi
+}
+log "Enabling per-user incremental backups (BACKUPS_INCREMENTAL=yes) — packages + existing users..."
+for pkg in /usr/local/hestia/data/packages/*.pkg; do set_incremental_yes "$pkg"; done
+for uc  in /usr/local/hestia/data/users/*/user.conf; do set_incremental_yes "$uc";  done
+
 FIRST_USER=$(v-list-users plain 2>/dev/null | awk 'NR==1{print $1}')
 FIRST_USER=${FIRST_USER:-<user>}
 
