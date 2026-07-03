@@ -18,32 +18,71 @@ export PATH=$PATH:/usr/local/hestia/bin
 
 now_epoch=$(date +%s)
 
-# --- Backups: newest backup file age per HestiaCP user ---------------------
-# HestiaCP writes user backups to /backup as <user>.<timestamp>.tar (plus a
-# per-user /home/<user>/backup for DB dumps). We report the freshest artifact
-# we can find per user, in whole hours.
-backups_json="[]"
-if command -v v-list-users >/dev/null 2>&1; then
-  users=$(v-list-users plain 2>/dev/null | awk '{print $1}')
-  entries=""
-  for u in $users; do
+# --- Backups: freshest artifact age per HestiaCP user ----------------------
+# Two backup backends coexist during the restic rollout, so we report whichever
+# is authoritative per user (restic first, then legacy tarball):
+#   * restic (incremental, streamed to a Hetzner Storage Box): there is NO local
+#     tarball — freshness lives in `restic snapshots`. Used when the user has a
+#     per-user key (/usr/local/hestia/data/users/<u>/restic.conf) AND a system
+#     repo is registered (/usr/local/hestia/conf/restic.conf → REPO=).
+#   * legacy tarballs in /backup/<user>.*.tar (+ /home/<user>/backup DB dumps).
+#
+# Each restic call is a network round-trip, and EngineLink aborts the whole
+# health fetch at 30s (serverMonitor.ts). So run the per-user probes in PARALLEL
+# with a per-call `timeout` — wall-clock stays ~one timeout regardless of how
+# many users there are, and a slow/unreachable Storage Box can't blow the budget
+# (a failed restic call just falls through to the tarball logic for that user).
+RESTIC_REPO=""
+[ -r /usr/local/hestia/conf/restic.conf ] \
+  && RESTIC_REPO=$(grep "^REPO=" /usr/local/hestia/conf/restic.conf 2>/dev/null | cut -f2 -d \')
+
+# Emit one JSON object for a user, or nothing if no backup artifact is found.
+user_backup_json() {
+  local u=$1 mtime="" iso newest upass="/usr/local/hestia/data/users/$1/restic.conf"
+
+  # 1) restic snapshot (authoritative on migrated boxes)
+  if [ -n "$RESTIC_REPO" ] && [ -r "$upass" ] && command -v restic >/dev/null 2>&1; then
+    iso=$(timeout 8 restic --repo "${RESTIC_REPO}${u}" --password-file "$upass" \
+            --no-lock --json snapshots --latest 1 2>/dev/null \
+          | grep -oE '"time":"[^"]+"' | head -n1 | sed 's/.*"time":"//; s/"$//')
+    [ -n "$iso" ] && mtime=$(date -d "$iso" +%s 2>/dev/null)
+  fi
+
+  # 2) legacy tarball / DB-dump fallback
+  if [ -z "$mtime" ]; then
     newest=""
-    # Hestia system backups live in /backup as ${user}.*.tar
     for f in /backup/${u}.*.tar; do
       [ -e "$f" ] || continue
       if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
     done
-    # Fall back to the user's own backup dir (DB/site dumps)
     if [ -z "$newest" ] && [ -d "/home/${u}/backup" ]; then
       newest=$(find "/home/${u}/backup" -type f -printf '%T@ %p\n' 2>/dev/null \
         | sort -rn | head -n1 | cut -d' ' -f2-)
     fi
-    [ -z "$newest" ] && continue
-    mtime=$(stat -c %Y "$newest" 2>/dev/null) || continue
-    age_hours=$(( (now_epoch - mtime) / 3600 ))
-    stamp=$(date -d "@$mtime" '+%Y-%m-%d %H:%M' 2>/dev/null)
-    entries="${entries},{\"user\":\"${u}\",\"ageHours\":${age_hours},\"newest\":\"${stamp}\"}"
+    [ -n "$newest" ] && mtime=$(stat -c %Y "$newest" 2>/dev/null)
+  fi
+
+  [ -z "$mtime" ] && return 0
+  local age_hours stamp
+  age_hours=$(( (now_epoch - mtime) / 3600 ))
+  stamp=$(date -d "@$mtime" '+%Y-%m-%d %H:%M' 2>/dev/null)
+  printf '{"user":"%s","ageHours":%s,"newest":"%s"}' "$u" "$age_hours" "$stamp"
+}
+
+backups_json="[]"
+if command -v v-list-users >/dev/null 2>&1; then
+  users=$(v-list-users plain 2>/dev/null | awk '{print $1}')
+  tmpd=$(mktemp -d)
+  for u in $users; do
+    user_backup_json "$u" > "$tmpd/$u" &
   done
+  wait
+  entries=""
+  for u in $users; do
+    line=$(cat "$tmpd/$u" 2>/dev/null)
+    [ -n "$line" ] && entries="${entries},${line}"
+  done
+  rm -rf "$tmpd"
   backups_json="[${entries#,}]"
 fi
 
