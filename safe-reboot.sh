@@ -115,16 +115,39 @@ log "Confirmed. Beginning pre-flight for '$HOST_SHORT'."
 # Stage 4: pre-stop services that don't affect website availability.
 # Web stack stays UP (nginx/apache2/php-fpm/mariadb/redis). 'named' stays up too
 # in case this box is authoritative DNS — keep it serving until the kernel goes.
-PRESTOP_SERVICES=(netdata vsftpd fail2ban postfix cron atd)
-log "Pre-stopping non-essential services: ${PRESTOP_SERVICES[*]}"
-for svc in "${PRESTOP_SERVICES[@]}"; do
-    if systemctl is-active --quiet "$svc" 2>/dev/null; then
-        if systemctl stop "$svc" 2>/dev/null; then
-            log "  stopped $svc"
-        else
-            log "  WARN: failed to stop $svc (continuing)"
+#
+# Each stop is BOUNDED. Some services stop slowly: fail2ban flushes every jail's
+# iptables rules on shutdown and can take its full 90s TimeoutStopSec on a busy
+# box. That work is pointless before a reboot (the kernel wipes iptables anyway),
+# and left unbounded it either stalls this pre-flight or — if we didn't pre-stop
+# it — stalls the real shutdown, which IS downtime. So we give each a few seconds
+# of graceful stop, then SIGKILL. None of these need a clean stop before a reboot
+# (postfix's queue is crash-safe, fail2ban's bans persist to its own DB).
+STOP_TIMEOUT=8
+stop_service() {
+    local svc="$1"
+    systemctl is-active --quiet "$svc" 2>/dev/null || return 0
+    systemctl stop "$svc" 2>/dev/null &
+    local pid=$! waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$STOP_TIMEOUT" ]; then
+            systemctl kill -s SIGKILL "$svc" 2>/dev/null
+            kill "$pid" 2>/dev/null   # drop the blocked `systemctl stop` client so wait can't hang
+            wait "$pid" 2>/dev/null
+            log "  force-killed $svc (graceful stop exceeded ${STOP_TIMEOUT}s)"
+            return 0
         fi
-    fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$pid" 2>/dev/null
+    log "  stopped $svc"
+}
+
+PRESTOP_SERVICES=(netdata vsftpd fail2ban postfix cron atd)
+log "Pre-stopping non-essential services (max ${STOP_TIMEOUT}s each): ${PRESTOP_SERVICES[*]}"
+for svc in "${PRESTOP_SERVICES[@]}"; do
+    stop_service "$svc"
 done
 
 # Stage 5: Redis background save (auth-aware, best-effort).

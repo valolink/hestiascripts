@@ -97,6 +97,12 @@ New v-scripts for WordPress operations (info gathering, updates, etc.) should fo
 
 Symlinks `v-*` bash scripts into `/usr/local/hestia/bin/`, creates a systemd unit for `hestia-streamer`, and opens firewall port 8091 for a specific IP.
 
+### Manual (non-streamer) scripts
+
+Scripts **without** the `v-` prefix are deliberately unreachable by the streamer: `main.go`'s allowlist is `^v-[a-zA-Z0-9-]+$` and `install-scripts.sh` only globs `v-*`, so a non-`v-` script is never symlinked into `/usr/local/hestia/bin/` and can't be invoked over HTTP. This is the access gate for operations too destructive to sit behind a network trigger — the only way to run them is a root shell on the box (deploy is a manual `cp`, not `install-scripts.sh`).
+
+- **`safe-reboot.sh`** — staged, guarded whole-box reboot. Naming it `v-…` would expose "reboot every server" to anyone with the streamer token, so it stays SSH-only by design. Flow: hard guards (root, systemd present, no `dpkg`/`apt`/`unattended-upgrades` mid-run, not already shutting down) → soft guard (refuses if a HestiaCP backup / `mysqldump` is running unless `--force`) → confirmation (type the hostname, or `--yes`) → **commit point** → pre-stop non-web services (netdata/vsftpd/fail2ban/postfix/cron/atd; nginx/php-fpm/DB/redis/named stay up) → Redis `BGSAVE` (auth-aware) → MariaDB/MySQL InnoDB dirty-page pre-flush (client + service auto-detected across `mysql`/`mariadb`/`mysqld` names) → `sync` → reboot (with `systemctl reboot` → `reboot` → `--force` fallbacks). Every bail-out is *before* the commit point, so it can never leave the box with services stopped but not rebooted. Post-confirmation log lines are stamped `+Ns` (elapsed since confirmation) and mirror to `journalctl -t safe-reboot`, so downtime is measurable live and after the fact. The pre-flush is an optimization (shorter shutdown, less crash-recovery) — skipping any stage is safe, systemd still shuts the DB down cleanly. Install: `cp safe-reboot.sh /usr/local/sbin/safe-reboot && chmod 700 /usr/local/sbin/safe-reboot`.
+
 ## Dependencies
 
 - **Go** — compile the streamer
