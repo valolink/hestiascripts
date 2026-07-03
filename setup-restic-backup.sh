@@ -31,8 +31,10 @@
 #   --port N        Storage Box SSH port [23 — Hetzner default]
 #   --key PATH      dedicated key path [/root/.ssh/storagebox]
 #   --remote NAME   rclone remote name [storagebox]
-#   --path P        repo path prefix on the box [/hestia-<shorthostname>/] — keep
-#                   it per-box so multiple boxes don't collide on one Storage Box
+#   --path P        repo dir on the box, RELATIVE to its /home [hestia-<shorthostname>/]
+#                   — keep it per-box so multiple boxes don't collide on one
+#                   Storage Box. Leading slashes are stripped (the SFTP chroot
+#                   only addresses /home-relative paths); '--path /' = home root.
 #   --snapshots N --daily N --weekly N --monthly N --yearly N
 #                   restic retention [-1 14 8 6 1]  (-1 = disable that tier)
 
@@ -46,7 +48,7 @@ HOST="" USER_SB="" PORT=23
 KEY=/root/.ssh/storagebox
 REMOTE=storagebox
 SHORTHOST=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo host)
-REPO_PATH="/hestia-${SHORTHOST}/"
+REPO_PATH="hestia-${SHORTHOST}/"   # RELATIVE to the Storage Box home (/home) — see normalisation below
 SNAPSHOTS=-1 DAILY=14 WEEKLY=8 MONTHLY=6 YEARLY=1
 PASSWORD_AUTH=0
 
@@ -77,9 +79,13 @@ command -v rclone >/dev/null 2>&1 || die "rclone not found. Install: curl https:
 command -v ssh-keyscan >/dev/null 2>&1 || die "ssh-keyscan not found (openssh-client)."
 [ -x /usr/local/hestia/bin/v-add-backup-host-restic ] || die "v-add-backup-host-restic missing — update HestiaCP."
 
-# normalise repo path to /.../ form
-case "$REPO_PATH" in /*) ;; *) REPO_PATH="/$REPO_PATH" ;; esac
-case "$REPO_PATH" in */) ;; *) REPO_PATH="$REPO_PATH/" ;; esac
+# Normalise the repo path RELATIVE to the Storage Box home. A Hetzner Storage
+# Box SFTP session is chrooted and addresses everything relative to /home; an
+# absolute '/path' escapes the writable area and lists empty (which reads as
+# "can't connect"). So strip any leading slash the operator passed (e.g.
+# '--path /' → home root) and keep a single trailing slash.
+while case "$REPO_PATH" in /*) true ;; *) false ;; esac; do REPO_PATH="${REPO_PATH#/}"; done
+case "$REPO_PATH" in ""|*/) ;; *) REPO_PATH="$REPO_PATH/" ;; esac
 
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 
@@ -153,21 +159,29 @@ if ! rclone config create "$REMOTE" sftp \
 fi
 log "rclone remote '$REMOTE:' configured."
 
-# Connectivity check with an IPv4 fallback. Hetzner Storage Box SSH (:23) is
-# refused over IPv6 on many boxes, and rclone's Go SSH dials the AAAA record
-# without falling back to IPv4 the way openssh does. If the first attempt fails,
-# pin the host to its IPv4 in /etc/hosts (host-key stays valid — still keyed on
-# the hostname) and retry.
-if ! rclone lsd "$REMOTE:$REPO_PATH" >/dev/null 2>&1; then
+# Connectivity check with an IPv4 fallback. Test against the remote's HOME
+# (bare "$REMOTE:", which resolves to /home) — NOT the repo subdir — because
+# that's the one path always addressable through the chroot. Hetzner Storage Box
+# SSH (:23) is refused over IPv6 on many boxes, and rclone's Go SSH dials the
+# AAAA record without falling back to IPv4 the way openssh does; if the first
+# attempt fails, pin the host to its IPv4 in /etc/hosts (host key stays valid —
+# still keyed on the hostname) and retry.
+if ! rclone lsd "$REMOTE:" >/dev/null 2>&1; then
   ipv4=$(getent ahostsv4 "$HOST" 2>/dev/null | awk '{print $1; exit}')
   if [ -n "$ipv4" ] && ! grep -qF " $HOST" /etc/hosts; then
     echo "$ipv4 $HOST" >> /etc/hosts
     log "rclone couldn't connect (likely IPv6) — pinned $HOST -> $ipv4 in /etc/hosts, retrying."
   fi
 fi
-rclone mkdir "$REMOTE:$REPO_PATH" 2>/dev/null || true
-rclone lsd "$REMOTE:$REPO_PATH" >/dev/null 2>&1 \
-  || die "rclone still can't reach $REMOTE:$REPO_PATH. Debug: rclone lsd $REMOTE: -vv"
+rclone lsd "$REMOTE:" >/dev/null 2>&1 \
+  || die "rclone can't reach $REMOTE: (home dir). Debug: rclone lsd $REMOTE: -vv"
+
+# Home reachable — now ensure the per-box repo dir exists (relative to /home).
+if [ -n "$REPO_PATH" ]; then
+  rclone mkdir "$REMOTE:$REPO_PATH" 2>/dev/null || true
+  rclone lsd "$REMOTE:$REPO_PATH" >/dev/null 2>&1 \
+    || die "connected to $REMOTE:, but can't create/list '$REPO_PATH'. Check the subaccount can write under /home."
+fi
 log "Verified rclone can reach $REMOTE:$REPO_PATH"
 
 # ---- 5. register the per-box repo with Hestia ----
