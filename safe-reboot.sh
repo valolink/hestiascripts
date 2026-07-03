@@ -40,8 +40,15 @@ HOST_SHORT=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "this-host"
 # log() prints to stdout AND to syslog (journald), so there's a persistent
 # audit trail across the reboot: `journalctl -t safe-reboot` after it comes back
 # tells you it was a clean staged reboot, not a crash.
+#
+# Once TIMING flips to 1 (at the commit point), each line is stamped with the
+# elapsed seconds since confirmation — so you can watch how long the box stays
+# reachable before the connection drops.
+TIMING=0
 log() {
-    echo "[safe-reboot] $*"
+    local tag="[safe-reboot]"
+    [ "${TIMING:-0}" = "1" ] && tag="[safe-reboot +${SECONDS}s]"
+    echo "$tag $*"
     command -v logger >/dev/null 2>&1 && logger -t safe-reboot -- "$*" || true
 }
 die() { log "ABORT: $*"; exit 1; }
@@ -101,6 +108,8 @@ fi
 # --- COMMIT POINT: past here we always proceed to the reboot. No aborts, so we
 #     can never leave the box with services stopped but not rebooted. ---
 # ===========================================================================
+SECONDS=0   # reset the elapsed clock; every log line below is now stamped +Ns
+TIMING=1
 log "Confirmed. Beginning pre-flight for '$HOST_SHORT'."
 
 # Stage 4: pre-stop services that don't affect website availability.
@@ -119,7 +128,15 @@ for svc in "${PRESTOP_SERVICES[@]}"; do
 done
 
 # Stage 5: Redis background save (auth-aware, best-effort).
-if command -v redis-cli >/dev/null 2>&1 && systemctl is-active --quiet redis-server 2>/dev/null; then
+REDIS_SVC=""
+for s in redis-server redis; do
+    systemctl is-active --quiet "$s" 2>/dev/null && { REDIS_SVC="$s"; break; }
+done
+if ! command -v redis-cli >/dev/null 2>&1; then
+    log "Redis pre-save skipped (redis-cli not installed)."
+elif [ -z "$REDIS_SVC" ]; then
+    log "Redis pre-save skipped (no active redis service)."
+else
     # If requirepass is set, redis-cli needs it — otherwise 'config get save' would
     # silently NOAUTH-fail and we'd wrongly think persistence is off.
     REDIS_CONF=$(find /etc/redis -maxdepth 2 -name 'redis.conf' 2>/dev/null | head -1)
@@ -150,17 +167,29 @@ if command -v redis-cli >/dev/null 2>&1 && systemctl is-active --quiet redis-ser
     fi
 fi
 
-# Stage 6: MariaDB InnoDB pre-flush (best-effort; uses root socket auth).
-if command -v mysql >/dev/null 2>&1 && systemctl is-active --quiet mariadb 2>/dev/null; then
-    log "Telling InnoDB to flush dirty pages proactively..."
-    mysql -e "SET GLOBAL innodb_max_dirty_pages_pct = 0;" 2>/dev/null \
+# Stage 6: MariaDB/MySQL InnoDB pre-flush (best-effort; uses root socket auth).
+# Detect both the client binary (mysql OR mariadb — newer MariaDB drops the
+# mysql symlink) and the service name (mariadb OR mysql OR mysqld), so this
+# stage isn't skipped just because of naming variants.
+DB_CLI=""
+for c in mysql mariadb; do
+    command -v "$c" >/dev/null 2>&1 && { DB_CLI="$c"; break; }
+done
+DB_SVC=""
+for s in mariadb mysql mysqld; do
+    systemctl is-active --quiet "$s" 2>/dev/null && { DB_SVC="$s"; break; }
+done
+
+if [ -n "$DB_CLI" ] && [ -n "$DB_SVC" ]; then
+    log "InnoDB pre-flush via '$DB_CLI' (service '$DB_SVC') — telling it to flush dirty pages..."
+    "$DB_CLI" -e "SET GLOBAL innodb_max_dirty_pages_pct = 0;" 2>/dev/null \
         || log "WARN: could not set flush target (continuing anyway)"
 
     log "Waiting for dirty pages to drain (max ~2 min)..."
     for _ in $(seq 1 24); do
-        DIRTY=$(mysql -Nse "SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_pages_dirty';" 2>/dev/null | awk '{print $2}')
+        DIRTY=$("$DB_CLI" -Nse "SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_pages_dirty';" 2>/dev/null | awk '{print $2}')
         # Empty (query failed / server gone) or non-numeric → stop waiting, don't error under set -u.
-        [[ "$DIRTY" =~ ^[0-9]+$ ]] || break
+        [[ "$DIRTY" =~ ^[0-9]+$ ]] || { log "  (no dirty-page count available — stopping wait)"; break; }
         log "  dirty pages: $DIRTY"
         if [ "$DIRTY" -le 10 ]; then
             log "Buffer pool clean enough."
@@ -168,13 +197,15 @@ if command -v mysql >/dev/null 2>&1 && systemctl is-active --quiet mariadb 2>/de
         fi
         sleep 5
     done
+else
+    log "MariaDB/MySQL pre-flush skipped (client='${DB_CLI:-none}', active service='${DB_SVC:-none}')."
 fi
 
 # Stage 7: flush filesystem buffers and reboot.
 log "Syncing filesystems..."
 sync
 
-log "All pre-flight done. Rebooting '$HOST_SHORT' NOW."
+log "All pre-flight done in ${SECONDS}s. Rebooting '$HOST_SHORT' NOW."
 sleep 1   # give stdout/journald a moment to flush the line above
 
 if ! systemctl reboot 2>/dev/null; then
