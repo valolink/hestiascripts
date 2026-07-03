@@ -18,9 +18,16 @@
 #      which also flips BACKUP_INCREMENTAL=yes.
 #
 # Usage:
-#   setup-restic-backup.sh --host uXXXXX.your-storagebox.de --user uXXXXX [opts]
+#   Main account (key auth):
+#     setup-restic-backup.sh --host uXXXXX.your-storagebox.de --user uXXXXX
+#   Subaccount (password auth — subaccounts don't support install-ssh-key, and
+#   use their OWN hostname uXXXXX-subN.your-storagebox.de):
+#     setup-restic-backup.sh --host uXXXXX-sub1.your-storagebox.de \
+#                            --user uXXXXX-sub1 --path / --password
 #
 # Options (defaults in brackets):
+#   --password      use the Storage Box password (prompted, or SB_PASS env)
+#                   instead of an SSH key — REQUIRED for subaccounts
 #   --port N        Storage Box SSH port [23 — Hetzner default]
 #   --key PATH      dedicated key path [/root/.ssh/storagebox]
 #   --remote NAME   rclone remote name [storagebox]
@@ -41,6 +48,7 @@ REMOTE=storagebox
 SHORTHOST=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo host)
 REPO_PATH="/hestia-${SHORTHOST}/"
 SNAPSHOTS=-1 DAILY=14 WEEKLY=8 MONTHLY=6 YEARLY=1
+PASSWORD_AUTH=0
 
 # ---- args ----
 while [ $# -gt 0 ]; do
@@ -56,6 +64,7 @@ while [ $# -gt 0 ]; do
     --weekly)    WEEKLY=${2:-};    shift 2 ;;
     --monthly)   MONTHLY=${2:-};   shift 2 ;;
     --yearly)    YEARLY=${2:-};    shift 2 ;;
+    --password)  PASSWORD_AUTH=1;  shift ;;
     -h|--help)   tail -n +2 "$0" | grep '^#' | sed 's/^# \?//'; exit 0 ;;
     *)           die "unknown argument: $1 (see --help)" ;;
   esac
@@ -74,53 +83,69 @@ case "$REPO_PATH" in */) ;; *) REPO_PATH="$REPO_PATH/" ;; esac
 
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 
-# ---- 1. dedicated key ----
-if [ ! -f "$KEY" ]; then
-  ssh-keygen -t ed25519 -N '' -f "$KEY" -C "hestia-${SHORTHOST}-backup" >/dev/null \
-    || die "ssh-keygen failed."
-  log "Generated dedicated backup key: $KEY"
-else
-  log "Using existing key: $KEY"
-fi
-
-# ---- 2. pin Storage Box host key ----
+# ---- pin Storage Box host key (both auth modes) ----
 if ! ssh-keygen -F "[$HOST]:$PORT" >/dev/null 2>&1; then
   ssh-keyscan -p "$PORT" "$HOST" 2>/dev/null >> /root/.ssh/known_hosts
   log "Pinned Storage Box host key ([$HOST]:$PORT) into known_hosts."
 fi
 
-# ---- 3. verify / install the authorized key ----
-sb_key_works() {
-  ssh -p "$PORT" -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 \
-      -o StrictHostKeyChecking=accept-new "$USER_SB@$HOST" exit 2>/dev/null
-}
+# ---- authentication (rclone secret args differ by mode) ----
+rclone_secret=()
 
-if sb_key_works; then
-  log "Key already authorized on the Storage Box."
-elif [ -t 0 ]; then
-  log "Key not yet authorized. Installing it now — you'll be asked for the Storage Box password ONCE."
-  if cat "$KEY.pub" | ssh -p "$PORT" -o StrictHostKeyChecking=accept-new "$USER_SB@$HOST" install-ssh-key; then
-    sb_key_works || die "key installed but auth still fails — double-check --user/--host."
-    log "Key installed and verified."
-  else
-    die "install-ssh-key failed. Enable SSH support on the Storage Box (Hetzner console) and retry."
+if [ "$PASSWORD_AUTH" -eq 1 ]; then
+  # Password auth — REQUIRED for Hetzner SUBACCOUNTS: they don't support
+  # install-ssh-key (it returns "Internal Error 006"), and they use their OWN
+  # hostname (uXXXXXX-subN.your-storagebox.de) + the subaccount user. rclone
+  # stores the password obscured in root-only rclone.conf; the backup data is
+  # restic-encrypted regardless, and the subaccount is scoped to its own dir.
+  if [ -z "${SB_PASS:-}" ]; then
+    [ -t 0 ] || die "--password needs a terminal to prompt (or pass it via the SB_PASS env var)."
+    read -rs -p "[setup-restic] Storage Box password for $USER_SB@$HOST: " SB_PASS; echo
   fi
+  [ -n "$SB_PASS" ] || die "empty password."
+  rclone_secret=(pass="$(rclone obscure "$SB_PASS")")
+  log "Using password auth (subaccount mode)."
 else
-  log "Key not authorized, and not a terminal (can't prompt for the Storage Box password)."
-  log "Run this once, then re-run me:"
-  log "    cat $KEY.pub | ssh -p $PORT $USER_SB@$HOST install-ssh-key"
-  exit 1
+  # Key auth — for the MAIN account (supports install-ssh-key).
+  if [ ! -f "$KEY" ]; then
+    ssh-keygen -t ed25519 -N '' -f "$KEY" -C "hestia-${SHORTHOST}-backup" >/dev/null \
+      || die "ssh-keygen failed."
+    log "Generated dedicated backup key: $KEY"
+  else
+    log "Using existing key: $KEY"
+  fi
+
+  sb_key_works() {
+    ssh -p "$PORT" -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 \
+        -o StrictHostKeyChecking=accept-new "$USER_SB@$HOST" exit 2>/dev/null
+  }
+  if sb_key_works; then
+    log "Key already authorized on the Storage Box."
+  elif [ -t 0 ]; then
+    log "Key not yet authorized. Installing it now — you'll be asked for the Storage Box password ONCE."
+    if cat "$KEY.pub" | ssh -p "$PORT" -o StrictHostKeyChecking=accept-new "$USER_SB@$HOST" install-ssh-key; then
+      sb_key_works || die "key installed but auth still fails — double-check --user/--host."
+      log "Key installed and verified."
+    else
+      die "install-ssh-key failed. If this is a SUBACCOUNT it isn't supported there — re-run with --password (and the subaccount's own uXXXXXX-subN host). Otherwise enable SSH support on the Storage Box."
+    fi
+  else
+    log "Key not authorized, and not a terminal to prompt. Run this once then re-run me:"
+    log "    cat $KEY.pub | ssh -p $PORT $USER_SB@$HOST install-ssh-key"
+    exit 1
+  fi
+  rclone_secret=(key_file="$KEY")
 fi
 
-# ---- 4. rclone remote (idempotent; delete+recreate) ----
+# ---- rclone remote (idempotent; delete+recreate) ----
 rclone config delete "$REMOTE" >/dev/null 2>&1 || true
 if ! rclone config create "$REMOTE" sftp \
         host="$HOST" user="$USER_SB" port="$PORT" \
-        key_file="$KEY" known_hosts_file=/root/.ssh/known_hosts >/dev/null 2>&1; then
+        "${rclone_secret[@]}" known_hosts_file=/root/.ssh/known_hosts >/dev/null 2>&1; then
   log "WARN: rclone rejected known_hosts_file (older rclone?) — recreating without it."
   rclone config delete "$REMOTE" >/dev/null 2>&1 || true
   rclone config create "$REMOTE" sftp \
-        host="$HOST" user="$USER_SB" port="$PORT" key_file="$KEY" >/dev/null \
+        host="$HOST" user="$USER_SB" port="$PORT" "${rclone_secret[@]}" >/dev/null \
     || die "rclone remote creation failed."
 fi
 log "rclone remote '$REMOTE:' configured."
