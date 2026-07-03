@@ -17,6 +17,14 @@ menu_fail2ban() {
       status_line "Fail2ban" WARN "installed but not running"
     else
       status_line "Fail2ban" OK "running"
+      # Ban emails are intentionally off — Hestia's default action_mwl mails on
+      # every ban (floods the inbox, stalls the SMTP-bound command queue).
+      # 'Restart' (option 2) re-applies the silencing after any Hestia regen.
+      if grep -q '%(action_mw' /etc/fail2ban/jail.local 2>/dev/null; then
+        sub_line "  Ban emails" "ON — noisy (run Restart to silence)"
+      else
+        sub_line "  Ban emails" "off — ban-only (managed by this tool)"
+      fi
       if fail2ban-client status wordpress &>/dev/null; then
         local banned
         banned=$(fail2ban-client status wordpress 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
@@ -135,6 +143,18 @@ _ini_set_key() {
 # must be disabled there directly.
 _fail2ban_fix_config() {
   local test_out jail iterations=0
+
+  # Quiet the noisy HestiaCP default. Hestia writes `action = %(action_mwl)s`
+  # per jail, which emails whois + matching log lines on EVERY ban. destemail is
+  # the production inbox (tuotanto@valolink.fi → also EngineLink's triage feed),
+  # so a brute-force wave floods it, and the mail action blocks fail2ban's command
+  # queue on SMTP (the reason the reload/stop paths below force-kill). Switch to
+  # the ban-only action — bans are unchanged, just no mail. Idempotent, and
+  # re-applied on every reload so it survives Hestia regenerating jail.local.
+  if [ -f /etc/fail2ban/jail.local ] && grep -q '%(action_mw' /etc/fail2ban/jail.local 2>/dev/null; then
+    sed -i 's/%(action_mwl)s/%(action_)s/g; s/%(action_mw)s/%(action_)s/g' /etc/fail2ban/jail.local
+    echo -e "  ${CYAN}→${NC} Silenced fail2ban ban emails (action → ban-only; mail floods the inbox + stalls the queue)"
+  fi
 
   while true; do
     test_out=$(fail2ban-client -t 2>&1)
