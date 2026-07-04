@@ -117,7 +117,11 @@ elif command -v exim >/dev/null 2>&1; then
   mail_queue=$(exim -bpc 2>/dev/null || echo 0)
 fi
 
-printf '{"backups":%s,"services":%s,"mailQueue":%s}\n' \
-  "$backups_json" "$services_json" "$mail_queue"
+# --- Root disk usage --------------------------------------------------------
+disk_pct=$(df / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " / " $2}')
+
+printf '{"backups":%s,"services":%s,"mailQueue":%s,"disk":{"usedPct":%s,"info":"%s"}}\n' \
+  "$backups_json" "$services_json" "$mail_queue" "${disk_pct:-0}" "${disk_info:-}"
 
 exit 0
