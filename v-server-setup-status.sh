@@ -143,13 +143,29 @@ HESTIA_INSTALLED=$(grep -oP "(?<=VERSION=')[^']+" /usr/local/hestia/conf/hestia.
 HESTIA_LATEST=$(curl -sf --max-time 4 "https://api.github.com/repos/hestiacp/hestiacp/releases/latest" 2>/dev/null \
   | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
 
+# --- Restic backups (config posture only — freshness is v-server-health's job) ------------------
+# Same paths v-server-health uses: system repo in conf/restic.conf (REPO=),
+# per-user keys in data/users/<u>/restic.conf. No network calls here.
+RESTIC_SYSTEM_REPO=0
+if [ -r /usr/local/hestia/conf/restic.conf ] \
+  && grep -q "^REPO=" /usr/local/hestia/conf/restic.conf 2>/dev/null; then
+  RESTIC_SYSTEM_REPO=1
+fi
+RESTIC_USERS_TOTAL=0
+RESTIC_USERS_KEYED=0
+for udir in /usr/local/hestia/data/users/*/; do
+  [ -d "$udir" ] || continue
+  RESTIC_USERS_TOTAL=$((RESTIC_USERS_TOTAL+1))
+  [ -r "${udir}restic.conf" ] && RESTIC_USERS_KEYED=$((RESTIC_USERS_KEYED+1))
+done
+
 # --- Disk --------------------------------------------------------------------------------------
 DISK_PCT=$(df / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
 DISK_INFO=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " / " $2}')
 
 echo "Checks complete."
 
-printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"version":"%s"},"redis":{"installed":%s,"running":%s,"maxmemory":%s,"policy":"%s","phpExt":%s},"fail2ban":{"installed":%s,"running":%s,"wpJail":"%s"},"maldet":{"installed":%s,"lastScan":"%s"},"netdata":{"installed":%s,"running":%s},"security":{"swap":%s,"sshKeyOnly":%s,"unattendedUpgrades":"%s"},"smtp":{"relay":"%s"},"phpFpmProfiles":{"installed":%s,"missing":%s},"opcache":{"ok":%s,"needsAttention":%s},"mariadb":{"bufferPool":"%s"},"nginxTemplates":{"wpSecure":%s,"wpRocket":%s},"hestia":{"installed":"%s","latest":"%s"},"disk":{"usedPct":%s,"info":"%s"}}\n' \
+printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"version":"%s"},"redis":{"installed":%s,"running":%s,"maxmemory":%s,"policy":"%s","phpExt":%s},"fail2ban":{"installed":%s,"running":%s,"wpJail":"%s"},"maldet":{"installed":%s,"lastScan":"%s"},"netdata":{"installed":%s,"running":%s},"security":{"swap":%s,"sshKeyOnly":%s,"unattendedUpgrades":"%s"},"smtp":{"relay":"%s"},"phpFpmProfiles":{"installed":%s,"missing":%s},"opcache":{"ok":%s,"needsAttention":%s},"mariadb":{"bufferPool":"%s"},"nginxTemplates":{"wpSecure":%s,"wpRocket":%s},"hestia":{"installed":"%s","latest":"%s"},"restic":{"systemRepo":%s,"usersWithKeys":%s,"usersTotal":%s},"disk":{"usedPct":%s,"info":"%s"}}\n' \
   "$(b $STREAMER_RUNNING)" "${VSCRIPT_COUNT:-0}" \
   "$(b $WPCLI_INSTALLED)" "$(json_escape "${WPCLI_VERSION}")" \
   "$(b $REDIS_INSTALLED)" "$(b $REDIS_RUNNING)" "${REDIS_MAXMEM:-0}" "$(json_escape "${REDIS_POLICY}")" "$PHP_REDIS_EXT" \
@@ -163,6 +179,7 @@ printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"versio
   "$(json_escape "${MARIADB_BUFFER}")" \
   "$(b $WP_SECURE)" "$(b $WP_ROCKET)" \
   "$(json_escape "${HESTIA_INSTALLED}")" "$(json_escape "${HESTIA_LATEST}")" \
+  "$(b $RESTIC_SYSTEM_REPO)" "${RESTIC_USERS_KEYED:-0}" "${RESTIC_USERS_TOTAL:-0}" \
   "${DISK_PCT:-0}" "$(json_escape "${DISK_INFO}")"
 
 exit 0
