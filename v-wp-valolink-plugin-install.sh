@@ -150,20 +150,31 @@ fi
 
 # --- EngineLink key handout (zero-touch enrollment) ---
 # Mirrors the plugin's own ensure_api_key(): the key lives in the
-# non-autoloaded valolink_settings option under ["enginelink"]["api_key"]
-# and is generated as bin2hex(random_bytes(24)) if missing. Works whether
-# or not the plugin is active — it's plain option storage.
+# non-autoloaded valolink_settings option under
+# ["modules"]["enginelink"]["settings"]["api_key"] (the Settings class's
+# module layout — EnginelinkAuth compares the Bearer token against exactly
+# this path). Generated as bin2hex(random_bytes(24)) if missing. Works
+# whether or not the plugin is active — it's plain option storage.
+# Earlier builds of this script wrote to a wrong path
+# (["enginelink"]["api_key"]) the plugin never reads, handing EngineLink
+# a token that could never authenticate; a key stranded there is migrated
+# into the canonical path so previously-captured tokens start working.
 if $PRINT_KEY; then
   echo ""
   echo "  Ensuring EngineLink API key ..."
   EL_KEY=$($WP eval '
     $s = get_option("valolink_settings");
     if (!is_array($s)) { $s = []; }
-    if (empty($s["enginelink"]["api_key"])) {
-      $s["enginelink"]["api_key"] = bin2hex(random_bytes(24));
+    $key = $s["modules"]["enginelink"]["settings"]["api_key"] ?? "";
+    $legacy = $s["enginelink"]["api_key"] ?? "";
+    if ($key === "" && is_string($legacy) && $legacy !== "") { $key = $legacy; }
+    if (!is_string($key) || $key === "") { $key = bin2hex(random_bytes(24)); }
+    if (($s["modules"]["enginelink"]["settings"]["api_key"] ?? "") !== $key || $legacy !== "") {
+      $s["modules"]["enginelink"]["settings"]["api_key"] = $key;
+      unset($s["enginelink"]);
       update_option("valolink_settings", $s, "no");
     }
-    echo $s["enginelink"]["api_key"];
+    echo $key;
   ' 2>/dev/null)
   if [ -n "$EL_KEY" ]; then
     echo "ENGINELINK_API_KEY=$EL_KEY"
