@@ -54,10 +54,67 @@ func checkToken(w http.ResponseWriter, r *http.Request) bool {
 // Strict regex: The script name must start with "v-" and contain only letters, numbers, and hyphens.
 var safeScriptRegex = regexp.MustCompile(`^v-[a-zA-Z0-9-]+$`)
 
-// Dump archives are bare basenames like user_domain_2026-07-05_12-00-00.zip —
-// no slashes, must end in .zip. Combined with filepath.Join under the backup
-// dir this is the whole reachable surface of downloadHandler.
-var safeDumpRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$`)
+// The name regex alone would admit every stock Hestia binary in AllowedDir,
+// making the token root-equivalent (v-delete-user, v-add-user-ssh-key, …).
+// So execution is allowlisted at this layer too, not just in EngineLink:
+//
+//   - our own script families pass by prefix — they only exist in
+//     AllowedDir because install-scripts.sh symlinked them from this repo;
+//   - stock Hestia commands must be named here exactly. Additions are
+//     deliberate: extend the list, commit, and roll out with
+//     v-hestiascripts-update.
+var allowedPrefixes = []string{"v-wp-", "v-server-"}
+
+var allowedScripts = map[string]bool{
+	"v-hestiascripts-update": true,
+	// Site dumps (files + DB) for downloads / local dev pulls.
+	"v-dump-site":     true,
+	"v-dump-database": true,
+	// Inventory & reconciliation (read-only listings).
+	"v-list-sys-users":             true,
+	"v-list-users-stats":           true,
+	"v-list-web-domains":           true,
+	"v-list-web-domain":            true,
+	"v-list-web-domain-ssl":        true,
+	"v-list-databases":             true,
+	"v-list-user-backups":          true,
+	"v-list-sys-services":          true,
+	"v-list-sys-php":               true,
+	"v-list-web-templates-backend": true,
+	"v-search-domain-owner":        true,
+	// Per-site operations.
+	"v-purge-nginx-cache":             true,
+	"v-rebuild-web-domain":            true,
+	"v-add-letsencrypt-domain":        true,
+	"v-suspend-web-domain":            true,
+	"v-unsuspend-web-domain":          true,
+	"v-change-web-domain-backend-tpl": true,
+	"v-schedule-user-backup":          true,
+	// Privilege-dropped runner (wp / composer as the site's user).
+	"v-run-cli-cmd": true,
+	// Server-level maintenance.
+	"v-restart-service":        true,
+	"v-restart-web-backend":    true,
+	"v-update-letsencrypt-ssl": true,
+	"v-update-sys-hestia-all":  true,
+}
+
+func isAllowedScript(name string) bool {
+	if allowedScripts[name] {
+		return true
+	}
+	for _, p := range allowedPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// Dump handoffs are bare basenames — site zips from v-dump-site and gzipped
+// SQL from v-dump-database. No slashes; combined with filepath.Join under
+// the backup dir this is the whole reachable surface of downloadHandler.
+var safeDumpRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.(zip|sql\.gz)$`)
 
 // Shared secret, second factor on top of the firewall IP allowlist.
 // Set via the systemd unit's EnvironmentFile (/etc/hestia-streamer.env,
@@ -208,7 +265,11 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/zip")
+	contentType := "application/zip"
+	if strings.HasSuffix(name, ".sql.gz") {
+		contentType = "application/gzip"
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	w.Header().Set("Content-Disposition", "attachment; filename="+name)
 	io.Copy(w, f)
@@ -242,9 +303,11 @@ func executeHandler(w http.ResponseWriter, r *http.Request) {
 	scriptName := q.Get("script")
 
 	// 3. Security Validation
-	// If the script name isn't exactly like "v-clone-wp", reject it immediately.
-	if !safeScriptRegex.MatchString(scriptName) {
+	// Shape first (path safety), then the execution allowlist — the name
+	// regex alone would admit every stock Hestia binary.
+	if !safeScriptRegex.MatchString(scriptName) || !isAllowedScript(scriptName) {
 		fmt.Fprintf(w, "data: ERROR: Invalid or unauthorized script name.\n\n")
+		fmt.Fprintf(w, "event: exit\ndata: 1\n\n")
 		return
 	}
 
