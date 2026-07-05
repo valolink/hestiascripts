@@ -70,8 +70,10 @@ var allowedScripts = map[string]bool{
 	// Site dumps (files + DB) for downloads / local dev pulls.
 	"v-dump-site":     true,
 	"v-dump-database": true,
-	// Inventory & reconciliation (read-only listings).
-	"v-list-sys-users":             true,
+	// Inventory & reconciliation (read-only listings). v-list-users (Hestia
+	// accounts) is what EngineLink's listHestiaUsers/hestia-scan call — not
+	// v-list-sys-users (OS users), which nothing uses.
+	"v-list-users":                 true,
 	"v-list-users-stats":           true,
 	"v-list-web-domains":           true,
 	"v-list-web-domain":            true,
