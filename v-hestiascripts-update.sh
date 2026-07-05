@@ -34,6 +34,11 @@ if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
 fi
 
 echo "Repo: $REPO_DIR ($(git remote get-url origin 2> /dev/null || echo 'no remote'))"
+
+# install-scripts.sh chmod +x's the sources, which git would otherwise see
+# as a permanent mode-bit diff and this script would "stash" on every run.
+git config core.fileMode false
+
 OLD_REV=$(git rev-parse --short HEAD)
 
 # Local drift is unexpected (deploys are git-managed) — stash it rather than

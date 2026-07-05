@@ -114,7 +114,7 @@ EOF
   systemctl restart hestia-streamer.service
 
   if systemctl is-active --quiet hestia-streamer; then
-    echo "  🚀 Success! Go Streamer is running on port 8084."
+    echo "  🚀 Success! Go Streamer is running on port 8091."
   else
     echo "  ❌ ERROR: Go Streamer failed to start."
   fi
