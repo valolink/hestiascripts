@@ -52,7 +52,7 @@ The streamer runs on port **8091**. The `/execute` endpoint accepts `?script=SCR
 
 ### hestia-streamer (`main.go`)
 
-Two-endpoint Go HTTP server. Both share the optional `X-Streamer-Token` gate (constant-time compare, disabled when `HESTIA_STREAMER_TOKEN` is unset).
+Small Go HTTP server; four endpoints, all sharing the optional `X-Streamer-Token` gate (constant-time compare, disabled when `HESTIA_STREAMER_TOKEN` is unset).
 
 **`/netdata/alarms`** — plain JSON passthrough (not SSE) to box-local Netdata `http://127.0.0.1:19999/api/v1/alarms` (8s timeout, 502 on dial failure). Lets EngineLink's `poll-server-alarms` cron read raised alarms over the same token-authed channel it already uses for `/execute`, so Netdata (:19999) never needs to be reachable from the Nuxt host. If a future Netdata build drops the v1 alarms API, `NetdataAlarmsURL` is the single line to update.
 
@@ -66,6 +66,8 @@ Two-endpoint Go HTTP server. Both share the optional `X-Streamer-Token` gate (co
 - Ends every run with a named SSE event `event: exit` carrying the script's exit code (consumers use it to distinguish success from failure — EngineLink auto-logs maintenance events / stores enrollment keys only on exit 0)
 - Optional shared-secret auth: when the `HESTIA_STREAMER_TOKEN` env is set (systemd loads `/etc/hestia-streamer.env`, generated + printed by `install-scripts.sh`), requests must carry a matching `X-Streamer-Token` header or get a 403 (constant-time compare). Unset = auth disabled, for pre-token installs.
 - Sets `X-Accel-Buffering: no` to disable nginx proxy buffering
+
+**`/download`** — hands a finished `v-dump-site` archive back to EngineLink (`?file=BASENAME.zip`). `v-dump-site` is a *stock HestiaCP* binary (zips a web domain into `$BACKUP/user_domain_timestamp.zip` and prints the basename + absolute path as its last two stdout lines); Hestia's own panel serves the result via nginx `X-Accel-Redirect`, which we don't sit behind, so this endpoint serves the bytes itself. Basename-only regex (`^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$`, no traversal), resolved under `$BACKUP` parsed from `/usr/local/hestia/conf/hestia.conf` (default `/backup`). **The file is deleted after the response ends** — one-shot handoff, not a stored backup; the script's own `at now + 1 hour` cleanup is only a backstop (`at` isn't installed everywhere). EngineLink drives the pair from the website Operate tab: `/execute?script=v-dump-site` → capture basename → `/download?file=…`.
 
 ### Custom v-scripts
 
