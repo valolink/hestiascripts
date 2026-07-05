@@ -66,6 +66,18 @@ _fail2ban_patch_filter() {
   echo -e "  ${CYAN}→${NC} Patched WordPress filter to also cover xmlrpc.php"
 }
 
+# Whitelist the server's own addresses in the WP jail. The nginx→apache proxy
+# hop originates from one of the host's own IPs (on DigitalOcean the private
+# anchor IP), and apache domain logs record that as the client — so a bot
+# hammering wp-login gets the server's OWN IP banned, the proxy path REJECTed,
+# and every site on the box 502s (2026-07-05: took down 8dmeditaatiot + web1).
+_fail2ban_patch_jail_ignoreip() {
+  [ -f "$_F2B_JAIL" ] || return 0
+  grep -q "^ignoreip" "$_F2B_JAIL" && return 0
+  printf '# Never ban the server itself: proxied requests are logged with the\n# host'\''s own source addresses on the nginx->apache hop.\nignoreip = 127.0.0.1/8 ::1 %s\n' "$(hostname -I | xargs)" >> "$_F2B_JAIL"
+  echo -e "  ${CYAN}→${NC} Added ignoreip for the server's own addresses (self-ban guard)"
+}
+
 # Reload the daemon. If it doesn't return in 3 seconds the command queue is
 # stuck (typically a mail action blocked on SMTP) — force-kill the server
 # process and bring it back via systemctl. In-memory ban state is lost; the
@@ -94,6 +106,7 @@ _fail2ban_restart() {
 
   echo ""
   _fail2ban_patch_filter
+  _fail2ban_patch_jail_ignoreip
 
   if ! _fail2ban_fix_config; then
     press_enter; return
@@ -232,6 +245,8 @@ maxretry = 10
 findtime = 3600
 bantime  = 86400
 EOF
+
+  _fail2ban_patch_jail_ignoreip
 
   echo ""
 
