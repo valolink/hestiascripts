@@ -80,6 +80,10 @@ var allowedScripts = map[string]bool{
 	"v-list-web-domain-ssl":        true,
 	"v-list-databases":             true,
 	"v-list-user-backups":          true,
+	// Full-user backup for cross-server migration (source side): produces the
+	// /backup/<user>.<date>.tar that /download hands to Engine and /upload
+	// lands on the destination box.
+	"v-backup-user": true,
 	"v-list-sys-services":          true,
 	"v-list-sys-php":               true,
 	"v-list-web-templates-backend": true,
@@ -113,10 +117,12 @@ func isAllowedScript(name string) bool {
 	return false
 }
 
-// Dump handoffs are bare basenames — site zips from v-dump-site and gzipped
-// SQL from v-dump-database. No slashes; combined with filepath.Join under
-// the backup dir this is the whole reachable surface of downloadHandler.
-var safeDumpRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.(zip|sql\.gz)$`)
+// Download/upload handoffs are bare basenames — site zips from v-dump-site,
+// gzipped SQL from v-dump-database, and full-user .tar backups from
+// v-backup-user (for cross-server user migration). No slashes; combined
+// with filepath.Join under the backup dir this is the whole reachable
+// surface of download/uploadHandler.
+var safeDumpRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.(zip|sql\.gz|tar)$`)
 
 // Shared secret, second factor on top of the firewall IP allowlist.
 // Set via the systemd unit's EnvironmentFile (/etc/hestia-streamer.env,
@@ -268,18 +274,75 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	contentType := "application/zip"
-	if strings.HasSuffix(name, ".sql.gz") {
+	switch {
+	case strings.HasSuffix(name, ".sql.gz"):
 		contentType = "application/gzip"
+	case strings.HasSuffix(name, ".tar"):
+		contentType = "application/x-tar"
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	w.Header().Set("Content-Disposition", "attachment; filename="+name)
 	io.Copy(w, f)
 
-	// One-shot: remove regardless of whether the client finished reading —
-	// an aborted download just means re-running the dump, which beats
-	// leaking multi-GB zips on /backup.
-	os.Remove(path)
+	// One-shot cleanup for EPHEMERAL dump handoffs (zip/sql.gz) only — an
+	// aborted download just means re-running the dump. A .tar is a real
+	// Hestia user backup: leave it in place (Hestia owns its retention; it's
+	// also the migration source's safety net).
+	if !strings.HasSuffix(name, ".tar") {
+		os.Remove(path)
+	}
+}
+
+// uploadHandler receives a full-user .tar backup and writes it into the
+// box's $BACKUP dir, where v-restore-user expects it — the destination side
+// of EngineLink's cross-server user migration (source /download → Engine →
+// dest /upload). Token-gated like everything; the filename is basename-only
+// and .tar-only, so this can only ever land a backup archive in /backup. No
+// new privilege over the already-allowlisted /execute (root scripts).
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	if !checkToken(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	name := r.URL.Query().Get("file")
+	if !safeDumpRegex.MatchString(name) || !strings.HasSuffix(name, ".tar") || strings.Contains(name, "..") {
+		http.Error(w, "Invalid file", http.StatusBadRequest)
+		return
+	}
+
+	dir := hestiaBackupDir()
+	// Write to a temp file first, then rename — a half-transferred backup is
+	// never visible to v-restore-user / v-list-user-backups.
+	tmp, err := os.CreateTemp(dir, ".upload-*.tmp")
+	if err != nil {
+		http.Error(w, "Cannot create temp file", http.StatusInternalServerError)
+		return
+	}
+	tmpPath := tmp.Name()
+
+	n, err := io.Copy(tmp, r.Body)
+	tmp.Close()
+	if err != nil {
+		os.Remove(tmpPath)
+		http.Error(w, "Write failed", http.StatusInternalServerError)
+		return
+	}
+
+	dst := filepath.Join(dir, name)
+	if err := os.Rename(tmpPath, dst); err != nil {
+		os.Remove(tmpPath)
+		http.Error(w, "Rename failed", http.StatusInternalServerError)
+		return
+	}
+	_ = os.Chmod(dst, 0o644)
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"ok":true,"file":%q,"bytes":%d}`, name, n)
 }
 
 func executeHandler(w http.ResponseWriter, r *http.Request) {
@@ -363,6 +426,7 @@ func executeHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	http.HandleFunc("/execute", executeHandler)
 	http.HandleFunc("/download", downloadHandler)
+	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/netdata/alarms", alarmsHandler)
 	http.HandleFunc("/netdata/data", dataHandler)
 
