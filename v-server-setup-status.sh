@@ -90,10 +90,11 @@ if [ -f /usr/local/maldetect/maldet ]; then
 fi
 
 # --- Netdata ---------------------------------------------------------------------
-NETDATA_INSTALLED=0 NETDATA_RUNNING=0
+NETDATA_INSTALLED=0 NETDATA_RUNNING=0 NETDATA_TUNED=0
 if command -v netdata &>/dev/null; then
   NETDATA_INSTALLED=1
   systemctl is-active --quiet netdata 2>/dev/null && NETDATA_RUNNING=1
+  grep -q "hestiascripts-tuned" /etc/netdata/netdata.conf 2>/dev/null && NETDATA_TUNED=1
 fi
 
 # --- Security (swap / SSH / unattended upgrades) ----------------------------------
@@ -173,14 +174,14 @@ DISK_INFO=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " / " $2}')
 
 echo "Checks complete."
 
-printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"version":"%s"},"chromium":{"installed":%s,"version":"%s"},"redis":{"installed":%s,"running":%s,"maxmemory":%s,"policy":"%s","phpExt":%s},"fail2ban":{"installed":%s,"running":%s,"wpJail":"%s"},"maldet":{"installed":%s,"lastScan":"%s"},"netdata":{"installed":%s,"running":%s},"security":{"swap":%s,"sshKeyOnly":%s,"unattendedUpgrades":"%s"},"smtp":{"relay":"%s"},"phpFpmProfiles":{"installed":%s,"missing":%s},"opcache":{"ok":%s,"needsAttention":%s},"mariadb":{"bufferPool":"%s"},"nginxTemplates":{"wpSecure":%s,"wpRocket":%s},"hestia":{"installed":"%s","latest":"%s"},"restic":{"systemRepo":%s,"usersWithKeys":%s,"usersTotal":%s},"disk":{"usedPct":%s,"info":"%s"}}\n' \
+printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"version":"%s"},"chromium":{"installed":%s,"version":"%s"},"redis":{"installed":%s,"running":%s,"maxmemory":%s,"policy":"%s","phpExt":%s},"fail2ban":{"installed":%s,"running":%s,"wpJail":"%s"},"maldet":{"installed":%s,"lastScan":"%s"},"netdata":{"installed":%s,"running":%s,"tuned":%s},"security":{"swap":%s,"sshKeyOnly":%s,"unattendedUpgrades":"%s"},"smtp":{"relay":"%s"},"phpFpmProfiles":{"installed":%s,"missing":%s},"opcache":{"ok":%s,"needsAttention":%s},"mariadb":{"bufferPool":"%s"},"nginxTemplates":{"wpSecure":%s,"wpRocket":%s},"hestia":{"installed":"%s","latest":"%s"},"restic":{"systemRepo":%s,"usersWithKeys":%s,"usersTotal":%s},"disk":{"usedPct":%s,"info":"%s"}}\n' \
   "$(b $STREAMER_RUNNING)" "${VSCRIPT_COUNT:-0}" \
   "$(b $WPCLI_INSTALLED)" "$(json_escape "${WPCLI_VERSION}")" \
   "$(b $CHROMIUM_INSTALLED)" "$(json_escape "${CHROMIUM_VERSION}")" \
   "$(b $REDIS_INSTALLED)" "$(b $REDIS_RUNNING)" "${REDIS_MAXMEM:-0}" "$(json_escape "${REDIS_POLICY}")" "$PHP_REDIS_EXT" \
   "$(b $F2B_INSTALLED)" "$(b $F2B_RUNNING)" "$F2B_WPJAIL" \
   "$(b $MALDET_INSTALLED)" "$(json_escape "${MALDET_LAST_SCAN}")" \
-  "$(b $NETDATA_INSTALLED)" "$(b $NETDATA_RUNNING)" \
+  "$(b $NETDATA_INSTALLED)" "$(b $NETDATA_RUNNING)" "$(b $NETDATA_TUNED)" \
   "$(b $SWAP_OK)" "$(b $SSH_KEY_ONLY)" "$UU_STATE" \
   "$(json_escape "${SMTP_RELAY}")" \
   "${FPM_OK:-0}" "${FPM_MISSING:-0}" \

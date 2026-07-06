@@ -87,10 +87,16 @@ print_status() {
   fi
 
   # 6) Netdata
+  local nd_profile="stock"
+  grep -q "hestiascripts-tuned" /etc/netdata/netdata.conf 2>/dev/null && nd_profile="tuned"
   if ! command -v netdata &>/dev/null; then
     menu_status_line 6 "Netdata" ERR "not installed"
   elif systemctl is-active --quiet netdata 2>/dev/null; then
-    menu_status_line 6 "Netdata" OK "running  port 19999"
+    if [ "$nd_profile" = "tuned" ]; then
+      menu_status_line 6 "Netdata" OK "running  port 19999  low-footprint"
+    else
+      menu_status_line 6 "Netdata" WARN "running — stock profile (ML on; run tuning, opt 6→3)"
+    fi
   else
     menu_status_line 6 "Netdata" WARN "installed but not running"
   fi
