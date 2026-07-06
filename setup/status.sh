@@ -237,16 +237,6 @@ print_status() {
     menu_status_line 14 "Disk" OK "$disk_info"
   fi
 
-  # 15) Chromium (headless rendering — optional, so missing is WARN not ERR)
-  local cbin cver
-  cbin=$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null)
-  if [ -n "$cbin" ]; then
-    cver=$("$cbin" --version 2>/dev/null | grep -oP '[0-9][0-9.]*' | head -1)
-    menu_status_line 15 "Chromium" OK "headless ${cver}"
-  else
-    menu_status_line 15 "Chromium" WARN "not installed"
-  fi
-
   echo ""
   echo "   0) Exit"
   echo ""

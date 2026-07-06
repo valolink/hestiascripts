@@ -37,14 +37,6 @@ if command -v wp &>/dev/null; then
   WPCLI_VERSION=$(timeout 5 wp --version --allow-root 2>/dev/null | awk '{print $2}')
 fi
 
-# --- Chromium (headless rendering) ---------------------------------------------
-CHROMIUM_INSTALLED=0 CHROMIUM_VERSION=""
-CHROMIUM_BIN=$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null)
-if [ -n "$CHROMIUM_BIN" ]; then
-  CHROMIUM_INSTALLED=1
-  CHROMIUM_VERSION=$(timeout 5 "$CHROMIUM_BIN" --version 2>/dev/null | grep -oP '[0-9][0-9.]*' | head -1)
-fi
-
 # --- Redis ---------------------------------------------------------------------
 REDIS_INSTALLED=0 REDIS_RUNNING=0 REDIS_MAXMEM=0 REDIS_POLICY=""
 PHP_REDIS_EXT="{}"
@@ -174,10 +166,9 @@ DISK_INFO=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " / " $2}')
 
 echo "Checks complete."
 
-printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"version":"%s"},"chromium":{"installed":%s,"version":"%s"},"redis":{"installed":%s,"running":%s,"maxmemory":%s,"policy":"%s","phpExt":%s},"fail2ban":{"installed":%s,"running":%s,"wpJail":"%s"},"maldet":{"installed":%s,"lastScan":"%s"},"netdata":{"installed":%s,"running":%s,"tuned":%s},"security":{"swap":%s,"sshKeyOnly":%s,"unattendedUpgrades":"%s"},"smtp":{"relay":"%s"},"phpFpmProfiles":{"installed":%s,"missing":%s},"opcache":{"ok":%s,"needsAttention":%s},"mariadb":{"bufferPool":"%s"},"nginxTemplates":{"wpSecure":%s,"wpRocket":%s},"hestia":{"installed":"%s","latest":"%s"},"restic":{"systemRepo":%s,"usersWithKeys":%s,"usersTotal":%s},"disk":{"usedPct":%s,"info":"%s"}}\n' \
+printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"version":"%s"},"redis":{"installed":%s,"running":%s,"maxmemory":%s,"policy":"%s","phpExt":%s},"fail2ban":{"installed":%s,"running":%s,"wpJail":"%s"},"maldet":{"installed":%s,"lastScan":"%s"},"netdata":{"installed":%s,"running":%s,"tuned":%s},"security":{"swap":%s,"sshKeyOnly":%s,"unattendedUpgrades":"%s"},"smtp":{"relay":"%s"},"phpFpmProfiles":{"installed":%s,"missing":%s},"opcache":{"ok":%s,"needsAttention":%s},"mariadb":{"bufferPool":"%s"},"nginxTemplates":{"wpSecure":%s,"wpRocket":%s},"hestia":{"installed":"%s","latest":"%s"},"restic":{"systemRepo":%s,"usersWithKeys":%s,"usersTotal":%s},"disk":{"usedPct":%s,"info":"%s"}}\n' \
   "$(b $STREAMER_RUNNING)" "${VSCRIPT_COUNT:-0}" \
   "$(b $WPCLI_INSTALLED)" "$(json_escape "${WPCLI_VERSION}")" \
-  "$(b $CHROMIUM_INSTALLED)" "$(json_escape "${CHROMIUM_VERSION}")" \
   "$(b $REDIS_INSTALLED)" "$(b $REDIS_RUNNING)" "${REDIS_MAXMEM:-0}" "$(json_escape "${REDIS_POLICY}")" "$PHP_REDIS_EXT" \
   "$(b $F2B_INSTALLED)" "$(b $F2B_RUNNING)" "$F2B_WPJAIL" \
   "$(b $MALDET_INSTALLED)" "$(json_escape "${MALDET_LAST_SCAN}")" \
