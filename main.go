@@ -388,13 +388,19 @@ func executeHandler(w http.ResponseWriter, r *http.Request) {
 	// exec.Command takes the binary path and a variadic list of arguments.
 	// It does NOT invoke a shell, rendering standard injection attacks completely useless.
 	cmd := exec.Command(scriptPath, args...)
-	cmd.Stderr = cmd.Stdout // Merge stderr into stdout so we stream errors too
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		fmt.Fprintf(w, "data: ERROR: Failed to create stdout pipe: %v\n\n", err)
 		return
 	}
+	// Merge stderr into stdout so we stream errors too. MUST come AFTER
+	// StdoutPipe() — that's what sets cmd.Stdout to the pipe's write end.
+	// Doing it before (as this did until 2026-07-06) set Stderr to nil, so
+	// Go wired the child's stderr to /dev/null and every script's real error
+	// reason (e.g. WP-CLI's message behind "wp plugin install failed") was
+	// silently discarded.
+	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(w, "data: ERROR: Failed to start script: %v\n\n", err)
