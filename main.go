@@ -92,6 +92,7 @@ var allowedScripts = map[string]bool{
 	"v-purge-nginx-cache":             true,
 	"v-rebuild-web-domain":            true,
 	"v-add-letsencrypt-domain":        true,
+	"v-add-web-domain-ssl-force":      true,
 	"v-suspend-web-domain":            true,
 	"v-unsuspend-web-domain":          true,
 	"v-change-web-domain-backend-tpl": true,
