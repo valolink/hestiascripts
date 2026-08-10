@@ -160,13 +160,43 @@ for udir in /usr/local/hestia/data/users/*/; do
   [ -r "${udir}restic.conf" ] && RESTIC_USERS_KEYED=$((RESTIC_USERS_KEYED+1))
 done
 
+# --- hestia.conf service drift ---------------------------------------------------------------
+# A purged service whose *_SYSTEM key is still set in hestia.conf breaks every
+# restart path: v-restart-mail / v-restart-ftp gate on `[ -n "$KEY" ]`, then hand
+# the stale value to v-restart-service, which fails on a unit that no longer
+# exists — and mails the admin a "<svc> restart failed" report each time. Same
+# ERR state setup/maintenance.sh flags in its service-cleanup menu; the fix is
+# run.sh → 13 → 6 → pick the service, or v-change-sys-config-value KEY "".
+conf_val() { grep -m1 "^$1=" /usr/local/hestia/conf/hestia.conf 2>/dev/null | cut -d "'" -f2; }
+pkg_installed() { dpkg -l "$1" 2>/dev/null | grep -q "^ii"; }
+
+DRIFT_PARTS=""
+check_drift() {
+  local key="$1" values="$2" pkg="$3" cur v
+  cur=$(conf_val "$key")
+  [ -n "$cur" ] || return 0
+  for v in $values; do
+    [ "$cur" = "$v" ] || continue
+    pkg_installed "$pkg" && return 0
+    DRIFT_PARTS+="{\"key\":\"${key}\",\"value\":\"$(json_escape "$cur")\",\"package\":\"${pkg}\"},"
+    return 0
+  done
+}
+check_drift IMAP_SYSTEM      "dovecot"                    dovecot-core
+check_drift ANTIVIRUS_SYSTEM "clamav-daemon clamav clamd" clamav
+check_drift ANTISPAM_SYSTEM  "spamassassin spamd"         spamassassin
+check_drift FTP_SYSTEM       "vsftpd"                     vsftpd
+check_drift FTP_SYSTEM       "proftpd"                    proftpd
+check_drift MAIL_SYSTEM      "exim4"                      exim4
+SERVICE_DRIFT="[${DRIFT_PARTS%,}]"
+
 # --- Disk --------------------------------------------------------------------------------------
 DISK_PCT=$(df / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
 DISK_INFO=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " / " $2}')
 
 echo "Checks complete."
 
-printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"version":"%s"},"redis":{"installed":%s,"running":%s,"maxmemory":%s,"policy":"%s","phpExt":%s},"fail2ban":{"installed":%s,"running":%s,"wpJail":"%s"},"maldet":{"installed":%s,"lastScan":"%s"},"netdata":{"installed":%s,"running":%s,"tuned":%s},"security":{"swap":%s,"sshKeyOnly":%s,"unattendedUpgrades":"%s"},"smtp":{"relay":"%s"},"phpFpmProfiles":{"installed":%s,"missing":%s},"opcache":{"ok":%s,"needsAttention":%s},"mariadb":{"bufferPool":"%s"},"nginxTemplates":{"wpSecure":%s,"wpRocket":%s},"hestia":{"installed":"%s","latest":"%s"},"restic":{"systemRepo":%s,"usersWithKeys":%s,"usersTotal":%s},"disk":{"usedPct":%s,"info":"%s"}}\n' \
+printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"version":"%s"},"redis":{"installed":%s,"running":%s,"maxmemory":%s,"policy":"%s","phpExt":%s},"fail2ban":{"installed":%s,"running":%s,"wpJail":"%s"},"maldet":{"installed":%s,"lastScan":"%s"},"netdata":{"installed":%s,"running":%s,"tuned":%s},"security":{"swap":%s,"sshKeyOnly":%s,"unattendedUpgrades":"%s"},"smtp":{"relay":"%s"},"phpFpmProfiles":{"installed":%s,"missing":%s},"opcache":{"ok":%s,"needsAttention":%s},"mariadb":{"bufferPool":"%s"},"nginxTemplates":{"wpSecure":%s,"wpRocket":%s},"hestia":{"installed":"%s","latest":"%s"},"serviceDrift":%s,"restic":{"systemRepo":%s,"usersWithKeys":%s,"usersTotal":%s},"disk":{"usedPct":%s,"info":"%s"}}\n' \
   "$(b $STREAMER_RUNNING)" "${VSCRIPT_COUNT:-0}" \
   "$(b $WPCLI_INSTALLED)" "$(json_escape "${WPCLI_VERSION}")" \
   "$(b $REDIS_INSTALLED)" "$(b $REDIS_RUNNING)" "${REDIS_MAXMEM:-0}" "$(json_escape "${REDIS_POLICY}")" "$PHP_REDIS_EXT" \
@@ -180,6 +210,7 @@ printf '{"streamer":{"running":%s,"vScripts":%s},"wpcli":{"installed":%s,"versio
   "$(json_escape "${MARIADB_BUFFER}")" \
   "$(b $WP_SECURE)" "$(b $WP_ROCKET)" \
   "$(json_escape "${HESTIA_INSTALLED}")" "$(json_escape "${HESTIA_LATEST}")" \
+  "$SERVICE_DRIFT" \
   "$(b $RESTIC_SYSTEM_REPO)" "${RESTIC_USERS_KEYED:-0}" "${RESTIC_USERS_TOTAL:-0}" \
   "${DISK_PCT:-0}" "$(json_escape "${DISK_INFO}")"
 
