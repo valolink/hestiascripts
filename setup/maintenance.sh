@@ -99,17 +99,75 @@ _maintenance_filemanager_fix() {
 
 # --- Service cleanup ---
 
+HESTIA_CONF="/usr/local/hestia/conf/hestia.conf"
+
 _svc_installed() {
   dpkg -l "$1" 2>/dev/null | grep -q "^ii"
 }
 
+# Read a key's value out of hestia.conf (lines look like KEY='value')
+_hestia_conf_get() {
+  [ -f "$HESTIA_CONF" ] || return 0
+  grep -m1 "^$1=" "$HESTIA_CONF" 2>/dev/null | cut -d "'" -f2
+}
+
+# True (and echoes the value) when hestia.conf still points KEY at one of the
+# values that mean "this service". Purging the package without clearing the key
+# is what produces Hestia's "<service> restart failed" errors + email reports:
+# v-restart-mail / v-restart-ftp gate on `[ -n "$KEY" ]` and then hand the value
+# to v-restart-service, which fails on a unit that no longer exists.
+_hestia_conf_stale() {
+  local key="$1" values="$2" cur v
+  cur=$(_hestia_conf_get "$key")
+  [ -n "$cur" ] || return 1
+  for v in $values; do
+    if [ "$cur" = "$v" ]; then echo "$cur"; return 0; fi
+  done
+  return 1
+}
+
+# Clear KEY in hestia.conf, but only when it holds one of VALUES — so the vsftpd
+# path can never wipe FTP_SYSTEM on a box that actually runs proftpd. An empty
+# value is the same state a box has when the component was never installed
+# (hst-install only writes these keys for components it installs).
+_hestia_conf_clear() {
+  local key="$1" values="$2" cur
+  cur=$(_hestia_conf_stale "$key" "$values") || return 0
+  echo -e "  ${CYAN}→${NC} Clearing $key='$cur' in hestia.conf..."
+  if [ -x /usr/local/hestia/bin/v-change-sys-config-value ]; then
+    /usr/local/hestia/bin/v-change-sys-config-value "$key" ""
+  else
+    sed -i "s|^$key=.*|$key=''|" "$HESTIA_CONF"
+  fi
+}
+
+# _svc_status_line LABEL PKG CONF_KEY "conf value(s) meaning this service"
 _svc_status_line() {
-  local label="$1" pkg="$2"
+  local label="$1" pkg="$2" key="$3" values="$4" cur
   if _svc_installed "$pkg"; then
     status_line "$label" WARN "installed"
+  elif cur=$(_hestia_conf_stale "$key" "$values"); then
+    status_line "$label" ERR "gone, but $key='$cur'"
   else
     status_line "$label" OK "not installed"
   fi
+}
+
+# Package already purged, hestia.conf never updated → offer the config fix alone.
+# Returns 0 when it handled the situation (caller should stop).
+_cleanup_repair_conf() {
+  local label="$1" key="$2" values="$3" cur
+  cur=$(_hestia_conf_stale "$key" "$values") || return 1
+  echo ""
+  echo "  $label is not installed, but hestia.conf still has $key='$cur'."
+  echo "  That is what makes Hestia report \"$cur restart failed\" — it keeps trying"
+  echo "  to restart a service that is no longer on the box."
+  if ! confirm "Clear $key in hestia.conf?"; then return 0; fi
+  echo ""
+  _hestia_conf_clear "$key" "$values"
+  echo -e "  ${GREEN}✓ Done${NC}"
+  press_enter
+  return 0
 }
 
 menu_service_cleanup() {
@@ -120,10 +178,10 @@ menu_service_cleanup() {
     echo "$DIV"
     echo "  Not needed for WordPress-only hosting (no email mailboxes):"
     echo ""
-    _svc_status_line "Dovecot  (IMAP/POP3)" "dovecot-core"
-    _svc_status_line "ClamAV   (antivirus)" "clamav"
-    _svc_status_line "SpamAssassin" "spamassassin"
-    _svc_status_line "VSFTPD   (FTP)" "vsftpd"
+    _svc_status_line "Dovecot  (IMAP/POP3)" "dovecot-core" "IMAP_SYSTEM" "dovecot"
+    _svc_status_line "ClamAV   (antivirus)" "clamav" "ANTIVIRUS_SYSTEM" "clamav-daemon clamav clamd"
+    _svc_status_line "SpamAssassin" "spamassassin" "ANTISPAM_SYSTEM" "spamassassin spamd"
+    _svc_status_line "VSFTPD   (FTP)" "vsftpd" "FTP_SYSTEM" "vsftpd"
     echo ""
     echo "  1) Remove Dovecot"
     echo "  2) Remove ClamAV"
@@ -144,12 +202,14 @@ menu_service_cleanup() {
 
 _cleanup_dovecot() {
   if ! _svc_installed dovecot-core; then
+    _cleanup_repair_conf "Dovecot" "IMAP_SYSTEM" "dovecot" && return
     echo "  Dovecot is not installed."; press_enter; return
   fi
   echo ""
   echo "  Removing Dovecot disables IMAP/POP3 mailbox access."
   echo "  Exim SMTP AUTH (used when clients send mail through this server) will also"
   echo "  stop working — fine if all outbound mail goes via Resend."
+  echo "  hestia.conf IMAP_SYSTEM is cleared so Hestia stops trying to restart it."
   echo ""
   if ! confirm "Remove Dovecot?"; then return; fi
   echo ""
@@ -157,17 +217,21 @@ _cleanup_dovecot() {
   systemctl stop dovecot 2>/dev/null
   apt remove --purge -y dovecot-core dovecot-imapd dovecot-pop3d dovecot-lmtpd 2>/dev/null
   apt autoremove -y
+  systemctl reset-failed dovecot 2>/dev/null
+  _hestia_conf_clear "IMAP_SYSTEM" "dovecot"
   echo -e "  ${GREEN}✓ Done${NC}"
   press_enter
 }
 
 _cleanup_clamav() {
   if ! _svc_installed clamav; then
+    _cleanup_repair_conf "ClamAV" "ANTIVIRUS_SYSTEM" "clamav-daemon clamav clamd" && return
     echo "  ClamAV is not installed."; press_enter; return
   fi
   echo ""
   echo "  Removing ClamAV will also update the Exim config to disable AV scanning,"
   echo "  then restart Exim. Outbound mail delivery will not be affected."
+  echo "  hestia.conf ANTIVIRUS_SYSTEM is cleared so Hestia stops trying to restart it."
   echo ""
   if ! confirm "Remove ClamAV?"; then return; fi
   echo ""
@@ -177,6 +241,8 @@ _cleanup_clamav() {
   echo -e "  ${CYAN}→${NC} Removing packages..."
   apt remove --purge -y clamav clamav-daemon clamav-freshclam clamav-base 2>/dev/null
   apt autoremove -y
+  systemctl reset-failed clamav-daemon clamav-freshclam 2>/dev/null
+  _hestia_conf_clear "ANTIVIRUS_SYSTEM" "clamav-daemon clamav clamd"
   _cleanup_fix_exim_clamav
   echo -e "  ${GREEN}✓ Done${NC}"
   press_enter
@@ -199,11 +265,13 @@ _cleanup_fix_exim_clamav() {
 
 _cleanup_spamassassin() {
   if ! _svc_installed spamassassin; then
+    _cleanup_repair_conf "SpamAssassin" "ANTISPAM_SYSTEM" "spamassassin spamd" && return
     echo "  SpamAssassin is not installed."; press_enter; return
   fi
   echo ""
   echo "  Removing SpamAssassin will also update the Exim config to disable spam"
   echo "  scanning, then restart Exim."
+  echo "  hestia.conf ANTISPAM_SYSTEM is cleared so Hestia stops trying to restart it."
   echo ""
   if ! confirm "Remove SpamAssassin?"; then return; fi
   echo ""
@@ -213,6 +281,8 @@ _cleanup_spamassassin() {
   echo -e "  ${CYAN}→${NC} Removing packages..."
   apt remove --purge -y spamassassin spamc 2>/dev/null
   apt autoremove -y
+  systemctl reset-failed spamassassin 2>/dev/null
+  _hestia_conf_clear "ANTISPAM_SYSTEM" "spamassassin spamd"
   _cleanup_fix_exim_spamassassin
   echo -e "  ${GREEN}✓ Done${NC}"
   press_enter
@@ -235,10 +305,12 @@ _cleanup_fix_exim_spamassassin() {
 
 _cleanup_vsftpd() {
   if ! _svc_installed vsftpd; then
+    _cleanup_repair_conf "VSFTPD" "FTP_SYSTEM" "vsftpd" && return
     echo "  VSFTPD is not installed."; press_enter; return
   fi
   echo ""
   echo "  Clients using FTP will lose access. SFTP (via SSH) continues to work."
+  echo "  hestia.conf FTP_SYSTEM is cleared so Hestia stops trying to restart it."
   echo ""
   if ! confirm "Remove VSFTPD?"; then return; fi
   echo ""
@@ -246,6 +318,8 @@ _cleanup_vsftpd() {
   systemctl stop vsftpd 2>/dev/null
   apt remove --purge -y vsftpd
   apt autoremove -y
+  systemctl reset-failed vsftpd 2>/dev/null
+  _hestia_conf_clear "FTP_SYSTEM" "vsftpd"
   echo -e "  ${GREEN}✓ Done${NC}"
   press_enter
 }
