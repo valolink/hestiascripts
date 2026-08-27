@@ -288,7 +288,7 @@ _disk_log_is_rotated() {
 }
 
 _disk_manage_logs() {
-  local rows=() line size path label i choice
+  local all=() live=() rotated=() rot_bytes line size path label i choice
 
   while true; do
     clear
@@ -297,14 +297,27 @@ _disk_manage_logs() {
     echo "$DIV"
     echo -e "  ${DIM}Scanning site directories and domain logs...${NC}"
 
-    mapfile -t rows < <(_disk_find_logs \
+    mapfile -t all < <(_disk_find_logs \
       | awk -F'\t' '!seen[$2]++' \
-      | sort -rn -t$'\t' -k1,1 \
-      | head -30)
+      | sort -rn -t$'\t' -k1,1)
+
+    # Rotated archives are logrotate's leftovers — there is nothing to inspect
+    # in them and nothing to truncate, so they get one bulk line instead of
+    # crowding out the live logs you actually have to make a decision about.
+    live=(); rotated=(); rot_bytes=0
+    for line in "${all[@]}"; do
+      if _disk_log_is_rotated "${line#*	}"; then
+        rotated+=("$line")
+        rot_bytes=$((rot_bytes + ${line%%	*}))
+      else
+        live+=("$line")
+      fi
+    done
+    live=("${live[@]:0:30}")
 
     printf '\e[1A\e[2K'
 
-    if [ ${#rows[@]} -eq 0 ]; then
+    if [ ${#all[@]} -eq 0 ]; then
       echo "  No log files ≥ ${LOG_MIN_MB}MB found."
       echo ""
       echo "  s) Change size threshold (currently ${LOG_MIN_MB}MB)"
@@ -320,32 +333,67 @@ _disk_manage_logs() {
 
     echo ""
     i=1
-    for line in "${rows[@]}"; do
+    for line in "${live[@]}"; do
       size="${line%%	*}"
       path="${line#*	}"
       label=$(_disk_log_label "$path")
       printf "  %2d) %8s  %s\n" "$i" "$(bytes_to_human "$size")" "$label"
       i=$((i + 1))
     done
+    [ ${#live[@]} -eq 0 ] && echo -e "  ${DIM}No live logs ≥ ${LOG_MIN_MB}MB.${NC}"
 
     echo ""
-    echo "  s) Change size threshold (currently ${LOG_MIN_MB}MB)"
-    echo "  0) Back"
+    if [ ${#rotated[@]} -gt 0 ]; then
+      printf "  %2s) %8s  %s\n" "d" "$(bytes_to_human "$rot_bytes")" \
+        "delete ${#rotated[@]} rotated/compressed archive(s)"
+    fi
+    echo "   s) Change size threshold (currently ${LOG_MIN_MB}MB)"
+    echo "   0) Back"
     echo ""
     read -r -p "  Select a file to vacuum: " choice
 
     case "$choice" in
       s|S) _disk_log_set_threshold; continue ;;
+      d|D) [ ${#rotated[@]} -gt 0 ] && _disk_delete_rotated "${rotated[@]}"; continue ;;
       ''|0) return ;;
     esac
 
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#rows[@]} ]; then
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#live[@]} ]; then
       continue
     fi
 
-    line="${rows[$((choice - 1))]}"
+    line="${live[$((choice - 1))]}"
     _disk_vacuum_log "${line#*	}"
   done
+}
+
+# Bulk-remove rotated archives. Safe to unlink (unlike a live log) precisely
+# because nothing holds them open — logrotate already closed them.
+_disk_delete_rotated() {
+  local rows=("$@") line total=0 failed=0
+
+  echo ""
+  echo "  Will delete:"
+  for line in "${rows[@]}"; do
+    printf "    %8s  %s\n" "$(bytes_to_human "${line%%	*}")" "$(_disk_log_label "${line#*	}")"
+    total=$((total + ${line%%	*}))
+  done
+  echo ""
+  echo "  Frees $(bytes_to_human "$total")."
+
+  confirm "Proceed?" || return
+
+  echo ""
+  for line in "${rows[@]}"; do
+    rm -f "${line#*	}" || failed=$((failed + 1))
+  done
+
+  if [ "$failed" -gt 0 ]; then
+    echo -e "  ${RED}✗ $failed file(s) could not be removed${NC}"
+  else
+    echo -e "  ${GREEN}✓ Deleted ${#rows[@]} archive(s), freed $(bytes_to_human "$total")${NC}"
+  fi
+  press_enter
 }
 
 _disk_log_set_threshold() {
@@ -376,9 +424,6 @@ _disk_vacuum_log() {
   echo ""
   echo "  1) Truncate to empty"
   echo "  2) Keep last 500 lines"
-  if _disk_log_is_rotated "$f"; then
-    echo "  3) Delete file  (rotated/compressed)"
-  fi
   echo "  0) Cancel"
   echo ""
   read -r -p "  Select: " choice
@@ -398,11 +443,6 @@ _disk_vacuum_log() {
         echo -e "  ${RED}✗ Failed${NC}"
       fi
       rm -f "$tmp"
-      ;;
-    3)
-      _disk_log_is_rotated "$f" || return
-      confirm "Delete $f?" || return
-      rm -f "$f" && echo -e "  ${GREEN}✓ Deleted${NC}"
       ;;
     *) return ;;
   esac
