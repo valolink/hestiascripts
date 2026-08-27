@@ -1,10 +1,60 @@
 #!/bin/bash
 # Status dashboard — sourced by run.sh
 
+# Compare the working copy against origin. Called once from run.sh at startup —
+# not from print_status, which redraws after every action and must stay instant.
+# Sets HS_VERSION_STATE and HS_VERSION_INFO for the banner.
+hestiascripts_check_version() {
+  HS_VERSION_STATE=unknown
+  HS_VERSION_INFO=""
+
+  command -v git &>/dev/null || return 0
+  git -C "$SCRIPT_DIR" rev-parse --git-dir &>/dev/null || return 0
+
+  local branch upstream behind dirty
+  branch=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  upstream=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) || return 0
+
+  # Bounded so a dead network delays startup by seconds, never blocks it.
+  timeout 8 git -C "$SCRIPT_DIR" fetch --quiet 2>/dev/null
+
+  behind=$(git -C "$SCRIPT_DIR" rev-list --count "HEAD..$upstream" 2>/dev/null)
+  dirty=$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null | head -1)
+
+  if [ "${behind:-0}" -gt 0 ]; then
+    HS_VERSION_STATE=behind
+    HS_VERSION_INFO="$behind commit(s) behind $upstream"
+    [ -n "$dirty" ] && HS_VERSION_INFO="$HS_VERSION_INFO, local changes present"
+  elif [ -n "$dirty" ]; then
+    HS_VERSION_STATE=dirty
+    HS_VERSION_INFO="local changes not committed"
+  else
+    HS_VERSION_STATE=current
+    HS_VERSION_INFO="$branch up to date"
+  fi
+}
+
 print_status() {
   clear
   echo ""
   echo -e "  ${BOLD}=== HestiaCP Server Setup — $(hostname) ===${NC}"
+
+  case "$HS_VERSION_STATE" in
+    behind)
+      echo ""
+      echo -e "  ${YELLOW}⚠️  hestiascripts is out of date — ${HS_VERSION_INFO}${NC}"
+      case "$HS_VERSION_INFO" in
+        *"local changes"*)
+          echo -e "  ${DIM}Local edits would block a pull — commit or stash them first.${NC}" ;;
+        *)
+          echo -e "  ${DIM}Run: git -C $SCRIPT_DIR pull${NC}" ;;
+      esac
+      ;;
+    dirty)
+      echo ""
+      echo -e "  ${DIM}hestiascripts: ${HS_VERSION_INFO}${NC}"
+      ;;
+  esac
   echo ""
 
   # --- Install & Configure ---

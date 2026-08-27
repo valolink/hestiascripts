@@ -18,12 +18,13 @@ menu_maintenance() {
 
     echo ""
     echo "  1) Deploy v-scripts & hestia-streamer  (runs install-scripts.sh)"
-    echo "  2) Update system packages  (apt update && apt upgrade)"
+    echo "  2) Update system packages  (shows a preview first)"
     echo "  3) Update HestiaCP"
     echo "  4) Run malware scan"
     echo "  5) Apply HestiaCP filemanager fix"
     echo "  6) Remove unnecessary services"
     echo "  7) Check apt repositories"
+    echo "  8) Preview pending updates  (read-only)"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
@@ -36,6 +37,7 @@ menu_maintenance() {
       5) _maintenance_filemanager_fix ;;
       6) menu_service_cleanup ;;
       7) _maintenance_check_repos ;;
+      8) _maintenance_update_dryrun ;;
       0) return ;;
     esac
   done
@@ -55,9 +57,31 @@ _maintenance_deploy() {
 }
 
 _maintenance_system_update() {
-  run_action "Update system packages" \
-    "apt_update_safe" \
-    "apt upgrade -y"
+  clear
+  echo ""
+  echo -e "  ${BOLD}Update system packages${NC}"
+  echo "$DIV"
+  echo -e "  ${DIM}Refreshing package lists...${NC}"
+  apt_update_safe
+  printf '\e[1A\e[2K'
+
+  # Nothing pending → preview already said so, don't ask for a confirmation.
+  _maintenance_update_preview || { press_enter; return; }
+
+  echo ""
+  confirm "Apply these updates?" || { echo "  Cancelled."; press_enter; return; }
+
+  echo ""
+  echo -e "  ${CYAN}→${NC} apt-get upgrade -y"
+  if ! apt-get upgrade -y; then
+    echo -e "  ${RED}✗ Upgrade failed${NC}"
+    press_enter; return
+  fi
+
+  echo ""
+  echo -e "  ${GREEN}✓ Done${NC}"
+  [ -f /var/run/reboot-required ] && \
+    echo -e "  ${YELLOW}⚠️  A reboot is required — use safe-reboot when convenient.${NC}"
   echo "  ℹ️  Verify that WooCommerce and site functionality still works after updates."
   press_enter
 }
@@ -427,4 +451,201 @@ _maintenance_repo_primer() {
   echo ""
   echo "  Back up the file first, then re-run this check:"
   echo "    cp /etc/apt/sources.list.d/NAME.list{,.bak}"
+}
+
+# --- Update preview ---
+#
+# `apt-get -s upgrade` is a true dry run: it resolves the whole transaction and
+# prints what it would do without touching the system. Everything below is
+# parsed out of that, so the preview can never disagree with the real upgrade.
+
+# Upstream version, minus epoch and Debian revision:
+#   1:11.4.5-1~deb12u1 → 11.4.5
+_ver_upstream() {
+  local v="${1#*:}"
+  echo "${v%-*}"
+}
+
+# rebuild = upstream unchanged, only Debian's packaging moved. That is what a
+# backported security fix looks like, and it is the safest class of update:
+# same software, one patch applied.
+_classify_change() {
+  local cu nu c1 c2 c3 n1 n2 n3
+  cu=$(_ver_upstream "$1"); nu=$(_ver_upstream "$2")
+  [ "$cu" = "$nu" ] && { echo rebuild; return; }
+
+  cu="${cu%%[!0-9.]*}"; nu="${nu%%[!0-9.]*}"
+
+  # Date- or serial-versioned packages (tzdata 2025b, ca-certificates 20240203)
+  # have no minor/patch structure. Calling every refresh of those "major" buries
+  # the real major upgrades in noise.
+  case "$nu" in
+    *.*) ;;
+    *) echo data; return ;;
+  esac
+
+  IFS=. read -r c1 c2 c3 <<<"$cu"
+  IFS=. read -r n1 n2 n3 <<<"$nu"
+
+  if   [ "${n1:-0}" != "${c1:-0}" ]; then echo major
+  elif [ "${n2:-0}" != "${c2:-0}" ]; then echo minor
+  elif [ "${n3:-0}" != "${c3:-0}" ]; then echo patch
+  else echo rebuild
+  fi
+}
+
+# Packages whose upgrade interrupts a running site or can need a config look.
+_pkg_is_critical() {
+  case "$1" in
+    mariadb-*|mysql-*|php*|nginx*|hestia*|redis*|openssh-server|libc6|systemd*|linux-image-*|exim4*|postfix*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# What actually happens to the box when this package upgrades.
+_pkg_impact() {
+  case "$1" in
+    mariadb-*|mysql-*)  echo "restarts the database" ;;
+    php*-fpm)           echo "restarts PHP, sites blip" ;;
+    nginx*)             echo "restarts the web server" ;;
+    hestia*)            echo "restarts the control panel" ;;
+    redis*)             echo "flushes the object cache" ;;
+    openssh-server)     echo "restarts SSH (existing sessions survive)" ;;
+    linux-image-*)      echo "needs a reboot to take effect" ;;
+    libc6|systemd*)     echo "core system library" ;;
+    exim4*|postfix*)    echo "restarts mail" ;;
+    *) echo "" ;;
+  esac
+}
+
+_maintenance_update_preview() {
+  local sim upgrade_n new_n remove_n held reboot=no
+  sim=$(apt-get -s upgrade 2>/dev/null)
+
+  # apt's simulation format is fixed:
+  #   Inst PKG [CURRENT] (NEW ORIGIN [ARCH])   — upgrade
+  #   Inst PKG (NEW ORIGIN [ARCH])             — new dependency, no [CURRENT]
+  local rows
+  rows=$(echo "$sim" | awk '
+    /^Inst / {
+      # "-" rather than an empty field: tab is IFS whitespace, so bash `read`
+      # would collapse two adjacent tabs into one and shift every column left.
+      pkg = $2; cur = "-"; origin = ""; i = 3
+      if ($3 ~ /^\[/) { cur = $3; gsub(/[][]/, "", cur); i = 4 }
+      new = $i; sub(/^\(/, "", new)
+      for (j = i + 1; j <= NF; j++) origin = origin " " $j
+      print pkg "\t" cur "\t" new "\t" origin
+    }')
+
+  upgrade_n=$(echo "$rows" | awk -F'\t' '$1 != "" && $2 != "-"' | wc -l)
+  new_n=$(echo "$rows" | awk -F'\t' '$1 != "" && $2 == "-"' | wc -l)
+  remove_n=$(echo "$sim" | grep -c '^Remv ')
+  held=$(echo "$sim" | awk '/held back:/ {f=1; next} f && /^ / {print; next} f {exit}' | xargs 2>/dev/null)
+
+  if [ "$upgrade_n" -eq 0 ] && [ "$new_n" -eq 0 ] && [ "$remove_n" -eq 0 ]; then
+    echo ""
+    echo -e "  ${GREEN}✓ Everything is up to date.${NC}"
+    return 1
+  fi
+
+  echo "$rows" | grep -q '^linux-image' && reboot=yes
+  [ -f /var/run/reboot-required ] && reboot=yes
+
+  local sec_n
+  sec_n=$(echo "$rows" | grep -ci 'security' || true)
+
+  echo ""
+  status_line "To upgrade" "" "$upgrade_n package(s)"
+  [ "$new_n" -gt 0 ]    && status_line "New dependencies" "" "$new_n"
+  [ "$sec_n" -gt 0 ]    && status_line "From security archive" "" "$sec_n"
+  [ "$reboot" = yes ]   && status_line "Reboot afterwards" WARN "yes"
+  [ -n "$held" ]        && status_line "Held back" WARN "$held"
+
+  # Removals during a routine upgrade are the one thing that deserves a stop.
+  if [ "$remove_n" -gt 0 ]; then
+    echo ""
+    status_line "Will REMOVE" ERR "$remove_n package(s)"
+    echo "$sim" | awk '/^Remv /{print "      " $2}'
+    echo -e "  ${DIM}An upgrade that removes packages is unusual — read this list.${NC}"
+  fi
+
+  local attention=() routine=() line pkg cur new origin class impact cv nv
+  while IFS=$'\t' read -r pkg cur new origin; do
+    [ -n "$pkg" ] && [ "$cur" != "-" ] || continue
+    class=$(_classify_change "$cur" "$new")
+    impact=$(_pkg_impact "$pkg")
+
+    # For a rebuild the upstream version is identical on both sides, so showing
+    # it twice tells you nothing — the Debian revision is what moved.
+    if [ "$class" = rebuild ]; then
+      cv="${cur#*:}"; nv="${new#*:}"
+    else
+      cv=$(_ver_upstream "$cur"); nv=$(_ver_upstream "$new")
+    fi
+
+    line=$(printf "  %-8s %-22s %s → %s" "$class" "$pkg" "$cv" "$nv")
+    [ -n "$impact" ] && line="$line  ($impact)"
+
+    if [ "$class" = major ] || [ "$class" = minor ] || _pkg_is_critical "$pkg"; then
+      attention+=("$line")
+    else
+      routine+=("$line")
+    fi
+  done <<<"$rows"
+
+  if [ ${#attention[@]} -gt 0 ]; then
+    echo ""
+    echo -e "  ${BOLD}Worth a look${NC}"
+    printf '%s\n' "${attention[@]}"
+  fi
+
+  if [ ${#routine[@]} -gt 0 ]; then
+    echo ""
+    echo -e "  ${BOLD}Routine${NC}  ${DIM}(${#routine[@]})${NC}"
+    printf '%s\n' "${routine[@]:0:8}"
+    [ ${#routine[@]} -gt 8 ] && echo -e "  ${DIM}… and $(( ${#routine[@]} - 8 )) more${NC}"
+  fi
+
+  echo ""
+  echo -e "  ${DIM}rebuild = same software, vendor applied a patch (usually security)${NC}"
+  echo -e "  ${DIM}data    = date-versioned data refresh (timezones, CA certs)${NC}"
+  echo -e "  ${DIM}patch/minor/major = upstream version moved${NC}"
+  return 0
+}
+
+_maintenance_update_dryrun() {
+  clear
+  echo ""
+  echo -e "  ${BOLD}Pending updates${NC}"
+  echo "$DIV"
+  echo -e "  ${DIM}Refreshing package lists...${NC}"
+  apt_update_safe >/dev/null 2>&1
+  printf '\e[1A\e[2K'
+
+  _maintenance_update_preview
+
+  local choice
+  echo ""
+  echo "   c) Changelog for a package"
+  echo "   0) Back"
+  echo ""
+  read -r -p "  Select: " choice
+  case "$choice" in
+    c|C) _maintenance_show_changelog; _maintenance_update_dryrun ;;
+    *) return ;;
+  esac
+}
+
+# The real "what changed" answer. Debian packages carry their changelog;
+# third-party repos frequently do not, so failure here is expected and cheap.
+_maintenance_show_changelog() {
+  local pkg
+  echo ""
+  read -r -p "  Package name: " pkg
+  [ -n "$pkg" ] || return
+  echo ""
+  if ! apt-get changelog "$pkg" 2>&1 | head -60; then
+    echo "  No changelog available for $pkg."
+  fi
+  press_enter
 }

@@ -14,6 +14,8 @@ for mod in common status wpcli redis fail2ban maldet netdata security smtp \
   source "$SCRIPT_DIR/setup/${mod}.sh" || { echo "Failed to load setup/${mod}.sh"; exit 1; }
 done
 
+hestiascripts_check_version
+
 while true; do
   print_status
   read -r -p "  Select: " choice
