@@ -55,7 +55,7 @@ menu_redis() {
 
 _redis_install() {
   run_action "Install Redis" \
-    "apt update" \
+    "apt_update_safe" \
     "apt install redis-server -y" \
     "systemctl enable redis-server" \
     "systemctl start redis-server" \

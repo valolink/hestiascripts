@@ -93,6 +93,31 @@ run_action() {
   return 0
 }
 
+# apt-get update that survives one broken third-party repository.
+#
+# A repo that fails to refresh is not a broken system: that source stops
+# supplying updates while every other repo keeps working. Treating it as fatal
+# blocks unrelated work (installing redis, say) for no gain — and the following
+# `apt install` fails loudly on its own if the package really is unreachable,
+# so nothing silently half-succeeds.
+apt_update_safe() {
+  local out rc broken
+  out=$(apt-get update 2>&1); rc=$?
+  echo "$out" | grep -vE '^(Hit|Get|Ign):' | sed 's/^/    /'
+  [ $rc -eq 0 ] && return 0
+
+  broken=$(echo "$out" | awk '/^Err:/ {print $2}' | awk -F/ '{print $3}' | sort -u | paste -sd' ')
+  # Failed for a reason other than a specific repo (no network, locked dpkg) —
+  # that one the caller should still treat as fatal.
+  [ -z "$broken" ] && return $rc
+
+  echo ""
+  echo -e "  ${YELLOW}⚠️  Unreachable repositories: ${broken}${NC}"
+  echo -e "  ${DIM}Everything else refreshed; continuing.${NC}"
+  echo -e "  ${DIM}Diagnose with: Maintenance → Check apt repositories${NC}"
+  return 0
+}
+
 # Detect installed PHP versions (e.g. 8.1 8.2 8.3)
 get_php_versions() {
   find /etc/php -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -V

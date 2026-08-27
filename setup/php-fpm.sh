@@ -199,7 +199,7 @@ _php_ensure_sury_repo() {
     | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg
   echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${codename} main" \
     > /etc/apt/sources.list.d/php-sury.list
-  apt update -q
+  apt_update_safe
 }
 
 _php_install_version() {

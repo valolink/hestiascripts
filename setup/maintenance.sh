@@ -23,6 +23,7 @@ menu_maintenance() {
     echo "  4) Run malware scan"
     echo "  5) Apply HestiaCP filemanager fix"
     echo "  6) Remove unnecessary services"
+    echo "  7) Check apt repositories"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
@@ -34,6 +35,7 @@ menu_maintenance() {
       4) _maintenance_maldet_scan ;;
       5) _maintenance_filemanager_fix ;;
       6) menu_service_cleanup ;;
+      7) _maintenance_check_repos ;;
       0) return ;;
     esac
   done
@@ -54,7 +56,7 @@ _maintenance_deploy() {
 
 _maintenance_system_update() {
   run_action "Update system packages" \
-    "apt update" \
+    "apt_update_safe" \
     "apt upgrade -y"
   echo "  ℹ️  Verify that WooCommerce and site functionality still works after updates."
   press_enter
@@ -62,7 +64,7 @@ _maintenance_system_update() {
 
 _maintenance_hestia_update() {
   run_action "Update HestiaCP" \
-    "apt update" \
+    "apt_update_safe" \
     "apt install hestia hestia-nginx hestia-php -y" \
     "systemctl restart hestia"
 }
@@ -322,4 +324,107 @@ _cleanup_vsftpd() {
   _hestia_conf_clear "FTP_SYSTEM" "vsftpd"
   echo -e "  ${GREEN}✓ Done${NC}"
   press_enter
+}
+
+# Diagnose apt repository failures: which repo broke, why, which file defines
+# it, and what is actually safe to change. Read-only — refreshing package lists
+# installs, removes and upgrades nothing.
+_maintenance_check_repos() {
+  clear
+  echo ""
+  echo -e "  ${BOLD}Check apt repositories${NC}"
+  echo "$DIV"
+  echo "  Refreshing package lists. Nothing is installed, removed or upgraded."
+  echo ""
+  echo -e "  ${DIM}Working...${NC}"
+
+  local out rc total ok
+  out=$(apt-get update 2>&1); rc=$?
+  printf '\e[1A\e[2K'
+
+  total=$(echo "$out" | grep -cE '^(Hit|Get|Err):')
+  ok=$(echo "$out" | grep -cE '^(Hit|Get):')
+
+  if [ "$rc" -eq 0 ]; then
+    status_line "Repositories" OK "$ok / $total reachable"
+    echo ""
+    echo -e "  ${GREEN}✓ Every configured repository responded.${NC}"
+    press_enter
+    return
+  fi
+
+  status_line "Repositories" WARN "$ok / $total reachable"
+
+  local url suite reason host file
+  while IFS=$'\t' read -r url suite reason; do
+    [ -n "$url" ] || continue
+    host="${url#*://}"; host="${host%%/*}"
+    file=$(grep -rls -- "$url" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | head -1)
+
+    echo ""
+    echo -e "  ${RED}✗${NC} ${BOLD}${host}${NC}"
+    sub_line "  URL" "$url"
+    sub_line "  Suite" "$suite"
+    sub_line "  Reason" "$reason"
+    sub_line "  Defined in" "${file:-(not found under /etc/apt)}"
+    _maintenance_repo_advice "$reason"
+  done < <(echo "$out" | awk '
+    /^Err:/ { url=$2; suite=$3; getline r; gsub(/^[ \t]+/, "", r); print url "\t" suite "\t" r }
+  ')
+
+  _maintenance_repo_primer
+  press_enter
+}
+
+_maintenance_repo_advice() {
+  case "$1" in
+    *403*|*404*)
+      sub_line "  Meaning" "the host stopped serving this suite (moved or blocked)"
+      sub_line "  Fix" "point the line at another mirror of the same version" ;;
+    *NO_PUBKEY*|*EXPKEYSIG*|*KEYEXPIRED*)
+      sub_line "  Meaning" "the signing key is missing or expired, not the URL"
+      sub_line "  Fix" "re-import the vendor's key; leave the URL alone" ;;
+    *"Could not resolve"*|*"Temporary failure"*|*"Connection failed"*|*"Connection timed out"*)
+      sub_line "  Meaning" "DNS or network, likely transient"
+      sub_line "  Fix" "retry; if it persists the host may be gone for good" ;;
+    *"expired"*|*"Release file"*)
+      sub_line "  Meaning" "the mirror is stale — its Release file aged out"
+      sub_line "  Fix" "switch mirrors; a stale mirror is an abandoned mirror" ;;
+    *)
+      sub_line "  Fix" "see the primer below" ;;
+  esac
+}
+
+# The part that makes this non-scary. Printed after every failure so the
+# reasoning is on screen at the moment the decision has to be made, rather
+# than in a document nobody opens.
+_maintenance_repo_primer() {
+  echo ""
+  echo "$DIV"
+  echo -e "  ${BOLD}What a broken repository actually costs you${NC}"
+  echo ""
+  echo "  Nothing is broken right now. Each repository supplies updates for its"
+  echo "  own packages only, so one failing means you stop receiving updates"
+  echo "  for that vendor's software while everything else carries on. The"
+  echo "  danger is quiet: missed security updates, no warning."
+  echo ""
+  echo -e "  ${BOLD}Why editing the URL is safe${NC}"
+  echo ""
+  echo "  Every package is GPG-signed. apt refuses anything not signed by a key"
+  echo "  already trusted on this box, so a wrong URL fails loudly and visibly."
+  echo "  You cannot quietly pull in a hostile package by mistyping a mirror."
+  echo ""
+  echo -e "  ${BOLD}The one rule${NC}"
+  echo ""
+  echo -e "  Change the ${BOLD}host${NC}. Never change the ${BOLD}version${NC} in the path."
+  echo ""
+  echo "    https://dlm.mariadb.com/repo/mariadb-server/11.4/repo/debian"
+  echo "            ^^^^^^^^^^^^^^^ safe to swap        ^^^^ leave alone"
+  echo ""
+  echo "  The version segment decides which MariaDB you get. Changing it means"
+  echo "  the next 'apt upgrade' migrates your databases to a new major"
+  echo "  version — that is the one edit here that can genuinely hurt."
+  echo ""
+  echo "  Back up the file first, then re-run this check:"
+  echo "    cp /etc/apt/sources.list.d/NAME.list{,.bak}"
 }

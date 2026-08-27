@@ -191,7 +191,7 @@ _uu_set_all_updates() {
 
 _security_unattended() {
   run_action "Install unattended-upgrades" \
-    "apt update" \
+    "apt_update_safe" \
     "apt install unattended-upgrades apt-listchanges -y" \
     "dpkg-reconfigure -plow unattended-upgrades"
 }
