@@ -287,6 +287,11 @@ print_status() {
     menu_status_line 14 "Disk" OK "$disk_info"
   fi
 
+  # 15) Audit reports — deliberately carries no status symbol. Every other line
+  # here answers "is it installed"; a green tick next to an audit would be the
+  # exact false reassurance the audit exists to remove.
+  menu_status_line 15 "Audit reports" "" "what still needs doing · memory"
+
   echo ""
   echo "   0) Exit"
   echo ""

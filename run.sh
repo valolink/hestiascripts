@@ -10,7 +10,7 @@ export SCRIPT_DIR
 
 # Source all modules
 for mod in common status wpcli redis fail2ban maldet netdata security smtp \
-           php-fpm opcache mariadb nginx-templates maintenance disk; do
+           php-fpm opcache mariadb nginx-templates maintenance disk audit; do
   source "$SCRIPT_DIR/setup/${mod}.sh" || { echo "Failed to load setup/${mod}.sh"; exit 1; }
 done
 
@@ -36,6 +36,7 @@ while true; do
     12) menu_nginx_templates ;;
     13) menu_maintenance ;;
     14) menu_disk ;;
+    15) menu_audit ;;
     0)  echo "  Bye!"; exit 0 ;;
     *)  echo "  Invalid option."; sleep 1 ;;
   esac
