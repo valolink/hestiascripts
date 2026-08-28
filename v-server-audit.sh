@@ -182,11 +182,33 @@ audit_memory() {
   avg_kb=$(ps -eo rss,comm --no-headers 2>/dev/null | awk '$2 ~ /^php/ {s+=$1; n++} END {if (n) print int(s/n); else print 0}')
 
   [ "${children:-0}" -gt 0 ] && [ "${avg_kb:-0}" -gt 0 ] || return 0
-  worst_mb=$(( children * avg_kb / 1024 ))
+
+  # Not children × RSS: every worker maps the same opcache SHM, so that counts
+  # one shared block once per worker and can overstate the ceiling several-fold.
+  # sum(PSS) = shared + N×private and RSS ≈ shared + private solves for both.
+  local n pss private_kb shared_kb
+  read -r n pss < <(
+    for p in /proc/[0-9]*; do
+      [ -r "$p/smaps_rollup" ] || continue
+      case "$(cat "$p/comm" 2>/dev/null)" in php-fpm*|php*) ;; *) continue ;; esac
+      awk '/^Pss:/ {s+=$2} END {print s+0}' "$p/smaps_rollup" 2>/dev/null
+    done | awk '{c++; s+=$1} END {print c+0, s+0}')
+
+  if [ "${n:-0}" -gt 1 ] && [ "${pss:-0}" -gt "$avg_kb" ]; then
+    private_kb=$(( (pss - avg_kb) / (n - 1) ))
+    shared_kb=$(( avg_kb - private_kb ))
+    [ "$shared_kb" -lt 0 ] && shared_kb=0
+  else
+    private_kb=$avg_kb
+    shared_kb=0
+  fi
+  [ "$private_kb" -lt 1 ] && private_kb=$avg_kb
+
+  worst_mb=$(( (shared_kb + children * private_kb) / 1024 ))
 
   if [ "$worst_mb" -gt "$ram_mb" ]; then
     finding WARNING "PHP-FPM can request more RAM than the box has (${worst_mb}MB vs ${ram_mb}MB)" \
-      "${children} max_children x ~$((avg_kb / 1024))MB per worker. A traffic spike OOM-kills MariaDB before PHP notices." \
+      "${children} max_children x $((private_kb / 1024))MB private each, plus $((shared_kb / 1024))MB shared opcache. A traffic spike OOM-kills MariaDB before PHP notices." \
       "run.sh → 9 (PHP-FPM) and pick a profile that fits, or lower pm.max_children"
   fi
 

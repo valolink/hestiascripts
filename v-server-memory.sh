@@ -132,15 +132,40 @@ AVG_KB=$(ps -eo rss,comm --no-headers 2>/dev/null |
   awk '$2 ~ /^php/ {s+=$1; n++} END {if (n) print int(s/n); else print 0}')
 WORKERS_NOW=$(pgrep -c '^php-fpm' 2>/dev/null)
 
+# max_children × average RSS is the obvious calculation and it is wrong: every
+# worker maps the same opcache SHM and the same copy-on-write parent pages, so
+# multiplying RSS counts that shared block once per worker. Decompose instead —
+# with N workers, sum(PSS) = shared + N×private and RSS ≈ shared + private, which
+# solves for both. Only `private` is the marginal cost of allowing one more child.
+read -r PHP_N PHP_PSS_KB < <(
+  for p in /proc/[0-9]*; do
+    [ -r "$p/smaps_rollup" ] || continue
+    case "$(cat "$p/comm" 2>/dev/null)" in php-fpm*|php*) ;; *) continue ;; esac
+    awk '/^Pss:/ {s+=$2} END {print s+0}' "$p/smaps_rollup" 2>/dev/null
+  done | awk '{n++; s+=$1} END {print n+0, s+0}')
+
 if [ "${CHILDREN:-0}" -eq 0 ] || [ "${AVG_KB:-0}" -eq 0 ]; then
   note "No PHP-FPM pools running — nothing to size."
 else
   AVG_MB=$((AVG_KB / 1024))
-  WORST_MB=$((CHILDREN * AVG_KB / 1024))
-  printf '  %s workers allowed across %s pools × ~%s MB each = %s GB worst case\n' \
-    "$CHILDREN" "$POOLS" "$AVG_MB" "$(awk -v m=$WORST_MB 'BEGIN{printf "%.1f", m/1024}')"
-  printf '  Currently running: %s workers. Box has %s GB.\n' \
+  if [ "${PHP_N:-0}" -gt 1 ] && [ "${PHP_PSS_KB:-0}" -gt "$AVG_KB" ]; then
+    PRIVATE_KB=$(( (PHP_PSS_KB - AVG_KB) / (PHP_N - 1) ))
+    SHARED_KB=$(( AVG_KB - PRIVATE_KB ))
+    [ "$SHARED_KB" -lt 0 ] && SHARED_KB=0
+  else
+    PRIVATE_KB=$AVG_KB
+    SHARED_KB=0
+  fi
+  [ "$PRIVATE_KB" -lt 1 ] && PRIVATE_KB=$AVG_KB
+
+  WORST_MB=$(( (SHARED_KB + CHILDREN * PRIVATE_KB) / 1024 ))
+  printf '  %s workers allowed across %s pools · %s MB private each + %s MB shared opcache\n' \
+    "$CHILDREN" "$POOLS" "$((PRIVATE_KB / 1024))" "$((SHARED_KB / 1024))"
+  printf '  Worst case: %s GB. Currently running %s workers. Box has %s GB.\n' \
+    "$(awk -v m=$WORST_MB 'BEGIN{printf "%.1f", m/1024}')" \
     "${WORKERS_NOW:-0}" "$(awk -v m=$MEM_TOTAL 'BEGIN{printf "%.1f", m/1024}')"
+  note "Per-worker RSS reads ~${AVG_MB} MB, but most of that is the shared opcache every"
+  note "worker maps. Only the $((PRIVATE_KB / 1024)) MB private part is paid again per extra child."
 
   RATIO=$(awk -v w=$WORST_MB -v t=$MEM_TOTAL 'BEGIN{printf "%.1f", w/t}')
   if [ "$WORST_MB" -gt "$MEM_TOTAL" ]; then
