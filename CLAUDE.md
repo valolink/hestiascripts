@@ -24,6 +24,8 @@ templates/
   nginx/
     wp-rocket.tpl/.stpl      # WP Rocket cache-proxy templates (complete, version-controlled)
     wp-secure-snippet.conf   # Security rules injected into HestiaCP default nginx template
+  apache2/
+    wp-secure-snippet.conf   # Rewrite rules injected into <Directory %docroot%> of the Apache template
   php-fpm/
     production.conf / standard.conf / staging.conf / small.conf  # pm settings per profile
 ```

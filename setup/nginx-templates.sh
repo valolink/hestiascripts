@@ -8,23 +8,40 @@
 # site has no Apache backend.
 _NGINX_TPL_DIR="/usr/local/hestia/data/templates/web/nginx"
 
+# The Apache backend template. wp-secure exists on both sides because they catch
+# different traffic: nginx answers missing fonts/images at the proxy, Apache
+# answers PHP probes and secret-hunting that the proxy passes through.
+_APACHE_TPL_DIR="/usr/local/hestia/data/templates/web/apache2"
+
 menu_nginx_templates() {
   while true; do
     clear
     echo ""
-    echo -e "  ${BOLD}Nginx Templates${NC}"
+    echo -e "  ${BOLD}Web Templates${NC}"
     echo "$DIV"
 
+    # wp-secure is only "installed" if the rules are actually in the file. The
+    # file existing proves only that a cp ran.
     for name in "wp-secure" "wp-rocket"; do
-      if [ -f "$_NGINX_TPL_DIR/${name}.tpl" ] && [ -f "$_NGINX_TPL_DIR/${name}.stpl" ]; then
-        status_line "$name" OK "installed"
+      if [ ! -f "$_NGINX_TPL_DIR/${name}.tpl" ] || [ ! -f "$_NGINX_TPL_DIR/${name}.stpl" ]; then
+        status_line "nginx $name" ERR "not installed"
+      elif [ "$name" = "wp-secure" ] && ! grep -q "Valolink security rules" "$_NGINX_TPL_DIR/${name}.tpl"; then
+        status_line "nginx $name" ERR "present but contains NO rules — reinstall"
       else
-        status_line "$name" ERR "not installed"
+        status_line "nginx $name" OK "installed"
       fi
     done
 
+    if [ ! -d "$_APACHE_TPL_DIR" ]; then
+      status_line "apache2 wp-secure" "" "n/a — no Apache backend"
+    elif [ -f "$_APACHE_TPL_DIR/wp-secure.tpl" ] && [ -f "$_APACHE_TPL_DIR/wp-secure.stpl" ]; then
+      status_line "apache2 wp-secure" OK "installed"
+    else
+      status_line "apache2 wp-secure" ERR "not installed"
+    fi
+
     echo ""
-    echo "  1) Install / update wp-secure + wp-rocket  (both proxy templates)"
+    echo "  1) Install / update all templates"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
@@ -53,10 +70,11 @@ _nginx_install_profiles() {
   fi
 
   echo ""
-  echo "  This will install both proxy templates into $_NGINX_TPL_DIR:"
+  echo "  This will install the proxy templates into $_NGINX_TPL_DIR:"
   echo ""
   echo "    wp-secure  — default.{tpl,stpl} + injected security rules"
-  echo "                 (blocks hidden files, sensitive extensions, xmlrpc, bad bots)"
+  echo "                 (hidden files, sensitive extensions, xmlrpc, bad bots,"
+  echo "                  and missing fonts/images answered without hitting PHP)"
   echo "    wp-rocket  — WP Rocket cache-proxy template"
   echo "                 (the stpl serves cached HTML from /wp-content/cache/wp-rocket/"
   echo "                  directly, bypassing PHP on cache hits)"
@@ -78,9 +96,14 @@ _nginx_install_profiles() {
       echo "      Security rules already present, skipping injection."
     else
       echo -e "  ${CYAN}→${NC} Injecting security rules into $dst"
-      # Insert snippet before the first 'location /' block
+      # Insert snippet before the first 'location /' block. Match leading
+      # whitespace generically: Hestia's default.tpl is tab-indented, and an
+      # earlier four-space pattern here never matched — cp still succeeded, so
+      # every box got a wp-secure template containing no security rules at all,
+      # and the file-exists status check called it installed. Hence the verify
+      # step below: this must never fail quietly again.
       awk -v snippet="$snippet" '
-        /^    location \// && !done {
+        /^[[:space:]]*location \/[[:space:]]*\{/ && !done {
           while ((getline line < snippet) > 0) print line
           close(snippet)
           done=1
@@ -88,7 +111,14 @@ _nginx_install_profiles() {
         { print }
       ' "$dst" > "${dst}.tmp" && mv "${dst}.tmp" "$dst"
     fi
-    echo -e "  ${GREEN}✓ $dst${NC}"
+
+    if grep -q "Valolink security rules" "$dst"; then
+      echo -e "  ${GREEN}✓ $dst${NC}"
+    else
+      echo -e "  ${RED}✗ $dst — injection produced no rules${NC}"
+      echo "      No 'location / {' line matched in $_NGINX_TPL_DIR/default.${ext}."
+      echo "      The template layout has changed; do not apply this template."
+    fi
   done
 
   echo ""
@@ -100,9 +130,51 @@ _nginx_install_profiles() {
   cp "$rocket_stpl" "$_NGINX_TPL_DIR/wp-rocket.stpl"
   echo -e "  ${GREEN}✓ $_NGINX_TPL_DIR/wp-rocket.{tpl,stpl}${NC}"
 
+  # --- apache2 wp-secure: inject into <Directory %docroot%> ------------------
+  local ap_snippet="$SCRIPT_DIR/templates/apache2/wp-secure-snippet.conf"
+  if [ -d "$_APACHE_TPL_DIR" ] && [ -f "$ap_snippet" ] && [ -f "$_APACHE_TPL_DIR/default.tpl" ]; then
+    echo ""
+    for ext in tpl stpl; do
+      local asrc="$_APACHE_TPL_DIR/default.${ext}"
+      local adst="$_APACHE_TPL_DIR/wp-secure.${ext}"
+      [ -f "$asrc" ] || continue
+
+      echo -e "  ${CYAN}→${NC} cp $asrc $adst"
+      cp "$asrc" "$adst"
+
+      if grep -q "Valolink security rules" "$adst"; then
+        echo "      Security rules already present, skipping injection."
+      else
+        echo -e "  ${CYAN}→${NC} Injecting security rules into $adst"
+        # After the <Directory %docroot%> line, not before: these are
+        # per-directory rewrite rules and have to live inside that block.
+        awk -v snippet="$ap_snippet" '
+          { print }
+          /^[[:space:]]*<Directory %docroot%>/ && !done {
+            while ((getline line < snippet) > 0) print line
+            close(snippet)
+            done=1
+          }
+        ' "$adst" > "${adst}.tmp" && mv "${adst}.tmp" "$adst"
+      fi
+
+      if grep -q "Valolink security rules" "$adst"; then
+        echo -e "  ${GREEN}✓ $adst${NC}"
+      else
+        echo -e "  ${RED}✗ $adst — injection produced no rules${NC}"
+        echo "      No '<Directory %docroot%>' line matched; do not apply this template."
+      fi
+    done
+  fi
+
   echo ""
-  echo "  Apply in HestiaCP: Web → Edit domain → Advanced Options → Proxy Template"
-  echo "    → wp-secure  (default security hardening)"
-  echo "    → wp-rocket  (sites using WP Rocket)"
+  echo "  Apply in HestiaCP: Web → Edit domain → Advanced Options"
+  echo "    Proxy Template (Nginx) → wp-secure   (security hardening)"
+  echo "                           → wp-rocket   (sites using WP Rocket)"
+  echo "    Web Template (Apache2) → wp-secure   (PHP-probe + secret rules)"
+  echo ""
+  echo -e "  ${YELLOW}Test on a staging domain first${NC} — v-wp-staging-create builds one."
+  echo "  These templates change how missing files are answered; verify the site"
+  echo "  renders and that fonts/images still load before rolling out to live."
   press_enter
 }

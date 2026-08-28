@@ -136,7 +136,11 @@ MARIADB_BUFFER=$(grep -oP "(?<=innodb_buffer_pool_size\s=\s)\S+" /etc/mysql/mari
 # --- Nginx templates ----------------------------------------------------------------------
 NTPL_DIR="/usr/local/hestia/data/templates/web/nginx"
 WP_SECURE=0 WP_ROCKET=0
-[ -f "$NTPL_DIR/wp-secure.tpl" ] && [ -f "$NTPL_DIR/wp-secure.stpl" ] && WP_SECURE=1
+# The rules must actually be in the file. A tab-vs-spaces mismatch in the
+# injector used to leave a wp-secure.tpl that was a byte-for-byte copy of
+# default.tpl, and a file-exists check reported that box as hardened.
+[ -f "$NTPL_DIR/wp-secure.tpl" ] && [ -f "$NTPL_DIR/wp-secure.stpl" ] &&
+  grep -q "Valolink security rules" "$NTPL_DIR/wp-secure.tpl" 2>/dev/null && WP_SECURE=1
 [ -f "$NTPL_DIR/wp-rocket.tpl" ] && [ -f "$NTPL_DIR/wp-rocket.stpl" ] && WP_ROCKET=1
 
 # --- HestiaCP version (latest lookup bounded; offline → null) --------------------------------

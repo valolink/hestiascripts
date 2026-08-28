@@ -393,6 +393,19 @@ audit_restic() {
     "Users without a key silently fall back to tarballs." "setup-restic-backup.sh"
 }
 
+# ---------------------------------------------------------- web templates ---
+# A template can exist and contain nothing. The injector matched four spaces
+# against a tab-indented Hestia template, so `cp` succeeded, no rules landed,
+# and every file-exists check called the box hardened.
+audit_templates() {
+  local dir="/usr/local/hestia/data/templates/web/nginx"
+  [ -f "$dir/wp-secure.tpl" ] || return 0
+  grep -q "Valolink security rules" "$dir/wp-secure.tpl" 2>/dev/null && return 0
+  finding WARNING "nginx wp-secure.tpl contains no security rules" \
+    "It is a plain copy of default.tpl, so every domain using it is unhardened while reporting as protected." \
+    "run.sh → 12 (Web Templates) → 1, then re-check the status line"
+}
+
 # ------------------------------------------------------------------ netdata ---
 audit_netdata() {
   timeout 5 systemctl is-active netdata &>/dev/null || return 0
@@ -418,6 +431,7 @@ audit_ssl
 audit_mail
 audit_waste
 audit_restic
+audit_templates
 audit_netdata
 
 CRIT_N=$(count_level CRITICAL)
