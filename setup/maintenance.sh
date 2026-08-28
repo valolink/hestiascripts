@@ -127,8 +127,16 @@ _maintenance_filemanager_fix() {
 
 HESTIA_CONF="/usr/local/hestia/conf/hestia.conf"
 
+# Takes a space-separated list and is true when ANY of them is installed. ClamAV
+# is why: a box can carry clamav-daemon (the 1.3GB resident scanner) without the
+# `clamav` CLI package, and checking only `clamav` reported "not installed" while
+# clamd was the top memory consumer on the box.
 _svc_installed() {
-  dpkg -l "$1" 2>/dev/null | grep -q "^ii"
+  local pkg
+  for pkg in $1; do
+    dpkg -l "$pkg" 2>/dev/null | grep -q "^ii" && return 0
+  done
+  return 1
 }
 
 # Read a key's value out of hestia.conf (lines look like KEY='value')
@@ -205,7 +213,7 @@ menu_service_cleanup() {
     echo "  Not needed for WordPress-only hosting (no email mailboxes):"
     echo ""
     _svc_status_line "Dovecot  (IMAP/POP3)" "dovecot-core" "IMAP_SYSTEM" "dovecot"
-    _svc_status_line "ClamAV   (antivirus)" "clamav" "ANTIVIRUS_SYSTEM" "clamav-daemon clamav clamd"
+    _svc_status_line "ClamAV   (antivirus)" "clamav-daemon clamav clamav-base" "ANTIVIRUS_SYSTEM" "clamav-daemon clamav clamd"
     _svc_status_line "SpamAssassin" "spamassassin" "ANTISPAM_SYSTEM" "spamassassin spamd"
     _svc_status_line "VSFTPD   (FTP)" "vsftpd" "FTP_SYSTEM" "vsftpd"
     echo ""
@@ -250,7 +258,7 @@ _cleanup_dovecot() {
 }
 
 _cleanup_clamav() {
-  if ! _svc_installed clamav; then
+  if ! _svc_installed "clamav-daemon clamav clamav-base"; then
     _cleanup_repair_conf "ClamAV" "ANTIVIRUS_SYSTEM" "clamav-daemon clamav clamd" && return
     echo "  ClamAV is not installed."; press_enter; return
   fi

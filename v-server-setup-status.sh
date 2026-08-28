@@ -168,7 +168,9 @@ done
 # ERR state setup/maintenance.sh flags in its service-cleanup menu; the fix is
 # run.sh → 13 → 6 → pick the service, or v-change-sys-config-value KEY "".
 conf_val() { grep -m1 "^$1=" /usr/local/hestia/conf/hestia.conf 2>/dev/null | cut -d "'" -f2; }
-pkg_installed() { dpkg -l "$1" 2>/dev/null | grep -q "^ii"; }
+# Accepts a space-separated list, true when ANY is installed — clamav-daemon can be
+# present without the `clamav` CLI package, and checking only `clamav` misses it.
+pkg_installed() { local p; for p in $1; do dpkg -l "$p" 2>/dev/null | grep -q "^ii" && return 0; done; return 1; }
 
 DRIFT_PARTS=""
 check_drift() {
@@ -178,12 +180,12 @@ check_drift() {
   for v in $values; do
     [ "$cur" = "$v" ] || continue
     pkg_installed "$pkg" && return 0
-    DRIFT_PARTS+="{\"key\":\"${key}\",\"value\":\"$(json_escape "$cur")\",\"package\":\"${pkg}\"},"
+    DRIFT_PARTS+="{\"key\":\"${key}\",\"value\":\"$(json_escape "$cur")\",\"package\":\"${pkg%% *}\"},"
     return 0
   done
 }
 check_drift IMAP_SYSTEM      "dovecot"                    dovecot-core
-check_drift ANTIVIRUS_SYSTEM "clamav-daemon clamav clamd" clamav
+check_drift ANTIVIRUS_SYSTEM "clamav-daemon clamav clamd" "clamav-daemon clamav clamav-base"
 check_drift ANTISPAM_SYSTEM  "spamassassin spamd"         spamassassin
 check_drift FTP_SYSTEM       "vsftpd"                     vsftpd
 check_drift FTP_SYSTEM       "proftpd"                    proftpd
