@@ -437,6 +437,47 @@ audit_templates() {
     "run.sh → 12 (Web Templates) → 1, then re-check the status line"
 }
 
+# ------------------------------------------------- is the template in USE? ---
+# The layer nothing caught for months. wp-secure.tpl can exist AND contain the
+# rules AND still protect nothing, because a template only applies to domains
+# assigned to it. setup-status reporting wpSecure:true only ever meant "a file
+# with that name exists" — on kuumalahde all three domains sat on PROXY='default'
+# the whole time.
+audit_template_usage() {
+  local dir="/usr/local/hestia/data/templates/web/nginx"
+  [ -f "$dir/wp-secure.tpl" ] || return 0
+  # The "exists but empty" case belongs to audit_templates; don't report twice.
+  grep -q "Valolink security rules" "$dir/wp-secure.tpl" 2>/dev/null || return 0
+
+  local f line dom proxy total=0 covered=0 uncovered=""
+  for f in /usr/local/hestia/data/users/*/web.conf; do
+    [ -f "$f" ] || continue
+    while IFS= read -r line; do
+      dom=$(echo "$line" | grep -oE "DOMAIN='[^']*'" | cut -d"'" -f2)
+      [ -n "$dom" ] || continue
+      proxy=$(echo "$line" | grep -oE "PROXY='[^']*'" | cut -d"'" -f2)
+      total=$((total + 1))
+      if [ "$proxy" = "wp-secure" ]; then
+        covered=$((covered + 1))
+      else
+        uncovered="$uncovered $dom"
+      fi
+    done < "$f"
+  done
+
+  [ "$total" -gt 0 ] || return 0
+
+  if [ "$covered" -eq 0 ]; then
+    finding WARNING "wp-secure template is built but no domain uses it" \
+      "The rules exist in the file and apply to nothing — every domain is still on its default proxy template." \
+      "v-change-web-domain-proxy-tpl <user> <domain> wp-secure   # test one small site first"
+  elif [ -n "$uncovered" ]; then
+    finding ADVISORY "Domains not on the wp-secure proxy template:$uncovered" \
+      "They get no hardening rules. Some of this may be deliberate — wp-rocket sites and the panel domain are reasonable exceptions." \
+      "v-change-web-domain-proxy-tpl <user> <domain> wp-secure"
+  fi
+}
+
 # ------------------------------------------------------------------ netdata ---
 audit_netdata() {
   timeout 5 systemctl is-active netdata &>/dev/null || return 0
@@ -464,6 +505,7 @@ audit_waste
 audit_restic
 audit_wp_exposure
 audit_templates
+audit_template_usage
 audit_netdata
 
 CRIT_N=$(count_level CRITICAL)
