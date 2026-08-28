@@ -393,6 +393,37 @@ audit_restic() {
     "Users without a key silently fall back to tarballs." "setup-restic-backup.sh"
 }
 
+# ------------------------------------------------------- exposed WP files ---
+# Found on kuumalahde 2026-08-28: a 52MB wp-content/debug.log serving over HTTPS
+# with a 200. The wp-secure snippet already denies *.log — it just had never
+# actually been injected into the template, so nothing enforced it. Check for the
+# file itself rather than trusting a rule to exist.
+audit_wp_exposure() {
+  local f size dom logs="" dumps=""
+
+  for f in /home/*/web/*/public_html/wp-content/debug.log; do
+    [ -f "$f" ] || continue
+    size=$(du -h "$f" 2>/dev/null | cut -f1)
+    dom=$(echo "$f" | awk -F/ '{print $5}')
+    logs="$logs ${dom}(${size})"
+  done
+  [ -n "$logs" ] && finding WARNING "WordPress debug.log inside the web root:$logs" \
+    "Debug logs carry filesystem paths, plugin internals and often tokens in stack traces, and are served unless a deny rule is actually deployed." \
+    "Point WP_DEBUG_LOG at <domain>/private/wp-debug.log (inside open_basedir, outside the web root), or set WP_DEBUG false"
+
+  # Credential-bearing leftovers. maxdepth 2 keeps this cheap and avoids the
+  # plugin/theme zips that legitimately live deeper in wp-content.
+  for f in $(timeout 20 find /home/*/web/*/public_html -maxdepth 2 \
+      \( -name 'wp-config*.bak*' -o -name 'wp-config*.save' -o -name 'wp-config*.old' \
+         -o -name '*.sql' -o -name '*.sql.gz' \) 2>/dev/null | head -20); do
+    dom=$(echo "$f" | awk -F/ '{print $5}')
+    dumps="$dumps ${dom}:$(basename "$f")"
+  done
+  [ -n "$dumps" ] && finding CRITICAL "Database dump or wp-config backup in the web root:$dumps" \
+    "These hand over database credentials or the entire dataset to anyone who guesses the filename, and scanners guess constantly." \
+    "Move them outside public_html (or delete them) — check before deleting"
+}
+
 # ---------------------------------------------------------- web templates ---
 # A template can exist and contain nothing. The injector matched four spaces
 # against a tab-indented Hestia template, so `cp` succeeded, no rules landed,
@@ -431,6 +462,7 @@ audit_ssl
 audit_mail
 audit_waste
 audit_restic
+audit_wp_exposure
 audit_templates
 audit_netdata
 
