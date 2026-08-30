@@ -393,6 +393,59 @@ audit_restic() {
     "Users without a key silently fall back to tarballs." "setup-restic-backup.sh"
 }
 
+# ------------------------------------------------------ redis object cache ---
+# kuumalahde 2026-08-30: nightly 504s for two days. The redis-cache plugin's
+# flush_group() runs a Lua SCAN across the WHOLE keyspace on every call, gated
+# only by WP_REDIS_DISABLE_GROUP_FLUSH — not by the prefix, the database, or
+# WP_REDIS_SELECTIVE_FLUSH. With 406k keys and no TTL that was 173ms a call,
+# 2.4 calls/sec, 41% of a core. Redis is single-threaded, so each scan blocked
+# every other cache read until PHP timed out.
+#
+# Measure the symptom directly — what share of Redis's uptime went into EVAL —
+# rather than guessing from key counts alone.
+audit_redis_cache() {
+  have redis-cli || return 0
+  timeout 5 redis-cli ping >/dev/null 2>&1 || return 0
+
+  local keys expires uptime eval_usec pct
+  keys=$(timeout 5 redis-cli dbsize 2>/dev/null | tr -dc '0-9')
+  expires=$(timeout 5 redis-cli info keyspace 2>/dev/null | grep -oE 'expires=[0-9]+' | head -1 | tr -dc '0-9')
+  uptime=$(timeout 5 redis-cli info server 2>/dev/null | grep -oE 'uptime_in_seconds:[0-9]+' | tr -dc '0-9')
+  eval_usec=$(timeout 5 redis-cli info commandstats 2>/dev/null |
+    grep -oE '^cmdstat_eval:calls=[0-9]+,usec=[0-9]+' | grep -oE 'usec=[0-9]+' | tr -dc '0-9')
+
+  if [ -n "$eval_usec" ] && [ "${uptime:-0}" -gt 3600 ]; then
+    pct=$(awk -v u="$eval_usec" -v s="$uptime" 'BEGIN{printf "%.0f", (u/1000000)*100/s}')
+    if [ "${pct:-0}" -ge 10 ]; then
+      finding WARNING "Redis spends ${pct}% of its uptime running object-cache flush scans" \
+        "flush_group() SCANs the entire keyspace on every call and Redis is single-threaded, so each scan stalls every other cache read — which surfaces as 504s under load." \
+        "Add to wp-config.php: define('WP_REDIS_DISABLE_GROUP_FLUSH', true); and define('WP_REDIS_MAXTTL', 86400);"
+    fi
+  fi
+
+  # Unbounded keyspace is what makes each scan expensive in the first place.
+  if [ "${keys:-0}" -gt 50000 ]; then
+    local ttl_pct
+    ttl_pct=$(awk -v e="${expires:-0}" -v k="$keys" 'BEGIN{printf "%.0f", e*100/k}')
+    [ "${ttl_pct:-100}" -lt 25 ] && finding WARNING "Redis holds ${keys} keys and only ${ttl_pct}% have a TTL" \
+      "Nothing bounds the keyspace, so it grows until every flush scan is slow." \
+      "define('WP_REDIS_MAXTTL', 86400); in wp-config.php, then: redis-cli flushdb"
+  fi
+
+  # Sites with Redis enabled but missing the guard constant.
+  local f dom missing=""
+  for f in /home/*/web/*/public_html/wp-config.php; do
+    [ -f "$f" ] || continue
+    [ -f "$(dirname "$f")/wp-content/object-cache.php" ] || continue
+    grep -q "WP_REDIS_DISABLE_GROUP_FLUSH" "$f" 2>/dev/null && continue
+    dom=$(echo "$f" | awk -F/ '{print $5}')
+    missing="$missing $dom"
+  done
+  [ -n "$missing" ] && finding ADVISORY "Redis enabled without WP_REDIS_DISABLE_GROUP_FLUSH:$missing" \
+    "Harmless until the keyspace grows — then every group flush scans all of it. v-wp-redis-install sets this on new installs." \
+    "wp config set WP_REDIS_DISABLE_GROUP_FLUSH true --raw --type=constant --path=<docroot>"
+}
+
 # ------------------------------------------------------- exposed WP files ---
 # Found on kuumalahde 2026-08-28: a 52MB wp-content/debug.log serving over HTTPS
 # with a 200. The wp-secure snippet already denies *.log — it just had never
@@ -504,6 +557,7 @@ audit_mail
 audit_waste
 audit_restic
 audit_wp_exposure
+audit_redis_cache
 audit_templates
 audit_template_usage
 audit_netdata

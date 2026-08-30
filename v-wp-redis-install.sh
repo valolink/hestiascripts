@@ -14,6 +14,12 @@ USAGE: v-wp-redis-install [OPTIONS]
 Install the Redis Object Cache plugin on a WordPress site, set a unique
 WP_REDIS_PREFIX in wp-config.php, and activate the plugin.
 
+Also sets two constants that keep the cache from becoming the bottleneck:
+  WP_REDIS_DISABLE_GROUP_FLUSH=true  group flush uses FLUSHDB (O(1)) instead
+                                     of a Lua SCAN over the whole keyspace
+  WP_REDIS_MAXTTL=86400              keys expire, so the keyspace stays bounded
+Existing values are never overwritten.
+
 Redis is NOT enabled (no object-cache.php drop-in is created). Enable it
 manually in the plugin settings or with: wp redis enable --path=...
 
@@ -137,6 +143,47 @@ else
   fi
   echo "✅ WP_REDIS_PREFIX set"
 fi
+
+# --- Cache-behaviour constants -------------------------------------------------
+#
+# Both of these exist because of kuumalahde.fi on 2026-08-30. Redis went live
+# there on 2026-08-27 with only WP_REDIS_PREFIX set, and by the next night the
+# box was serving 504s from 21:00 to 06:00 every night.
+#
+# WP_REDIS_DISABLE_GROUP_FLUSH — the redis-cache plugin's flush_group() runs a
+#   Lua SCAN across the ENTIRE keyspace on every call, and nothing gates that
+#   except this constant. Not WP_REDIS_SELECTIVE_FLUSH, not the prefix, not the
+#   database. On kuumalahde that was 392,916 calls in 46h at ~173ms each —
+#   18.9 hours of Redis CPU, or 41% of a core doing nothing but flushing.
+#   Redis is single-threaded, so every one of those scans blocked all other
+#   cache reads until PHP timed out. With this set, flush_group() falls back to
+#   flush() → FLUSHDB, which is O(1). It invalidates MORE than asked (whole DB,
+#   not one group), so it is conservative: more cache misses, never staleness.
+#
+# WP_REDIS_MAXTTL — without it, cache keys never expire and the keyspace only
+#   grows. kuumalahde reached 406,234 keys with just 4,342 carrying a TTL, which
+#   is what made each scan so expensive. 86400 (one day) bounds it.
+#
+# Small sites never notice either problem: the keyspace stays small, so the scan
+# stays cheap. It only bites at WooCommerce scale with a write-heavy import.
+# Setting both at install time costs nothing and removes the trap.
+set_const_if_missing() {
+  local name="$1" value="$2"
+  if $WP config has "$name" &>/dev/null; then
+    echo "ℹ️  $name already set: $($WP config get "$name" 2>/dev/null)"
+    return 0
+  fi
+  echo "Setting $name = $value ..."
+  if $WP config set "$name" "$value" --raw --type=constant 2>&1; then
+    echo "✅ $name set"
+  else
+    echo "⚠️  Could not set $name — set it by hand in wp-config.php"
+  fi
+}
+
+echo ""
+set_const_if_missing WP_REDIS_DISABLE_GROUP_FLUSH true
+set_const_if_missing WP_REDIS_MAXTTL 86400
 
 # --- Summary ---
 echo ""
