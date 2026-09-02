@@ -153,7 +153,11 @@ So there are two proxy templates, and the choice is about **where cart state is 
 
 #### The bypass is two layers, and nginx is only the first
 
-**`wp-rocket-cartbypass` on its own changes nothing.** Skipping the nginx serve just hands the request to PHP, where WP Rocket's `advanced-cache.php` answers from the *same* cached file — it does not reject the WooCommerce cart cookies by default, because its design assumption is the same as `wp-rocket`'s: that the cart repaints client-side.
+**`wp-rocket-cartbypass` on its own changes nothing.** Skipping the nginx serve just hands the request to PHP, where WP Rocket's `advanced-cache.php` answers from the *same* cached file.
+
+That is not an oversight in WP Rocket — it is the design. The cart cookies appear in exactly two places in its source, both in `WooCommerceSubscriber::is_get_refreshed_fragments()`, and neither concerns the page cache: they decide whether it may cache the **cart-fragments AJAX response** (it caches that for 7 days when the cart is empty, and skips the optimisation when a cart exists). WP Rocket's WooCommerce model is "cache the page for everyone, let `?wc-ajax=get_refreshed_fragments` repaint the cart client-side" — the same assumption `wp-rocket` makes. `wp-rocket-cartbypass` is the profile that *fights* that design, which is why it needs opting into at both layers rather than one.
+
+This also explains the 2026-09-02 incident properly: the assumption was never wrong, its **precondition** failed. `expires max` froze the mini-cart JS in returning browsers, so the repaint never ran and the cached empty cart stayed on screen. `$vl_asset_expires` restores the precondition.
 
 Measured on `www.kuumalahde.fi` 2026-09-02, which was on the cartbypass template:
 
