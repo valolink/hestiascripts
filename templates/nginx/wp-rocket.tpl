@@ -77,7 +77,7 @@ server {
         # holds. Only a hard reload does, which is the "broken until I
         # hard-refresh" report. $vl_asset_expires is `max` when the URL carries
         # ?ver= and 1h when it does not.
-        location ~* ^.+\.(css|js)$ {
+        location ~* ^.+\.(css|js|mjs)$ {
             try_files  $uri @fallback;
             root       %docroot%;
             access_log /var/log/%web_system%/domains/%domain%.log combined;
