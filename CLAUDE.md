@@ -151,6 +151,29 @@ So there are two proxy templates, and the choice is about **where cart state is 
 
 `wp-rocket-cartbypass.{tpl,stpl}` is **generated** from `wp-rocket.{tpl,stpl}` by `_nginx_install_profiles`, via one anchored `sed` on `comment_author_)`, verified three ways. Two hand-maintained copies of a 130-line template drift — this repo has already shipped a template whose security rules silently went missing.
 
+#### The bypass is two layers, and nginx is only the first
+
+**`wp-rocket-cartbypass` on its own changes nothing.** Skipping the nginx serve just hands the request to PHP, where WP Rocket's `advanced-cache.php` answers from the *same* cached file — it does not reject the WooCommerce cart cookies by default, because its design assumption is the same as `wp-rocket`'s: that the cart repaints client-side.
+
+Measured on `www.kuumalahde.fi` 2026-09-02, which was on the cartbypass template:
+
+| cookie | ETag | WP Rocket footprint | bytes |
+|---|---|---|---|
+| none | present — nginx served the file | `cached@178835064` | 1628175 |
+| `woocommerce_items_in_cart=1` | gone — nginx *did* bypass | same `cached@178835064` | 1628175, identical |
+| `wordpress_logged_in_` | gone | absent | different — genuinely rendered |
+
+So the template must be paired with **WP Rocket → Advanced Rules → Never Cache Cookies** listing both `woocommerce_items_in_cart` and `woocommerce_cart_hash` (or a `rocket_cache_reject_cookies` filter). Without that pairing you have bought a PHP bootstrap per request and identical HTML.
+
+Verify in two calls — a working bypass has **neither** an ETag **nor** a WP Rocket footprint:
+
+```bash
+curl -sI -H 'Cookie: woocommerce_items_in_cart=1' https://SITE/ | grep -ic '^etag'
+curl -s  -H 'Cookie: woocommerce_items_in_cart=1' https://SITE/ | grep -c 'optimized by WP Rocket'
+```
+
+The `wordpress_logged_in_` case is the control: it is rejected at both layers, so it shows what a real bypass looks like.
+
 **Grep for the cart bypass on the `if ($http_cookie …)` line, never on the file.** `wp-rocket`'s comment block names both cookies while explaining why they are absent, so a file-wide grep reports the exact opposite of the truth. The status checks and the generator both anchor on the line for this reason.
 
 `wp_woocommerce_session_` is in neither list: it is set far more widely and would bypass the cache for most traffic.
