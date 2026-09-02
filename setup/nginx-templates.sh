@@ -43,26 +43,30 @@ menu_nginx_templates() {
     # Compared by content, not existence — same lesson as wp-secure below. A
     # stale copy is the dangerous state: it looks installed and silently lacks
     # whatever the current version fixes.
-    local cc_src="$SCRIPT_DIR/templates/nginx/valolink-html-cache-control.conf"
-    local cc_dst="/etc/nginx/conf.d/valolink-html-cache-control.conf"
-    if [ ! -f "$cc_dst" ]; then
-      status_line "nginx html cache-control" ERR "not installed"
+    local cc_src="$SCRIPT_DIR/templates/nginx/valolink-cache-headers.conf"
+    local cc_dst="/etc/nginx/conf.d/valolink-cache-headers.conf"
+    if [ -f "/etc/nginx/conf.d/valolink-html-cache-control.conf" ]; then
+      # Both files declare $vl_is_html — leaving the old one is a fatal
+      # duplicate variable, so this is worse than "not installed".
+      status_line "nginx cache headers" ERR "superseded file still present — reinstall"
+    elif [ ! -f "$cc_dst" ]; then
+      status_line "nginx cache headers" ERR "not installed"
     elif ! cmp -s "$cc_src" "$cc_dst"; then
-      status_line "nginx html cache-control" ERR "stale — reinstall"
+      status_line "nginx cache headers" ERR "stale — reinstall"
     else
-      status_line "nginx html cache-control" OK "installed"
+      status_line "nginx cache headers" OK "installed"
     fi
 
     echo ""
     echo "  1) Install / update all templates"
-    echo "  2) Install / update HTML cache-control drop-in only"
+    echo "  2) Install / update cache-headers drop-in only"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
 
     case "$choice" in
       1) _nginx_install_profiles ;;
-      2) echo ""; bash "$SCRIPT_DIR/setup/install-html-cache-control.sh"; press_enter ;;
+      2) echo ""; bash "$SCRIPT_DIR/setup/install-cache-headers.sh"; press_enter ;;
       0) return ;;
     esac
   done
@@ -94,16 +98,32 @@ _nginx_install_profiles() {
   echo "                 (the stpl serves cached HTML from /wp-content/cache/wp-rocket/"
   echo "                  directly, bypassing PHP on cache hits)"
   echo ""
-  echo "  …and into /etc/nginx/conf.d (http level, all vhosts, takes effect on reload):"
+  echo "  …and into /etc/nginx/conf.d (http level, all vhosts, live on reload):"
   echo ""
-  echo "    valolink-html-cache-control.conf"
-  echo "                 — Cache-Control for HTML responses that set none of their"
-  echo "                   own. Without it nginx serves WP Rocket's static pages"
-  echo "                   with only ETag/Last-Modified, and browsers invent a"
-  echo "                   freshness lifetime from the document's age."
+  echo "    valolink-cache-headers.conf"
+  echo "                 — Cache-Control for HTML that sets none of its own, and"
+  echo "                   \$vl_asset_expires, which the templates below use to"
+  echo "                   give css/js a long cache ONLY when the URL carries a"
+  echo "                   ?ver= that can bust it."
   echo ""
 
   if ! confirm "Install both?"; then return; fi
+
+  echo ""
+
+  # --- cache-headers drop-in: MUST be first ---------------------------------
+  # The templates below reference $vl_asset_expires. If the drop-in that
+  # declares it is missing or stale when a domain is rebuilt onto one of these
+  # templates, nginx fails to start on "unknown vl_asset_expires variable".
+  # Install it first and refuse to write the templates if it did not land.
+  echo -e "  ${CYAN}→${NC} Installing cache-headers drop-in (prerequisite)"
+  if ! bash "$SCRIPT_DIR/setup/install-cache-headers.sh"; then
+    echo ""
+    echo -e "  ${RED}✗ Aborting — templates NOT installed.${NC}"
+    echo "      They reference \$vl_asset_expires, which that drop-in declares."
+    echo "      Writing them now would leave the box unable to reload nginx."
+    press_enter; return
+  fi
 
   echo ""
 
@@ -115,6 +135,17 @@ _nginx_install_profiles() {
     echo -e "  ${CYAN}→${NC} cp $src $dst"
     cp "$src" "$dst"
 
+    # The SSL template roots its asset blocks at %sdocroot%, not %docroot%. On a
+    # stock Hestia install public_shtml is a symlink to public_html so the two
+    # resolve alike, but the stock .stpl uses %sdocroot% throughout and a site
+    # with a genuinely separate SSL docroot would be served the wrong tree.
+    # Match the template rather than lean on the symlink.
+    local use_snippet="$snippet"
+    if [ "$ext" = "stpl" ]; then
+      use_snippet="$(mktemp)"
+      sed 's/%docroot%/%sdocroot%/g' "$snippet" > "$use_snippet"
+    fi
+
     if grep -q "Valolink security rules" "$dst"; then
       echo "      Security rules already present, skipping injection."
     else
@@ -125,7 +156,7 @@ _nginx_install_profiles() {
       # every box got a wp-secure template containing no security rules at all,
       # and the file-exists status check called it installed. Hence the verify
       # step below: this must never fail quietly again.
-      awk -v snippet="$snippet" '
+      awk -v snippet="$use_snippet" '
         /^[[:space:]]*location \/[[:space:]]*\{/ && !done {
           while ((getline line < snippet) > 0) print line
           close(snippet)
@@ -134,6 +165,8 @@ _nginx_install_profiles() {
         { print }
       ' "$dst" > "${dst}.tmp" && mv "${dst}.tmp" "$dst"
     fi
+
+    [ "$use_snippet" != "$snippet" ] && rm -f "$use_snippet"
 
     if grep -q "Valolink security rules" "$dst"; then
       echo -e "  ${GREEN}✓ $dst${NC}"
@@ -190,14 +223,6 @@ _nginx_install_profiles() {
     done
   fi
 
-  # --- html cache-control drop-in -------------------------------------------
-  # Not a Hestia template, so it needs no per-domain rebuild — it is http-level
-  # config that goes live on reload. Kept in this action anyway so a fresh box
-  # ends up correct in one step.
-  echo ""
-  echo -e "  ${CYAN}→${NC} Installing HTML cache-control drop-in"
-  bash "$SCRIPT_DIR/setup/install-html-cache-control.sh"
-
   echo ""
   echo "  Apply in HestiaCP: Web → Edit domain → Advanced Options"
   echo "    Proxy Template (Nginx) → wp-secure   (security hardening)"
@@ -207,5 +232,26 @@ _nginx_install_profiles() {
   echo -e "  ${YELLOW}Test on a staging domain first${NC} — v-wp-staging-create builds one."
   echo "  These templates change how missing files are answered; verify the site"
   echo "  renders and that fonts/images still load before rolling out to live."
+  echo ""
+
+  # A template file on disk changes nothing by itself — Hestia bakes it into
+  # each domain's conf at rebuild time. Enumerate what is actually affected
+  # rather than leaving the operator to guess.
+  echo "  Domains already on these templates keep their OLD generated conf until"
+  echo "  rebuilt. Affected here:"
+  echo ""
+  local found=0
+  local uconf u
+  for uconf in /usr/local/hestia/data/users/*/web.conf; do
+    [ -f "$uconf" ] || continue
+    u=$(basename "$(dirname "$uconf")")
+    while IFS= read -r line; do
+      found=1
+      echo "    v-rebuild-web-domain $u $line"
+    done < <(grep -oE "DOMAIN='[^']+'.*PROXY='wp-(rocket|secure)'" "$uconf" 2>/dev/null |
+             sed -E "s/^DOMAIN='([^']+)'.*PROXY='(wp-[a-z]+)'.*/\1   # \2/")
+  done
+  [ "$found" -eq 0 ] && echo "    (none — no domain is assigned wp-rocket or wp-secure yet)"
+  echo ""
   press_enter
 }

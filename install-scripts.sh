@@ -146,23 +146,26 @@ else
   echo "  ✅ Firewall rule for port 8091 already exists."
 fi
 
-# --- 4. Nginx HTML Cache-Control Drop-in ---
+# --- 4. Nginx Cache-Headers Drop-in ---
 # Rolls out with every v-hestiascripts-update, so the fleet picks it up through
-# the same channel as the scripts. Self-reverting on a failed nginx -t; a
-# failure here is reported but never aborts the rest of the deployment.
+# the same channel as the scripts. This also keeps the drop-in AHEAD of the
+# templates that reference $vl_asset_expires: templates are only ever written by
+# run.sh -> 12, which installs the drop-in first as well.
+# Self-reverting on a failed nginx -t; a failure here is reported but never
+# aborts the rest of the deployment.
 echo "---------------------------------------------------"
-echo "⚙️ Installing nginx HTML cache-control drop-in..."
+echo "⚙️ Installing nginx cache-headers drop-in..."
 
-CACHE_CONTROL_INSTALLER="$GIT_DIR/setup/install-html-cache-control.sh"
+CACHE_HEADERS_INSTALLER="$GIT_DIR/setup/install-cache-headers.sh"
 
-if [ -f "$CACHE_CONTROL_INSTALLER" ]; then
-  if bash "$CACHE_CONTROL_INSTALLER"; then
-    echo "  ✅ HTML cache-control drop-in is current."
+if [ -f "$CACHE_HEADERS_INSTALLER" ]; then
+  if bash "$CACHE_HEADERS_INSTALLER"; then
+    echo "  ✅ Cache-headers drop-in is current."
   else
-    echo "  ❌ HTML cache-control drop-in FAILED — see the output above."
+    echo "  ❌ Cache-headers drop-in FAILED — see the output above."
   fi
 else
-  echo "  ⚠️ Installer not found: $CACHE_CONTROL_INSTALLER — skipping."
+  echo "  ⚠️ Installer not found: $CACHE_HEADERS_INSTALLER — skipping."
 fi
 
 echo "==================================================="

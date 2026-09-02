@@ -20,12 +20,12 @@ setup/                 # Modules sourced by run.sh
   wpcli.sh / redis.sh / fail2ban.sh / maldet.sh / netdata.sh / security.sh
   php-fpm.sh / opcache.sh / mariadb.sh / nginx-templates.sh / maintenance.sh / disk.sh / smtp.sh
   audit.sh             # Menu 15 — thin wrapper over the v-server-audit / v-server-memory scripts
-  install-html-cache-control.sh  # EXECUTED, not sourced — see below
+  install-cache-headers.sh       # EXECUTED, not sourced — see below
 templates/
   nginx/
     wp-rocket.tpl/.stpl      # WP Rocket cache-proxy templates (complete, version-controlled)
     wp-secure-snippet.conf   # Security rules injected into HestiaCP default nginx template
-    valolink-html-cache-control.conf  # http-level Cache-Control default → /etc/nginx/conf.d/
+    valolink-cache-headers.conf  # http-level HTML Cache-Control + $vl_asset_expires → /etc/nginx/conf.d/
   apache2/
     wp-secure-snippet.conf   # Rewrite rules injected into <Directory %docroot%> of the Apache template
   php-fpm/
@@ -112,15 +112,32 @@ New v-scripts for WordPress operations (info gathering, updates, etc.) should fo
 
 ### Installation (`install-scripts.sh`)
 
-Symlinks `v-*` bash scripts into `/usr/local/hestia/bin/`, creates a systemd unit for `hestia-streamer`, opens firewall port 8091 for a specific IP, and installs the **HTML cache-control drop-in** (below). The drop-in rides along here rather than living only in the `run.sh` menu so that `v-hestiascripts-update` — which EngineLink can trigger per box from the Operate tab — rolls it out unattended.
+Symlinks `v-*` bash scripts into `/usr/local/hestia/bin/`, creates a systemd unit for `hestia-streamer`, opens firewall port 8091 for a specific IP, and installs the **cache-headers drop-in** (below). The drop-in rides along here rather than living only in the `run.sh` menu so that `v-hestiascripts-update` — which EngineLink can trigger per box from the Operate tab — rolls it out unattended.
 
-### HTML cache-control drop-in
+### Cache-headers drop-in
 
-`templates/nginx/valolink-html-cache-control.conf` → `/etc/nginx/conf.d/`, installed by `setup/install-html-cache-control.sh` (executed, not sourced — called from `install-scripts.sh` and from `run.sh` → 12).
+`templates/nginx/valolink-cache-headers.conf` → `/etc/nginx/conf.d/`, installed by `setup/install-cache-headers.sh` (executed, not sourced — called from `install-scripts.sh` and from `run.sh` → 12).
 
-Two `map` blocks plus one `add_header` at **http** level: an HTML response that sets no `Cache-Control` of its own gets `no-cache, must-revalidate, max-age=0`. It only ever fills a gap — WordPress's own headers on cart/checkout and `expires max` on static assets both suppress it, so nothing is ever overridden or duplicated.
+Three `map` blocks and one `add_header`, all at **http** level, doing two jobs.
 
-It exists because the wp-rocket template answers a cache hit with `try_files $rocket_file`, and nginx sends a static file with `ETag` + `Last-Modified` and no `Cache-Control`. That is not "don't cache" — browsers apply a heuristic lifetime of ~10% of the document's age (RFC 9111 §4.2.2) and reuse the page without revalidating. On WooCommerce that outlives the 24-hour `storeApiNonce` embedded in the HTML, and the cart stops hydrating until the visitor hard-refreshes. Diagnosed on energiatuote.fi 2026-09-02; LiteSpeed had always sent the header, and the move to nginx silently dropped it.
+**1. A default `Cache-Control` for HTML that carries none.** The wp-rocket template answers a cache hit with `try_files $rocket_file`, so nginx sends a static file with `ETag` + `Last-Modified` and nothing else. That is not "don't cache" — browsers apply a heuristic lifetime of ~10% of the document's age (RFC 9111 §4.2.2) and reuse the page without revalidating. It only ever fills a gap: WordPress's own headers on cart/checkout and `expires` on assets both suppress it, so nothing is overridden or duplicated. LiteSpeed always sent this header; the move to nginx dropped it.
+
+**2. `$vl_asset_expires`** — `max` when the URL carries `?ver=`, `1h` when it does not. The templates use it for `.css`/`.js` instead of a blanket `expires max`. A ten-year `max-age` on a URL with no version is a trap: the URL never changes, so a plugin update swaps the bytes on disk and returning browsers keep running the old file. A normal reload does not help — it revalidates the document but serves subresources from cache while their `max-age` holds. Only a hard reload does, which is exactly the "broken until I hard-refresh" report, in the storefront *and* in wp-admin. Images, fonts and media deliberately keep `expires max`.
+
+**Ordering is load-bearing.** The templates reference `$vl_asset_expires`, so this drop-in must be installed *before* any domain is rebuilt onto them, or nginx fails to start on `unknown "vl_asset_expires" variable`. `install-scripts.sh` runs it on every update and `_nginx_install_profiles` runs it first and aborts the template write if it fails. Keeping the `map` and the `add_header` in one http-level file is also why a per-domain `map` — which would be a fatal `duplicate "..." variable` — never happens.
+
+The installer removes the superseded `valolink-html-cache-control.conf`; both files declare `$vl_is_html`, so leaving it behind is a fatal duplicate.
+
+Diagnosed together on energiatuote.fi 2026-09-02: WooCommerce updated the previous day, and 27 of 31 `/wp-content/` script and style tags had no `?ver=` — including `wc-blocks-middleware.js` and `add-to-cart.min.js`, so returning customers were running the previous day's cart JavaScript.
+
+### Known gaps in `wp-rocket.{tpl,stpl}`
+
+A cache hit bypasses PHP entirely, so **WP Rocket's own bypass rules never run** — every exclusion has to be restated in the template. Two consequences worth knowing:
+
+- **Mobile cache is not supported.** WP Rocket's "Separate cache files for mobile devices" writes `index-mobile.html`, which the template never looks for. Enabling it silently serves desktop pages to phones. Leave it off on any domain using this template.
+- **Every query string bypasses the cache** (`if ($query_string != "")`), so `?utm_*`, `?fbclid` and `?gclid` traffic all hits PHP uncached. That matches WP Rocket's own nginx config, but on a site running paid traffic it can be a large share of visits.
+
+The WooCommerce cart cookies (`woocommerce_items_in_cart`, `woocommerce_cart_hash`) were added to the bypass list on 2026-09-02 — without them a shopper holding a cart was served the same static page as an anonymous visitor, verified by identical `ETag` with and without the cookies. `wp_woocommerce_session_` is deliberately *not* in the list; it is set far more widely and would bypass the cache for most traffic.
 
 **Why it is not in `wp-rocket.tpl`:** `map` is `http`-context only, and the template is rendered once per domain — duplicate `map` blocks are a fatal `duplicate "…" variable`. Splitting it (map in `conf.d`, `add_header` in the template) would mean nginx refuses to start on any box that got the template without the map. Keeping both halves in one file makes that failure impossible, and it needs **no `v-rebuild-web-domain`** — http-level config goes live on reload.
 
