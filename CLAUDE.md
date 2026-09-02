@@ -20,10 +20,12 @@ setup/                 # Modules sourced by run.sh
   wpcli.sh / redis.sh / fail2ban.sh / maldet.sh / netdata.sh / security.sh
   php-fpm.sh / opcache.sh / mariadb.sh / nginx-templates.sh / maintenance.sh / disk.sh / smtp.sh
   audit.sh             # Menu 15 — thin wrapper over the v-server-audit / v-server-memory scripts
+  install-html-cache-control.sh  # EXECUTED, not sourced — see below
 templates/
   nginx/
     wp-rocket.tpl/.stpl      # WP Rocket cache-proxy templates (complete, version-controlled)
     wp-secure-snippet.conf   # Security rules injected into HestiaCP default nginx template
+    valolink-html-cache-control.conf  # http-level Cache-Control default → /etc/nginx/conf.d/
   apache2/
     wp-secure-snippet.conf   # Rewrite rules injected into <Directory %docroot%> of the Apache template
   php-fpm/
@@ -110,7 +112,17 @@ New v-scripts for WordPress operations (info gathering, updates, etc.) should fo
 
 ### Installation (`install-scripts.sh`)
 
-Symlinks `v-*` bash scripts into `/usr/local/hestia/bin/`, creates a systemd unit for `hestia-streamer`, and opens firewall port 8091 for a specific IP.
+Symlinks `v-*` bash scripts into `/usr/local/hestia/bin/`, creates a systemd unit for `hestia-streamer`, opens firewall port 8091 for a specific IP, and installs the **HTML cache-control drop-in** (below). The drop-in rides along here rather than living only in the `run.sh` menu so that `v-hestiascripts-update` — which EngineLink can trigger per box from the Operate tab — rolls it out unattended.
+
+### HTML cache-control drop-in
+
+`templates/nginx/valolink-html-cache-control.conf` → `/etc/nginx/conf.d/`, installed by `setup/install-html-cache-control.sh` (executed, not sourced — called from `install-scripts.sh` and from `run.sh` → 12).
+
+Two `map` blocks plus one `add_header` at **http** level: an HTML response that sets no `Cache-Control` of its own gets `no-cache, must-revalidate, max-age=0`. It only ever fills a gap — WordPress's own headers on cart/checkout and `expires max` on static assets both suppress it, so nothing is ever overridden or duplicated.
+
+It exists because the wp-rocket template answers a cache hit with `try_files $rocket_file`, and nginx sends a static file with `ETag` + `Last-Modified` and no `Cache-Control`. That is not "don't cache" — browsers apply a heuristic lifetime of ~10% of the document's age (RFC 9111 §4.2.2) and reuse the page without revalidating. On WooCommerce that outlives the 24-hour `storeApiNonce` embedded in the HTML, and the cart stops hydrating until the visitor hard-refreshes. Diagnosed on energiatuote.fi 2026-09-02; LiteSpeed had always sent the header, and the move to nginx silently dropped it.
+
+**Why it is not in `wp-rocket.tpl`:** `map` is `http`-context only, and the template is rendered once per domain — duplicate `map` blocks are a fatal `duplicate "…" variable`. Splitting it (map in `conf.d`, `add_header` in the template) would mean nginx refuses to start on any box that got the template without the map. Keeping both halves in one file makes that failure impossible, and it needs **no `v-rebuild-web-domain`** — http-level config goes live on reload.
 
 ### Manual (non-streamer) scripts
 

@@ -146,6 +146,25 @@ else
   echo "  ✅ Firewall rule for port 8091 already exists."
 fi
 
+# --- 4. Nginx HTML Cache-Control Drop-in ---
+# Rolls out with every v-hestiascripts-update, so the fleet picks it up through
+# the same channel as the scripts. Self-reverting on a failed nginx -t; a
+# failure here is reported but never aborts the rest of the deployment.
+echo "---------------------------------------------------"
+echo "⚙️ Installing nginx HTML cache-control drop-in..."
+
+CACHE_CONTROL_INSTALLER="$GIT_DIR/setup/install-html-cache-control.sh"
+
+if [ -f "$CACHE_CONTROL_INSTALLER" ]; then
+  if bash "$CACHE_CONTROL_INSTALLER"; then
+    echo "  ✅ HTML cache-control drop-in is current."
+  else
+    echo "  ❌ HTML cache-control drop-in FAILED — see the output above."
+  fi
+else
+  echo "  ⚠️ Installer not found: $CACHE_CONTROL_INSTALLER — skipping."
+fi
+
 echo "==================================================="
 echo "🎉 Deployment completely finished!"
 echo "==================================================="

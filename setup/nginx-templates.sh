@@ -40,14 +40,29 @@ menu_nginx_templates() {
       status_line "apache2 wp-secure" ERR "not installed"
     fi
 
+    # Compared by content, not existence — same lesson as wp-secure below. A
+    # stale copy is the dangerous state: it looks installed and silently lacks
+    # whatever the current version fixes.
+    local cc_src="$SCRIPT_DIR/templates/nginx/valolink-html-cache-control.conf"
+    local cc_dst="/etc/nginx/conf.d/valolink-html-cache-control.conf"
+    if [ ! -f "$cc_dst" ]; then
+      status_line "nginx html cache-control" ERR "not installed"
+    elif ! cmp -s "$cc_src" "$cc_dst"; then
+      status_line "nginx html cache-control" ERR "stale — reinstall"
+    else
+      status_line "nginx html cache-control" OK "installed"
+    fi
+
     echo ""
     echo "  1) Install / update all templates"
+    echo "  2) Install / update HTML cache-control drop-in only"
     echo "  0) Back"
     echo ""
     read -r -p "  Select: " choice
 
     case "$choice" in
       1) _nginx_install_profiles ;;
+      2) echo ""; bash "$SCRIPT_DIR/setup/install-html-cache-control.sh"; press_enter ;;
       0) return ;;
     esac
   done
@@ -78,6 +93,14 @@ _nginx_install_profiles() {
   echo "    wp-rocket  — WP Rocket cache-proxy template"
   echo "                 (the stpl serves cached HTML from /wp-content/cache/wp-rocket/"
   echo "                  directly, bypassing PHP on cache hits)"
+  echo ""
+  echo "  …and into /etc/nginx/conf.d (http level, all vhosts, takes effect on reload):"
+  echo ""
+  echo "    valolink-html-cache-control.conf"
+  echo "                 — Cache-Control for HTML responses that set none of their"
+  echo "                   own. Without it nginx serves WP Rocket's static pages"
+  echo "                   with only ETag/Last-Modified, and browsers invent a"
+  echo "                   freshness lifetime from the document's age."
   echo ""
 
   if ! confirm "Install both?"; then return; fi
@@ -166,6 +189,14 @@ _nginx_install_profiles() {
       fi
     done
   fi
+
+  # --- html cache-control drop-in -------------------------------------------
+  # Not a Hestia template, so it needs no per-domain rebuild — it is http-level
+  # config that goes live on reload. Kept in this action anyway so a fresh box
+  # ends up correct in one step.
+  echo ""
+  echo -e "  ${CYAN}→${NC} Installing HTML cache-control drop-in"
+  bash "$SCRIPT_DIR/setup/install-html-cache-control.sh"
 
   echo ""
   echo "  Apply in HestiaCP: Web → Edit domain → Advanced Options"

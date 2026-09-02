@@ -56,6 +56,13 @@ server {
             expires    max;
         }
 
+        # A cache hit is served from here as a plain static file, so nginx sends
+        # ETag + Last-Modified and no Cache-Control — which browsers turn into a
+        # heuristic freshness lifetime (~10% of the page's age) and reuse without
+        # revalidating. The default that prevents that is declared at http level
+        # in /etc/nginx/conf.d/valolink-html-cache-control.conf, deliberately not
+        # here: a $variable referenced by this template but never defined would
+        # stop nginx from starting on any box missing that file.
         try_files  $rocket_file @backend;
         access_log /var/log/%web_system%/domains/%domain%.log combined;
     }
