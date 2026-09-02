@@ -17,6 +17,16 @@
 
 set -u
 
+# This script is streamer-allowlisted, so EngineLink can fire it from the server
+# Operate tab with no terminal attached. If git decides to ask for credentials it
+# writes the prompt to /dev/tty and blocks on stdin forever — the SSE request
+# hangs instead of failing, and there is no one there to answer. GitHub 401s
+# unauthenticated HTTPS fetches from datacenter IPs often enough for this to be
+# a real hazard even on a public repo (seen on hestia and hzenergiatuote
+# 2026-09-02). Fail fast and legibly instead.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND='ssh -o BatchMode=yes'
+
 if [ "$EUID" -ne 0 ]; then
 	echo "ERROR: must run as root"
 	exit 1
@@ -52,7 +62,17 @@ fi
 
 echo "Pulling (fast-forward only)..."
 if ! git pull --ff-only 2>&1; then
-	echo "ERROR: git pull failed (diverged history needs a manual look)"
+	# Two very different causes, and the operator needs to know which. With
+	# terminal prompts disabled above, an auth/rate-limit rejection surfaces as
+	# "could not read Username" rather than hanging — name it explicitly so it
+	# is not misread as a history problem.
+	echo "ERROR: git pull failed."
+	echo "  If the message above mentions 'could not read Username', GitHub"
+	echo "  rejected an unauthenticated fetch (it does this to datacenter IPs"
+	echo "  even for public repos). Retrying usually works; switching origin to"
+	echo "  SSH fixes it for good:"
+	echo "    git -C $REPO_DIR remote set-url origin git@github.com:valolink/hestiascripts.git"
+	echo "  Otherwise the history has diverged and needs a manual look."
 	exit 1
 fi
 

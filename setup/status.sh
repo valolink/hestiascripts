@@ -16,7 +16,21 @@ hestiascripts_check_version() {
   upstream=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) || return 0
 
   # Bounded so a dead network delays startup by seconds, never blocks it.
-  timeout 8 git -C "$SCRIPT_DIR" fetch --quiet 2>/dev/null
+  #
+  # GIT_TERMINAL_PROMPT=0 is load-bearing, not belt-and-braces. GitHub answers
+  # unauthenticated HTTPS fetches from datacenter IPs with a 401 often enough to
+  # notice, even for a public repo, and git reacts to a 401 by asking for a
+  # username. That prompt is written to /dev/tty, so `2>/dev/null` does not hide
+  # it and `timeout` only kills it after 8 seconds of the operator staring at
+  # "Username for 'https://github.com':". Observed on both hestia and
+  # hzenergiatuote 2026-09-02, where `bash run.sh` became a password prompt.
+  #
+  # `-c credential.helper=` covers the other way this can hang: a configured
+  # helper that blocks on its own. A staleness check in a banner must never be
+  # able to stop the menu from drawing — failing silently is the correct
+  # outcome, and the banner already degrades to "unknown".
+  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes' \
+    timeout 8 git -C "$SCRIPT_DIR" -c credential.helper= fetch --quiet 2>/dev/null
 
   behind=$(git -C "$SCRIPT_DIR" rev-list --count "HEAD..$upstream" 2>/dev/null)
   dirty=$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null | head -1)
