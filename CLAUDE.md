@@ -24,6 +24,7 @@ setup/                 # Modules sourced by run.sh
 templates/
   nginx/
     wp-rocket.tpl/.stpl      # WP Rocket cache-proxy templates (complete, version-controlled)
+                             # wp-rocket-cartbypass.{tpl,stpl} is GENERATED from these at install
     wp-secure-snippet.conf   # Security rules injected into HestiaCP default nginx template
     valolink-cache-headers.conf  # http-level HTML Cache-Control + $vl_asset_expires → /etc/nginx/conf.d/
   apache2/
@@ -137,7 +138,22 @@ A cache hit bypasses PHP entirely, so **WP Rocket's own bypass rules never run**
 - **Mobile cache is not supported.** WP Rocket's "Separate cache files for mobile devices" writes `index-mobile.html`, which the template never looks for. Enabling it silently serves desktop pages to phones. Leave it off on any domain using this template.
 - **Every query string bypasses the cache** (`if ($query_string != "")`), so `?utm_*`, `?fbclid` and `?gclid` traffic all hits PHP uncached. That matches WP Rocket's own nginx config, but on a site running paid traffic it can be a large share of visits.
 
-The WooCommerce cart cookies (`woocommerce_items_in_cart`, `woocommerce_cart_hash`) were added to the bypass list on 2026-09-02 — without them a shopper holding a cart was served the same static page as an anonymous visitor, verified by identical `ETag` with and without the cookies. `wp_woocommerce_session_` is deliberately *not* in the list; it is set far more widely and would bypass the cache for most traffic.
+### Two cart profiles
+
+The WooCommerce cart cookies (`woocommerce_items_in_cart`, `woocommerce_cart_hash`) were added to the bypass list on 2026-09-02 and removed the same day. They were treating a symptom: the empty mini-cart on energiatuote.fi came from `expires max` freezing the mini-cart JS in returning browsers, so the Store API repaint never ran — not from the page cache. `$vl_asset_expires` fixes that at source, and bypassing on cart cookies costs a full PHP render per page view for every shopper who has added something.
+
+So there are two proxy templates, and the choice is about **where cart state is rendered**:
+
+| Template | Cart cookies bypass? | Use when |
+|---|---|---|
+| `wp-rocket` | no | cart state repaints client-side (block mini-cart, cart fragments). Best hit rate — the default. |
+| `wp-rocket-cartbypass` | yes | cart state is rendered **server-side** on cacheable pages (themed header count, `[woocommerce_cart]` shortcode), where no client-side repaint can help because the wrong HTML is already cached. |
+
+`wp-rocket-cartbypass.{tpl,stpl}` is **generated** from `wp-rocket.{tpl,stpl}` by `_nginx_install_profiles`, via one anchored `sed` on `comment_author_)`, verified three ways. Two hand-maintained copies of a 130-line template drift — this repo has already shipped a template whose security rules silently went missing.
+
+**Grep for the cart bypass on the `if ($http_cookie …)` line, never on the file.** `wp-rocket`'s comment block names both cookies while explaining why they are absent, so a file-wide grep reports the exact opposite of the truth. The status checks and the generator both anchor on the line for this reason.
+
+`wp_woocommerce_session_` is in neither list: it is set far more widely and would bypass the cache for most traffic.
 
 **Why it is not in `wp-rocket.tpl`:** `map` is `http`-context only, and the template is rendered once per domain — duplicate `map` blocks are a fatal `duplicate "…" variable`. Splitting it (map in `conf.d`, `add_header` in the template) would mean nginx refuses to start on any box that got the template without the map. Keeping both halves in one file makes that failure impossible, and it needs **no `v-rebuild-web-domain`** — http-level config goes live on reload.
 

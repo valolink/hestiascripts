@@ -31,15 +31,26 @@ server {
     if ($query_string != "")                                                            { set $rocket_file "/rocket-no-cache"; }
     if ($request_uri ~* "/(wp-admin/|wp-login\.php|wp-cron\.php|xmlrpc\.php|wp-json/|index\.php|feed/|sitemap.*\.xml|.*\.php)") { set $rocket_file "/rocket-no-cache"; }
 
-    # woocommerce_* added 2026-09-02. Without them a shopper holding a cart was
-    # served the same static page as an anonymous visitor — verified on
-    # energiatuote.fi, identical ETag with and without the cart cookies. The
-    # block mini-cart usually repaints over it via the Store API, so it hides
-    # until that JS fails, and then the customer sees an empty cart. These two
-    # names are the ones WP Rocket's own nginx config excludes;
-    # wp_woocommerce_session_ is deliberately NOT here, as it is set far more
-    # widely and would bypass the cache for most traffic.
-    if ($http_cookie ~* "(wordpress_logged_in_|wp-postpass_|comment_author_|woocommerce_items_in_cart|woocommerce_cart_hash)") { set $rocket_file "/rocket-no-cache"; }
+    # Cart cookies are deliberately NOT listed here: a shopper holding a cart is
+    # served the same cached page as an anonymous visitor, and the cart UI is
+    # expected to repaint client-side (Store API / cart fragments).
+    #
+    # woocommerce_items_in_cart and woocommerce_cart_hash were added on
+    # 2026-09-02 and removed the same day. The symptom was an empty mini-cart on
+    # energiatuote.fi, but the cause was not the page cache — it was the asset
+    # expiry rule below. `expires max` on a URL with no ?ver= froze the
+    # mini-cart JS in returning browsers, so the Store API repaint never ran and
+    # the cached page's empty cart stayed on screen. $vl_asset_expires fixes
+    # that at source, so excluding cart holders from the cache is not needed and
+    # costs a full PHP render to every shopper who has added anything.
+    #
+    # A site served by this template must therefore not render cart-dependent
+    # markup server-side on cacheable pages. kuumalahde.fi's
+    # custom_add_to_cart_notice() (valolink-functions) is one such case: the
+    # nightly 00:02 preload bakes its empty-cart variant into every product and
+    # category page, so shoppers see the generic free-shipping line rather than
+    # a personalised remaining-amount.
+    if ($http_cookie ~* "(wordpress_logged_in_|wp-postpass_|comment_author_)") { set $rocket_file "/rocket-no-cache"; }
 
     location ~ /\.(?!well-known\/|file) {
         deny all;

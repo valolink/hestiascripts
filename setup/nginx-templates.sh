@@ -22,11 +22,20 @@ menu_nginx_templates() {
 
     # wp-secure is only "installed" if the rules are actually in the file. The
     # file existing proves only that a cp ran.
-    for name in "wp-secure" "wp-rocket"; do
+    # The cart checks match the `if ($http_cookie …)` line, not the file:
+    # wp-rocket's comment block names both cookies while explaining why they are
+    # absent, so a plain grep would report the exact opposite of the truth.
+    for name in "wp-secure" "wp-rocket" "wp-rocket-cartbypass"; do
       if [ ! -f "$_NGINX_TPL_DIR/${name}.tpl" ] || [ ! -f "$_NGINX_TPL_DIR/${name}.stpl" ]; then
         status_line "nginx $name" ERR "not installed"
       elif [ "$name" = "wp-secure" ] && ! grep -q "Valolink security rules" "$_NGINX_TPL_DIR/${name}.tpl"; then
         status_line "nginx $name" ERR "present but contains NO rules — reinstall"
+      elif [ "$name" = "wp-rocket" ] && grep -q "http_cookie.*woocommerce_items_in_cart" "$_NGINX_TPL_DIR/${name}.tpl"; then
+        status_line "nginx $name" ERR "bypasses on cart — that is wp-rocket-cartbypass, reinstall"
+      elif [ "$name" = "wp-rocket-cartbypass" ] && ! grep -q "http_cookie.*woocommerce_items_in_cart" "$_NGINX_TPL_DIR/${name}.tpl"; then
+        # A silently wrong template is worse than a missing one: this one's only
+        # reason to exist is the cart bypass.
+        status_line "nginx $name" ERR "cart bypass missing — regenerate"
       else
         status_line "nginx $name" OK "installed"
       fi
@@ -97,6 +106,17 @@ _nginx_install_profiles() {
   echo "    wp-rocket  — WP Rocket cache-proxy template"
   echo "                 (the stpl serves cached HTML from /wp-content/cache/wp-rocket/"
   echo "                  directly, bypassing PHP on cache hits)"
+  echo "                 A cart in progress does NOT bypass the cache: the cart"
+  echo "                 UI is expected to repaint client-side. Best hit rate."
+  echo ""
+  echo "    wp-rocket-cartbypass"
+  echo "                 — same, but shoppers holding a cart are sent to PHP."
+  echo "                 For sites that render cart state SERVER-side on cacheable"
+  echo "                 pages (themed header count, [woocommerce_cart] shortcode),"
+  echo "                 where client-side repainting cannot help because the wrong"
+  echo "                 HTML is already cached. Costs a full render per page view"
+  echo "                 for every shopper who has added something."
+  echo "                 Generated from wp-rocket."
   echo ""
   echo "  …and into /etc/nginx/conf.d (http level, all vhosts, live on reload):"
   echo ""
@@ -186,6 +206,70 @@ _nginx_install_profiles() {
   cp "$rocket_stpl" "$_NGINX_TPL_DIR/wp-rocket.stpl"
   echo -e "  ${GREEN}✓ $_NGINX_TPL_DIR/wp-rocket.{tpl,stpl}${NC}"
 
+  # --- wp-rocket-cartbypass: GENERATED from wp-rocket ------------------------
+  #
+  # Identical except that the WooCommerce cart cookies ARE in the bypass list,
+  # so a shopper holding a cart is sent to PHP instead of being served the
+  # static cached page.
+  #
+  # wp-rocket itself deliberately does not do this — see the comment block in
+  # the template. The cart bypass treats a symptom; a stale mini-cart is an
+  # asset-expiry problem, and $vl_asset_expires fixes it at source. This variant
+  # exists for sites that render cart-dependent markup SERVER-side on cacheable
+  # pages (a themed header count, a classic [woocommerce_cart] shortcode), where
+  # no amount of client-side repainting helps because the wrong HTML is already
+  # in the cache.
+  #
+  # Generated rather than kept as a second checked-in file on purpose: two
+  # hand-maintained copies of a 130-line template drift, and this repo has
+  # already shipped a template whose security rules silently went missing. One
+  # source, one anchored substitution, verified three ways.
+  #
+  # The checks below match on the `if ($http_cookie …)` line specifically, not
+  # on the file: wp-rocket's comment block names both cookies while explaining
+  # why they are absent, so a plain grep would report the opposite of the truth.
+  echo ""
+  for ext in tpl stpl; do
+    local base="$_NGINX_TPL_DIR/wp-rocket.${ext}"
+    local variant="$_NGINX_TPL_DIR/wp-rocket-cartbypass.${ext}"
+
+    echo -e "  ${CYAN}→${NC} Generating wp-rocket-cartbypass.${ext} from wp-rocket.${ext}"
+
+    if grep -q 'http_cookie.*woocommerce_items_in_cart' "$base"; then
+      echo -e "  ${RED}✗ $variant — source already bypasses on cart cookies${NC}"
+      echo "      wp-rocket.${ext} has drifted; the two templates would be identical."
+      continue
+    fi
+
+    {
+      echo "#=========================================================================#"
+      echo "# GENERATED FILE — do not edit here.                                      #"
+      echo "# Source: hestiascripts templates/nginx/wp-rocket.${ext}"
+      echo "# Regenerate: run.sh -> 12 -> 1                                           #"
+      echo "#                                                                         #"
+      echo "# Difference from wp-rocket: woocommerce_items_in_cart and                #"
+      echo "# woocommerce_cart_hash ARE in the cache-bypass list, so a shopper with   #"
+      echo "# anything in their cart is sent to PHP for the rest of their visit.      #"
+      echo "#                                                                         #"
+      echo "# Use this only where cart state is rendered server-side on cacheable     #"
+      echo "# pages. If the cart repaints client-side, prefer wp-rocket: this costs   #"
+      echo "# a full PHP render per page view for every shopper who has added         #"
+      echo "# something, which on a busy shop is most of the traffic that matters.    #"
+      echo "#=========================================================================#"
+      sed 's/comment_author_)/comment_author_|woocommerce_items_in_cart|woocommerce_cart_hash)/' "$base"
+    } > "$variant"
+
+    if ! grep -q 'http_cookie.*woocommerce_items_in_cart' "$variant"; then
+      echo -e "  ${RED}✗ $variant — substitution did not apply${NC}"
+      echo "      The bypass line in wp-rocket.${ext} no longer matches; do not apply this template."
+    elif ! grep -q 'http_cookie.*wordpress_logged_in_' "$variant"; then
+      echo -e "  ${RED}✗ $variant — bypass line mangled, logged-in users would be served cache${NC}"
+      echo "      Do not apply this template."
+    else
+      echo -e "  ${GREEN}✓ $variant${NC}"
+    fi
+  done
+
   # --- apache2 wp-secure: inject into <Directory %docroot%> ------------------
   local ap_snippet="$SCRIPT_DIR/templates/apache2/wp-secure-snippet.conf"
   if [ -d "$_APACHE_TPL_DIR" ] && [ -f "$ap_snippet" ] && [ -f "$_APACHE_TPL_DIR/default.tpl" ]; then
@@ -248,8 +332,11 @@ _nginx_install_profiles() {
     while IFS= read -r line; do
       found=1
       echo "    v-rebuild-web-domain $u $line"
-    done < <(grep -oE "DOMAIN='[^']+'.*PROXY='wp-(rocket|secure)'" "$uconf" 2>/dev/null |
-             sed -E "s/^DOMAIN='([^']+)'.*PROXY='(wp-[a-z]+)'.*/\1   # \2/")
+    # wp-[a-z-]+ not wp-(rocket|secure): wp-rocket-cartcached has a hyphen, and
+    # an anchored alternation here would silently omit those domains from the
+    # rebuild list — the operator would think they were done.
+    done < <(grep -oE "DOMAIN='[^']+'.*PROXY='wp-[a-z-]+'" "$uconf" 2>/dev/null |
+             sed -E "s/^DOMAIN='([^']+)'.*PROXY='(wp-[a-z-]+)'.*/\1   # \2/")
   done
   [ "$found" -eq 0 ] && echo "    (none — no domain is assigned wp-rocket or wp-secure yet)"
   echo ""
