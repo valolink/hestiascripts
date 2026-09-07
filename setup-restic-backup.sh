@@ -51,7 +51,12 @@
 #                   Storage Box. Leading slashes are stripped (the SFTP chroot
 #                   only addresses /home-relative paths); '--path /' = home root.
 #   --snapshots N --daily N --weekly N --monthly N --yearly N
-#                   restic retention [-1 14 8 6 1]  (-1 = disable that tier)
+#                   restic retention [48 14 8 6 1]  (-1 = disable that tier)
+#                   --snapshots is restic's --keep-last and MUST stay >= the
+#                   hourly retention, or hourly DB snapshots get forgotten at the
+#                   next run (keep-daily only retains the newest per day).
+#   --no-cron       don't install /etc/cron.d/hestia-restic
+#   --no-hourly     nightly full backup only; skip the hourly DB job + guard
 
 set -uo pipefail
 
@@ -64,8 +69,17 @@ KEY=/root/.ssh/storagebox
 REMOTE=storagebox
 SHORTHOST=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo host)
 REPO_PATH="hestia-${SHORTHOST}/"   # RELATIVE to the Storage Box home (/home) — see normalisation below
-SNAPSHOTS=-1 DAILY=14 WEEKLY=8 MONTHLY=6 YEARLY=1
+# SNAPSHOTS maps to restic's --keep-last. It is 48, not -1, because the hourly
+# DB job depends on it: keep-daily/weekly/monthly retain only the MOST RECENT
+# snapshot of each day, so without a keep-last the hourly snapshots would be
+# forgotten at the very next run and hourly backups would silently degrade to
+# one point per day. restic's forget groups by host+paths, so 48 applies
+# separately to the nightly /home group and the hourly DB group.
+SNAPSHOTS=48 DAILY=14 WEEKLY=8 MONTHLY=6 YEARLY=1
 PASSWORD_AUTH=0
+BINDIR=/usr/local/hestia/bin
+INSTALL_CRON=1
+HOURLY=1
 
 # ---- args ----
 while [ $# -gt 0 ]; do
@@ -82,6 +96,8 @@ while [ $# -gt 0 ]; do
     --monthly)   MONTHLY=${2:-};   shift 2 ;;
     --yearly)    YEARLY=${2:-};    shift 2 ;;
     --password)  PASSWORD_AUTH=1;  shift ;;
+    --no-cron)   INSTALL_CRON=0;   shift ;;
+    --no-hourly) HOURLY=0;         shift ;;
     -h|--help)   tail -n +2 "$0" | grep '^#' | sed 's/^# \?//'; exit 0 ;;
     *)           die "unknown argument: $1 (see --help)" ;;
   esac
@@ -286,6 +302,55 @@ log "Enabling per-user incremental backups (BACKUPS_INCREMENTAL=yes) — package
 for pkg in /usr/local/hestia/data/packages/*.pkg; do set_incremental_yes "$pkg"; done
 for uc  in /usr/local/hestia/data/users/*/user.conf; do set_incremental_yes "$uc";  done
 
+# ---- 7. schedule it ----
+# Onboarding used to stop at step 6, which left the box with a *capability* and
+# no backup: upstream ships v-backup-users-restic but nothing puts it in cron,
+# so the stock tarball job kept running and restic only fired when someone typed
+# the command. Every existing snapshot on the fleet was a hand-run.
+#
+# /etc/cron.d rather than the hestiaweb crontab: that crontab is Hestia's own
+# and gets rewritten by the panel, whereas a drop-in file is ours and survives.
+CRON_FILE=/etc/cron.d/hestia-restic
+if [ "$INSTALL_CRON" -eq 1 ]; then
+  missing=""
+  [ -x "$BINDIR/v-backup-users-restic" ]      || missing="$missing v-backup-users-restic"
+  if [ "$HOURLY" -eq 1 ]; then
+    [ -x "$BINDIR/v-server-backup-db-hourly" ] || missing="$missing v-server-backup-db-hourly"
+    [ -x "$BINDIR/v-server-backup-guard" ]     || missing="$missing v-server-backup-guard"
+  fi
+  if [ -n "$missing" ]; then
+    log "WARN: not installing cron —$missing missing from $BINDIR."
+    log "      Run install-scripts.sh on this box first, then re-run me."
+  else
+    {
+      echo "# Managed by setup-restic-backup.sh — restic backup schedule."
+      echo "SHELL=/bin/bash"
+      echo "PATH=$BINDIR:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+      echo 'MAILTO=""'
+      echo ""
+      if [ "$HOURLY" -eq 1 ]; then
+        echo "# Re-assert BACKUPS_INCREMENTAL so a new user or package cannot drift out"
+        echo "# of the backup set unnoticed. Runs just before the nightly."
+        echo "45 2 * * * root $BINDIR/v-server-backup-guard --quiet >/dev/null 2>&1"
+      fi
+      echo "# Nightly: whole /home/<user> per user, then forget --prune."
+      echo "0 3 * * * root $BINDIR/v-backup-users-restic >/dev/null 2>&1"
+      if [ "$HOURLY" -eq 1 ]; then
+        echo "# Hourly: database-only snapshots, tag db-hourly, no prune. Hour 3 is"
+        echo "# skipped because the nightly has just dumped the same databases."
+        echo "30 0-2,4-23 * * * root $BINDIR/v-server-backup-db-hourly >/dev/null 2>&1"
+      fi
+    } > "$CRON_FILE"
+    chmod 644 "$CRON_FILE"
+    log "Installed schedule in $CRON_FILE:"
+    log "    02:45 daily   flag drift guard"
+    log "    03:00 daily   full per-user backup (+ prune)"
+    [ "$HOURLY" -eq 1 ] && log "    :30  hourly  database-only snapshots (keep-last $SNAPSHOTS)"
+  fi
+else
+  log "Skipping cron installation (--no-cron)."
+fi
+
 FIRST_USER=$(v-list-users plain 2>/dev/null | awk 'NR==1{print $1}')
 FIRST_USER=${FIRST_USER:-<user>}
 
@@ -309,4 +374,17 @@ Next steps — do these; they're the difference between a backup and a false sen
      then move that archive somewhere independent (NOT onto this same Storage Box).
 
   4. Keep the classic tarball backups running until you've done a real test restore.
+     A restore you have not performed is a hypothesis, not a backup.
+
+  5. Generate the disaster-recovery artifact and put it in your password vault:
+       make-restore-script.sh
+     That single file recreates this box's Storage Box connection, CREATES EVERY
+     USER and restores them — run it on a bare HestiaCP install. Verify it with
+     its --check mode, which opens every repo and changes nothing. Re-generate it
+     whenever you add a user or rotate the Storage Box password.
+
+The schedule is already installed (see $CRON_FILE) — nothing further to enable:
+  02:45 daily   flag drift guard
+  03:00 daily   full per-user backup + prune
+  :30   hourly  database-only snapshots (all users with a database)
 EOF
