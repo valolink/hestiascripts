@@ -10,12 +10,27 @@
 # What it does, in order:
 #   1. Generates a DEDICATED ed25519 key for this box (/root/.ssh/storagebox) —
 #      per-box key, not root's general key, so it's independently revocable.
-#   2. Pins the Storage Box host key into /root/.ssh/known_hosts.
-#   3. Verifies the key is authorized on the Storage Box. If not, installs it
-#      (interactive — prompts once for the Storage Box password) or prints how.
-#   4. Creates an rclone sftp remote to the Storage Box.
+#      (Key auth only; --password mode skips straight to step 4.)
+#   2. Pins the Storage Box host key into /root/.ssh/known_hosts, and verifies
+#      the key actually landed.
+#   3. Preflights which auth methods the Storage Box offers this user, so a
+#      subaccount with SSH disabled is named as such instead of surfacing later
+#      as a generic "can't connect". Then, in key mode, verifies the key is
+#      authorized (installing it interactively if not).
+#   4. Creates an rclone sftp remote to the Storage Box and proves it connects.
 #   5. Registers a PER-BOX restic repo with Hestia (v-add-backup-host-restic),
-#      which also flips BACKUP_INCREMENTAL=yes.
+#      which also flips the SYSTEM BACKUP_INCREMENTAL=yes.
+#   6. Flips the PER-USER BACKUPS_INCREMENTAL=yes (note the plural) in every
+#      package and every existing user.conf — without it every per-user backup
+#      dies with "incremental backups are disabled". See the block at the end.
+#
+# NOTE on the repo path: HestiaCP >= 1.10.4 strips any trailing slash in
+# v-add-backup-host-restic and builds the per-user repo as "${REPO%/}/$user"
+# (upstream #5100), so conf/restic.conf will show your --path WITHOUT the
+# trailing slash this script passes. That is correct and expected. It also means
+# an EMPTY path ('--path /') yields "rclone:<remote>:/<user>" — an ABSOLUTE path
+# that a chrooted Storage Box does NOT resolve to the same place as the relative
+# "<user>". Always give a real per-box --path (the default does).
 #
 # Usage:
 #   Main account (key auth):
@@ -90,10 +105,46 @@ case "$REPO_PATH" in ""|*/) ;; *) REPO_PATH="$REPO_PATH/" ;; esac
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 
 # ---- pin Storage Box host key (both auth modes) ----
+# ssh-keyscan exits 0 even when it gets nothing back, so confirm the key actually
+# landed rather than logging "Pinned" and failing confusingly later: rclone is
+# given known_hosts_file, so an empty known_hosts turns into an unrelated-looking
+# connection error several steps further down.
 if ! ssh-keygen -F "[$HOST]:$PORT" >/dev/null 2>&1; then
   ssh-keyscan -p "$PORT" "$HOST" 2>/dev/null >> /root/.ssh/known_hosts
-  log "Pinned Storage Box host key ([$HOST]:$PORT) into known_hosts."
+  if ssh-keygen -F "[$HOST]:$PORT" >/dev/null 2>&1; then
+    log "Pinned Storage Box host key ([$HOST]:$PORT) into known_hosts."
+  else
+    die "ssh-keyscan returned no host key for [$HOST]:$PORT.
+     Check the hostname is right and port $PORT is reachable from this box."
+  fi
 fi
+
+# ---- preflight: does the Storage Box offer this user ANY auth method? ----
+# A Hetzner SUBACCOUNT with SSH not enabled in the console still exists and still
+# accepts TCP on :23 — it just advertises an EMPTY auth-method list, so every
+# credential you hand it fails identically. Without this probe that surfaces as
+# rclone's "couldn't connect", which reads like a network or path fault and sends
+# you debugging the wrong layer entirely (cost us a full round trip on
+# u626683-sub3, 2026-09-07). openssh names the cause in one line; ask it first.
+methods=""
+ssh_v=$(ssh -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=10 -v "$USER_SB@$HOST" exit 2>&1)
+if grep -q 'Authentications that can continue' <<< "$ssh_v"; then
+  methods=$(sed -n 's/.*Authentications that can continue: //p' <<< "$ssh_v" | head -1 | tr -d '[:space:]')
+  if [ -z "$methods" ]; then
+    die "The Storage Box offers NO authentication methods for '$USER_SB'.
+     That is exactly what a Hetzner subaccount looks like when SSH is not enabled on it.
+     Fix: Hetzner console -> Storage Box -> Subaccounts -> $USER_SB -> enable SSH
+     (leave 'external reachability' on too), give it a minute, then re-run this script."
+  fi
+  log "Storage Box offers auth methods for $USER_SB: $methods"
+  if [ "$PASSWORD_AUTH" -eq 1 ] && ! grep -q password <<< "$methods"; then
+    die "Storage Box offers [$methods] for '$USER_SB' but not 'password' — --password cannot work here."
+  fi
+fi
+# No "Authentications that can continue" line at all means we never reached the
+# auth stage (DNS/route/port). Say nothing here and let the rclone probe below
+# diagnose it, since that path has the IPv4 fallback.
 
 # ---- authentication (rclone secret args differ by mode) ----
 rclone_secret=()
@@ -166,15 +217,30 @@ log "rclone remote '$REMOTE:' configured."
 # AAAA record without falling back to IPv4 the way openssh does; if the first
 # attempt fails, pin the host to its IPv4 in /etc/hosts (host key stays valid —
 # still keyed on the hostname) and retry.
-if ! rclone lsd "$REMOTE:" >/dev/null 2>&1; then
+probe_err=""
+probe() { probe_err=$(rclone lsd "$REMOTE:" 2>&1 >/dev/null); }
+
+if ! probe; then
+  # Only a genuine DIAL failure is the IPv6 symptom. An auth rejection means the
+  # credential or the subaccount's SSH setting is wrong — pinning an IP then
+  # changes nothing and leaves misleading litter in /etc/hosts, which is what
+  # happened while debugging u626683-sub3 (2026-09-07).
+  case "$probe_err" in
+    *"unable to authenticate"*|*"handshake failed"*|*"ermission denied"*)
+      die "Storage Box refused authentication for '$USER_SB'.
+     rclone said: $(tail -1 <<< "$probe_err")
+     If this is a subaccount, confirm SSH is enabled for it in the Hetzner console
+     and that the password is current. Debug: rclone lsd $REMOTE: -vv" ;;
+  esac
   ipv4=$(getent ahostsv4 "$HOST" 2>/dev/null | awk '{print $1; exit}')
   if [ -n "$ipv4" ] && ! grep -qF " $HOST" /etc/hosts; then
     echo "$ipv4 $HOST" >> /etc/hosts
     log "rclone couldn't connect (likely IPv6) — pinned $HOST -> $ipv4 in /etc/hosts, retrying."
   fi
+  probe || die "rclone can't reach $REMOTE: (home dir).
+     rclone said: $(tail -1 <<< "$probe_err")
+     Debug: rclone lsd $REMOTE: -vv"
 fi
-rclone lsd "$REMOTE:" >/dev/null 2>&1 \
-  || die "rclone can't reach $REMOTE: (home dir). Debug: rclone lsd $REMOTE: -vv"
 
 # Home reachable — now ensure the per-box repo dir exists (relative to /home).
 if [ -n "$REPO_PATH" ]; then
