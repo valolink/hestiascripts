@@ -218,7 +218,14 @@ log "rclone remote '$REMOTE:' configured."
 # attempt fails, pin the host to its IPv4 in /etc/hosts (host key stays valid —
 # still keyed on the hostname) and retry.
 probe_err=""
-probe() { probe_err=$(rclone lsd "$REMOTE:" 2>&1 >/dev/null); }
+# --retries/--low-level-retries 1 are NOT tuning, they are brute-force-ban
+# avoidance. rclone's default pacer retries an auth failure ~10 times, so ONE
+# bad-credential `rclone lsd` looks like ten failed logins to the Storage Box.
+# Two of those in a debugging session is enough for Hetzner to block the box's
+# IP outright (connection refused, not auth denied) — which is exactly what we
+# did to hzdemolink on 2026-09-07 while diagnosing the sub3 SSH toggle. One
+# attempt is all a probe ever needs.
+probe() { probe_err=$(rclone lsd "$REMOTE:" --retries 1 --low-level-retries 1 --contimeout 15s 2>&1 >/dev/null); }
 
 if ! probe; then
   # Only a genuine DIAL failure is the IPv6 symptom. An auth rejection means the
