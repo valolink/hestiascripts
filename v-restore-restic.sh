@@ -80,6 +80,52 @@ die() {
 }
 abort() { say "${DIM}aborted — nothing was changed.${NC}"; exit 0; }
 
+# Why the repo would not open — one bounded probe, then a plain-language verdict.
+# Deliberately a SINGLE rclone attempt: the Storage Box bans an IP after repeated
+# failed logins, and rclone's default pacer would turn one bad probe into ten.
+repo_diagnose() {
+  local msg=$1 remote probe
+  printf '%s[restore] ERROR:%s cannot open the backup repo for %s.\n' "$RED" "$NC" "$user" >&2
+  say "  restic said: ${msg:-<no message>}"
+  if [[ "$REPO" == rclone:* ]]; then
+    remote=${REPO#rclone:}; remote=${remote%%:*}
+    if ! command -v rclone >/dev/null 2>&1; then
+      say "  rclone is not installed on this box — the repo cannot be reached. Run setup-restic-backup.sh."
+    elif ! rclone listremotes 2>/dev/null | grep -qx "$remote:"; then
+      say "  rclone has no remote named '$remote' in root's config, so this box was never onboarded"
+      say "  to the Storage Box (or the config was lost). Run setup-restic-backup.sh."
+    else
+      say "  probing the Storage Box once (rclone lsd $remote:) …"
+      probe=$(timeout 25 rclone lsd "$remote:" --retries 1 --low-level-retries 1 2>&1 >/dev/null | grep -v '^\s*$' | tail -1)
+      if [ -z "$probe" ]; then
+        say "  rclone reaches the Storage Box fine, so the fault is the repo path or the user's key:"
+        say "    repo: $REPO/$user    key: $KEYFILE"
+        say "  check the config side with: v-server-backup-guard --dry-run"
+      else
+        say "  rclone: $probe"
+        case "$probe" in
+          *refused*|*"i/o timeout"*|*"no route"*)
+            say "  a refused/timed-out connection to port 23 FROM THIS BOX ONLY means the Storage Box has banned"
+            say "  this IP after repeated failed logins (it happened to hzdemolink on 2026-09-07). Test from a"
+            say "  second box or the workstation before touching any credentials — a ban lifts by itself or via Hetzner." ;;
+          *"ermission denied"*|*"unable to authenticate"*|*handshake*|*"no supported methods"*)
+            say "  authentication failed: wrong Storage Box password/key, or SSH is not enabled on the subaccount"
+            say "  (a per-subaccount toggle in the Hetzner console). See setup-restic-backup.sh --help." ;;
+          *)
+            say "  see setup-restic-backup.sh --help for the known failure modes." ;;
+        esac
+      fi
+    fi
+  fi
+  local last
+  last=$(grep -h 'v-backup-user-restic' "$HESTIA/log/system.log" 2>/dev/null | tail -1)
+  [ -n "$last" ] && say "  last successful restic backup on this box: $last" || say "  no restic backup has ever succeeded on this box (nothing in $HESTIA/log/system.log)."
+  last=$(grep -h 'restic' "$HESTIA/log/error.log" 2>/dev/null | tail -1)
+  [ -n "$last" ] && say "  last restic error in Hestia's log:            $last"
+  logger -t v-restore-restic -- "FAILED: cannot open repo for $user: $msg" 2>/dev/null
+  exit 1
+}
+
 # Echo a command (dim) and run it unless --dry-run.
 run() {
   printf '%s$ %s%s\n' "$DIM" "$*" "$NC"
@@ -163,27 +209,29 @@ KEYFILE="$USER_DATA/restic.conf"
 USER_REPO="${REPO%/}/$user"
 rs() { restic --repo "$USER_REPO" --password-file "$KEYFILE" "$@"; }
 
-# --------------------------------------------------------- 2. scope ----
-choose "What do you want to restore?" \
-  "Whole user|every web domain, DNS zone, mail domain, database, cron job and home file of $user" \
-  "User settings only|user.conf (package, limits, panel password), user SSL certs, cron jobs — no domains, databases or files" \
-  "One site, files + database|/home/$user/web/DOMAIN and the site's database" \
-  "One site, files only|/home/$user/web/DOMAIN — public_html is replaced, database untouched" \
-  "One site, database only|the site's database — files untouched; hourly snapshots available"
-case $CHOICE in
-  0) SCOPE=user ;;
-  1) SCOPE=settings ;;
-  2) SCOPE=site ;;
-  3) SCOPE=files ;;
-  4) SCOPE=db ;;
-esac
-SCOPE_LABEL=$CHOICE_LABEL
-
-# ------------------------------------------------- read the repo once ----
+# -------------------------------- 2. read the repo once (fail fast) ----
 say ""
 info "reading the backup list from the Storage Box …"
 errf=$(mktemp)
-snaps_json=$(rs snapshots --json 2>"$errf") || die "cannot open the repo for $user: $(tail -1 "$errf" 2>/dev/null)"
+if ! snaps_json=$(rs snapshots --json 2>"$errf"); then
+  # In --json mode restic reports the error as a JSON line; pull the message out.
+  msg=$({ cat "$errf"; printf '%s\n' "$snaps_json"; } | python3 -c '
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line.startswith("{"):
+        continue
+    try:
+        m = json.loads(line).get("message")
+    except Exception:
+        continue
+    if m:
+        print(m)
+        break' 2>/dev/null)
+  [ -n "$msg" ] || msg=$(grep -v '^\s*$' "$errf" | tail -1)
+  rm -f "$errf"
+  repo_diagnose "$msg"
+fi
 rm -f "$errf"
 
 # TSV: short_id, epoch, kind, when (box-local time), age. Newest first.
@@ -232,6 +280,22 @@ for ep, sid, kind, when, age in rows:
 SNAPS_TSV=$(python3 -c "$PY_SNAPS" "$user" <<< "$snaps_json") || die "could not parse the snapshot list."
 [ -n "$SNAPS_TSV" ] || die "the repo for $user has no snapshots."
 
+# --------------------------------------------------------- 3. scope ----
+choose "What do you want to restore?" \
+  "Whole user|every web domain, DNS zone, mail domain, database, cron job and home file of $user" \
+  "User settings only|user.conf (package, limits, panel password), user SSL certs, cron jobs — no domains, databases or files" \
+  "One site, files + database|/home/$user/web/DOMAIN and the site's database" \
+  "One site, files only|/home/$user/web/DOMAIN — public_html is replaced, database untouched" \
+  "One site, database only|the site's database — files untouched; hourly snapshots available"
+case $CHOICE in
+  0) SCOPE=user ;;
+  1) SCOPE=settings ;;
+  2) SCOPE=site ;;
+  3) SCOPE=files ;;
+  4) SCOPE=db ;;
+esac
+SCOPE_LABEL=$CHOICE_LABEL
+
 kind_label() {
   case "$1" in
     nightly) echo "nightly, full backup" ;;
@@ -277,7 +341,7 @@ backup_conf_of() { rs dump "$1" "/home/$user/backup/backup.conf" 2>/dev/null; }
 conf_list() { grep -oE "(^|[[:space:]])$1='[^']*'" <<< "$2" | head -1 | cut -d"'" -f2 | tr ',' '\n' | sed '/^$/d'; }
 wp_db_name() { grep -oP "define\(\s*['\"]DB_NAME['\"]\s*,\s*['\"]\K[^'\"]+" | head -1; }
 
-# ------------------------------------------------------- 3. site ----
+# ------------------------------------------------------- 4. site ----
 domain="" DB="" DB_SOURCE="" SQL_PATH=""
 if [ "$SCOPE" = site ] || [ "$SCOPE" = files ] || [ "$SCOPE" = db ]; then
   # Union of the live web.conf and the newest nightly's backup.conf, so a
@@ -299,7 +363,7 @@ if [ "$SCOPE" = site ] || [ "$SCOPE" = files ] || [ "$SCOPE" = db ]; then
   domain=$CHOICE_LABEL
 fi
 
-# ------------------------------------------------- 4. backup time ----
+# ------------------------------------------------- 5. backup time ----
 if [ "$SCOPE" = db ]; then
   choose_snapshot nightly hourly manual
 else
@@ -368,7 +432,7 @@ if [ "$SCOPE" = user ]; then
   if yesno "Take a local tarball backup of $user first (v-backup-user, a few minutes)?" y; then TARBALL=yes; fi
 fi
 
-# ------------------------------------------------------- 5. confirm ----
+# ------------------------------------------------------- 6. confirm ----
 say ""; hr
 say "${BOLD}You are about to restore${NC}"
 printf '  %-10s %s\n' "Server:"   "$HOSTFQDN"
@@ -412,7 +476,7 @@ say ""
 read -r -p "Type ${BOLD}$word${NC} to proceed (anything else aborts): " ans || abort
 [ "$ans" = "$word" ] || abort
 
-# ------------------------------------------------------- 6. execute ----
+# ------------------------------------------------------- 7. execute ----
 logger -t v-restore-restic -- "START user=$user scope=$SCOPE domain=${domain:-} db=${DB:-} snapshot=$SNAP_ID ($SNAP_WHEN) dry=$DRY" 2>/dev/null
 say ""
 [ "$DRY" -eq 1 ] && say "${YEL}DRY RUN — printing, not running.${NC}"
@@ -544,7 +608,7 @@ case $SCOPE in
 esac
 [ -n "$domain" ] && flush_wp_cache
 
-# ------------------------------------------------------- 7. report ----
+# ------------------------------------------------------- 8. report ----
 say ""; hr
 if [ "$DRY" -eq 1 ]; then
   say "${YEL}${BOLD}Dry run finished.${NC} Nothing was changed."
