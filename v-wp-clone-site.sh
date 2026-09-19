@@ -345,6 +345,16 @@ check_status "Failed WP-CLI URL search and replace."
 echo "    Replacing absolute server paths: $OLD_DIR -> $NEW_DIR"
 sudo -u "$DEST_USER" wp --path="$NEW_DIR" search-replace "$OLD_DIR" "$NEW_DIR" --all-tables --quiet
 
+# Paths outside public_html (private/, logs/) and constants in wp-config.php
+# are not covered by the two replaces above. A cloned WP_DEBUG_LOG pointing at
+# /home/<src-user>/web/<src-domain>/private/ is blocked by open_basedir and
+# logs a PHP warning on every request of the clone (kuumalahde, 2026-09-19).
+OLD_HOME="/home/$SRC_USER/web/$OLD_WEB_DOMAIN"
+NEW_HOME="/home/$DEST_USER/web/$NEW_WEB_DOMAIN"
+echo "    Replacing domain-root paths: $OLD_HOME -> $NEW_HOME (database and wp-config.php)"
+sudo -u "$DEST_USER" wp --path="$NEW_DIR" search-replace "$OLD_HOME" "$NEW_HOME" --all-tables --quiet
+sudo -u "$DEST_USER" sed -i "s#$OLD_HOME#$NEW_HOME#g" "$NEW_DIR/wp-config.php"
+
 # 8. Flush Object Cache
 echo "[8/8] Flushing object cache..."
 sudo -u "$DEST_USER" wp --path="$NEW_DIR" cache flush --quiet
