@@ -115,7 +115,31 @@ search_replace_url_variants() {
     "http://${old_bare}"; do
     sudo -u "$user" wp --path="$path" \
       search-replace "$v" "$new_url" --all-tables --quiet --skip-columns=guid 2>/dev/null
+    # JSON-escaped shape (https:\/\/host) inside serialized settings.
+    sudo -u "$user" wp --path="$path" \
+      search-replace "${v//\//\\/}" "${new_url//\//\\/}" --all-tables --quiet --skip-columns=guid 2>/dev/null
   done
+}
+
+# Pick a Redis database index no other site on this box uses. Each WordPress
+# site gets its own database so a flush on one site (the drop-in's flush() is
+# FLUSHDB) never empties another site's cache, and key prefixes cannot collide
+# however the sites are cloned. Database 0 is left to sites installed before
+# this rule. Prints the index; prints nothing when redis-cli is missing or every
+# database is taken, and the caller then leaves the constant unset.
+redis_next_free_db() {
+  local max used i
+  command -v redis-cli >/dev/null 2>&1 || return 1
+  max=$(redis-cli config get databases 2>/dev/null | tail -1)
+  [ "$max" -gt 1 ] 2>/dev/null || max=16
+  used=$(grep -hoE "WP_REDIS_DATABASE'[[:space:]]*,[[:space:]]*'?[0-9]+" \
+           /home/*/web/*/public_html/wp-config.php \
+           /home/*/web/*/public_html.setup/wp-config.php 2>/dev/null \
+         | grep -oE '[0-9]+$' | sort -un)
+  for ((i = 1; i < max; i++)); do
+    printf '%s\n' "$used" | grep -qx "$i" || { echo "$i"; return 0; }
+  done
+  return 1
 }
 
 # Two-step bind mount to RO, with a write probe to PROVE the mount is RO.
@@ -661,6 +685,18 @@ echo "       Setting unique Redis namespace ($REDIS_SAFE_PREFIX)..."
 $WP_STG config set WP_CACHE_KEY_SALT "$REDIS_SAFE_PREFIX" --type=constant --quiet
 $WP_STG config set WP_REDIS_PREFIX   "$REDIS_SAFE_PREFIX" --type=constant --quiet
 
+# The prefix keeps keys apart; a Redis database of its own keeps *flushes*
+# apart (the drop-in's flush() is FLUSHDB). Without it a `wp cache flush` on
+# staging empties live's object cache, and vice versa.
+REDIS_DB=$(redis_next_free_db || true)
+if [ -n "$REDIS_DB" ]; then
+  echo "       Isolating the object cache in Redis database $REDIS_DB..."
+  $WP_STG config set WP_REDIS_DATABASE        "$REDIS_DB" --type=constant --raw --quiet
+  $WP_STG config set WP_REDIS_SELECTIVE_FLUSH true        --type=constant --raw --quiet
+else
+  echo "       ⚠️  No free Redis database — staging shares database 0 with live; a cache flush on either empties both."
+fi
+
 echo "       Pinning WP_HOME/WP_SITEURL to staging..."
 $WP_STG config set WP_HOME    "$NEW_WP_URL" --type=constant --quiet
 $WP_STG config set WP_SITEURL "$NEW_WP_URL" --type=constant --quiet
@@ -698,6 +734,7 @@ echo "[8/11] Verifying staging is safe to publish..."
 require_wpconfig "$DEST_USER" "$SETUP_DIR" DB_NAME             "$NEW_DB_NAME"
 require_wpconfig "$DEST_USER" "$SETUP_DIR" WP_REDIS_PREFIX     "$REDIS_SAFE_PREFIX"
 require_wpconfig "$DEST_USER" "$SETUP_DIR" WP_CACHE_KEY_SALT   "$REDIS_SAFE_PREFIX"
+[ -z "$REDIS_DB" ] || require_wpconfig "$DEST_USER" "$SETUP_DIR" WP_REDIS_DATABASE "$REDIS_DB"
 require_wpconfig "$DEST_USER" "$SETUP_DIR" WP_HOME             "$NEW_WP_URL"
 require_wpconfig "$DEST_USER" "$SETUP_DIR" WP_SITEURL          "$NEW_WP_URL"
 require_wpconfig "$DEST_USER" "$SETUP_DIR" WP_ENVIRONMENT_TYPE "staging"

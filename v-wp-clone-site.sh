@@ -310,6 +310,27 @@ else
   echo "[4/8] Reusing existing database ($NEW_DB_NAME)."
 fi
 
+# Pick a Redis database index no other site on this box uses. Each WordPress
+# site gets its own database so a flush on one site (the drop-in's flush() is
+# FLUSHDB) never empties another site's cache, and key prefixes cannot collide
+# however the sites are cloned. Database 0 is left to sites installed before
+# this rule. Prints the index; prints nothing when redis-cli is missing or every
+# database is taken, and the caller then leaves the constant unset.
+redis_next_free_db() {
+  local max used i
+  command -v redis-cli >/dev/null 2>&1 || return 1
+  max=$(redis-cli config get databases 2>/dev/null | tail -1)
+  [ "$max" -gt 1 ] 2>/dev/null || max=16
+  used=$(grep -hoE "WP_REDIS_DATABASE'[[:space:]]*,[[:space:]]*'?[0-9]+" \
+           /home/*/web/*/public_html/wp-config.php \
+           /home/*/web/*/public_html.setup/wp-config.php 2>/dev/null \
+         | grep -oE '[0-9]+$' | sort -un)
+  for ((i = 1; i < max; i++)); do
+    printf '%s\n' "$used" | grep -qx "$i" || { echo "$i"; return 0; }
+  done
+  return 1
+}
+
 # 5. Update credentials in wp-config.php (Run as DEST_USER)
 echo "[5/8] Updating wp-config.php credentials, salts, and cache..."
 
@@ -328,6 +349,18 @@ REDIS_SAFE_PREFIX="${NEW_WEB_DOMAIN//./_}_"
 sudo -u "$DEST_USER" wp --path="$NEW_DIR" config set WP_CACHE_KEY_SALT "$REDIS_SAFE_PREFIX" --type=constant --quiet
 sudo -u "$DEST_USER" wp --path="$NEW_DIR" config set WP_REDIS_PREFIX "$REDIS_SAFE_PREFIX" --type=constant --quiet
 
+# A prefix keeps keys apart; it does not keep flushes apart. The redis-cache
+# drop-in's flush() is FLUSHDB, so a clone sharing database 0 with its source
+# empties the source's cache on every `wp cache flush` (kuumalahde, 2026-09-19).
+REDIS_DB=$(redis_next_free_db || true)
+if [ -n "$REDIS_DB" ]; then
+  echo "      Isolating the object cache in Redis database $REDIS_DB..."
+  sudo -u "$DEST_USER" wp --path="$NEW_DIR" config set WP_REDIS_DATABASE "$REDIS_DB" --type=constant --raw --quiet
+  sudo -u "$DEST_USER" wp --path="$NEW_DIR" config set WP_REDIS_SELECTIVE_FLUSH true --type=constant --raw --quiet
+else
+  echo "      ⚠️  No free Redis database — the clone shares database 0 with its source; a cache flush on either empties both."
+fi
+
 # 6. Import the database to the new site (Run as DEST_USER)
 echo "[6/8] Importing the database..."
 sudo -u "$DEST_USER" wp --path="$NEW_DIR" db import "$DB_DUMP" --quiet
@@ -341,6 +374,17 @@ NEW_WP_URL="https://$NEW_DOMAIN"
 echo "    Replacing URLs: $OLD_WP_URL -> $NEW_WP_URL"
 sudo -u "$DEST_USER" wp --path="$NEW_DIR" search-replace "$OLD_WP_URL" "$NEW_WP_URL" --all-tables --quiet
 check_status "Failed WP-CLI URL search and replace."
+
+# Plugins store every shape of the URL: http and https, with and without www,
+# and JSON-escaped (https:\/\/host) inside serialized settings. Replacing only
+# the canonical form leaves stragglers — a clone of kuumalahde.fi kept its CDN
+# base as http://www.kuumalahde.fi and 100 posts with http:// links (2026-09-20).
+OLD_BARE="${OLD_WP_URL#https://}"; OLD_BARE="${OLD_BARE#http://}"; OLD_BARE="${OLD_BARE#www.}"; OLD_BARE="${OLD_BARE%%/*}"
+echo "    Replacing the other URL shapes of $OLD_BARE"
+for v in "https://www.$OLD_BARE" "http://www.$OLD_BARE" "https://$OLD_BARE" "http://$OLD_BARE"; do
+  [ "$v" = "$OLD_WP_URL" ] || sudo -u "$DEST_USER" wp --path="$NEW_DIR" search-replace "$v" "$NEW_WP_URL" --all-tables --quiet --skip-columns=guid 2>/dev/null
+  sudo -u "$DEST_USER" wp --path="$NEW_DIR" search-replace "${v//\//\\/}" "${NEW_WP_URL//\//\\/}" --all-tables --quiet --skip-columns=guid 2>/dev/null
+done
 
 echo "    Replacing absolute server paths: $OLD_DIR -> $NEW_DIR"
 sudo -u "$DEST_USER" wp --path="$NEW_DIR" search-replace "$OLD_DIR" "$NEW_DIR" --all-tables --quiet

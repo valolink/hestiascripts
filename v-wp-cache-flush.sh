@@ -83,6 +83,9 @@ wp_cmd() {
 echo "Flushing caches for $DOMAIN ($WEB_USER)"
 
 echo "→ Object cache (Redis)..."
+if ! wp_cmd config has WP_REDIS_DATABASE >/dev/null 2>&1; then
+  echo "  ⚠️  WP_REDIS_DATABASE is not set: this flush is FLUSHDB on the shared database 0 and empties every other site's cache in it too (v-wp-redis-install sets a database per site)."
+fi
 wp_cmd cache flush || echo "  (object cache flush failed — no drop-in?)"
 
 echo "→ Expired transients..."

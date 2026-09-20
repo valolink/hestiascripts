@@ -125,6 +125,27 @@ else
   echo "✅ Plugin activated"
 fi
 
+# Pick a Redis database index no other site on this box uses. Each WordPress
+# site gets its own database so a flush on one site (the drop-in's flush() is
+# FLUSHDB) never empties another site's cache, and key prefixes cannot collide
+# however the sites are cloned. Database 0 is left to sites installed before
+# this rule. Prints the index; prints nothing when redis-cli is missing or every
+# database is taken, and the caller then leaves the constant unset.
+redis_next_free_db() {
+  local max used i
+  command -v redis-cli >/dev/null 2>&1 || return 1
+  max=$(redis-cli config get databases 2>/dev/null | tail -1)
+  [ "$max" -gt 1 ] 2>/dev/null || max=16
+  used=$(grep -hoE "WP_REDIS_DATABASE'[[:space:]]*,[[:space:]]*'?[0-9]+" \
+           /home/*/web/*/public_html/wp-config.php \
+           /home/*/web/*/public_html.setup/wp-config.php 2>/dev/null \
+         | grep -oE '[0-9]+$' | sort -un)
+  for ((i = 1; i < max; i++)); do
+    printf '%s\n' "$used" | grep -qx "$i" || { echo "$i"; return 0; }
+  done
+  return 1
+}
+
 # --- WP_REDIS_PREFIX ---
 echo ""
 HAS_PREFIX=$($WP config has WP_REDIS_PREFIX 2>/dev/null; echo $?)
@@ -184,6 +205,24 @@ set_const_if_missing() {
 echo ""
 set_const_if_missing WP_REDIS_DISABLE_GROUP_FLUSH true
 set_const_if_missing WP_REDIS_MAXTTL 86400
+
+# --- WP_REDIS_DATABASE ---------------------------------------------------------
+# One Redis database per site. The prefix keeps keys apart; only a database of
+# its own keeps flushes apart, because flush() (and the group-flush fallback
+# above) is FLUSHDB. Two sites in database 0 empty each other's cache on every
+# `wp cache flush` — seen between kuumalahde.fi and its dev clone, 2026-09-19.
+# Only set when absent: moving a live site to another database is a cold cache.
+if [ "$($WP config has WP_REDIS_DATABASE 2>/dev/null; echo $?)" -ne 0 ]; then
+  REDIS_DB=$(redis_next_free_db || true)
+  if [ -n "$REDIS_DB" ]; then
+    set_const_if_missing WP_REDIS_DATABASE "$REDIS_DB"
+    set_const_if_missing WP_REDIS_SELECTIVE_FLUSH true
+  else
+    echo "⚠️  No free Redis database found — this site shares database 0; flushes are not isolated."
+  fi
+else
+  echo "ℹ️  WP_REDIS_DATABASE already set: $($WP config get WP_REDIS_DATABASE 2>/dev/null)"
+fi
 
 # --- Summary ---
 echo ""
