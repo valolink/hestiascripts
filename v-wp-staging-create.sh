@@ -728,6 +728,17 @@ search_replace_url_variants "$DEST_USER" "$SETUP_DIR" "$OLD_BARE" "$NEW_WP_URL"
 echo "       Absolute path: $LIVE_DIR  →  $NEW_DIR"
 $WP_STG search-replace "$LIVE_DIR" "$NEW_DIR" --all-tables --quiet --skip-columns=guid
 
+# Paths outside public_html (private/, logs/) and constants in wp-config.php
+# are not covered above. On the same user nothing blocks them, so a cloned
+# WP_DEBUG_LOG under live's private/ makes staging write into live's log
+# (staging.kuumalahde.fi, 2026-09-22).
+LIVE_HOME="/home/$SRC_USER/web/$OLD_WEB_DOMAIN"
+NEW_HOME="/home/$DEST_USER/web/$NEW_WEB_DOMAIN"
+echo "       Domain-root paths: $LIVE_HOME  →  $NEW_HOME (database and wp-config.php)"
+$WP_STG search-replace "$LIVE_HOME" "$NEW_HOME" --all-tables --quiet --skip-columns=guid
+sed -i "s#$LIVE_HOME#$NEW_HOME#g" "$SETUP_DIR/wp-config.php"
+mkdir -p "$NEW_HOME/private" && chown "$DEST_USER:$DEST_USER" "$NEW_HOME/private"
+
 # [8/11] Pre-publish verification.
 # Refuse to publish if any of the safety constants or URLs are wrong.
 echo "[8/11] Verifying staging is safe to publish..."
