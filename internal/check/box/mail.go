@@ -82,7 +82,19 @@ func checkMailDelivery(ctx context.Context, env *Env) []Result {
 	// relay line still read "configured".
 	if unitExists(ctx, env.Sys, "postfix") && !active(ctx, env.Sys, "postfix") {
 		n, _ := MailQueue(ctx, env)
-		return []Result{New(Fail, fmt.Sprintf("postfix is not running (%d messages waiting)", n)).
+		r := New(Fail, fmt.Sprintf("postfix is not running (%d messages waiting)", n))
+		// hzweb1 / kuumalahde 2026-09-24: stopped for weeks unnoticed.
+		for _, unit := range []string{"postfix@-", "postfix"} {
+			if out, err := env.Sys.Run(ctx, "systemctl", "show", unit, "-p", "InactiveEnterTimestamp", "--value", "--timestamp=unix"); err == nil {
+				var sec int64
+				if _, e := fmt.Sscanf(strings.TrimPrefix(strings.TrimSpace(out), "@"), "%d", &sec); e == nil && sec > 0 {
+					since := time.Unix(sec, 0)
+					r = r.Ev(fmt.Sprintf("stopped since %s — %d days", since.Local().Format("2006-01-02 15:04"), int(env.Sys.Now().Sub(since).Hours()/24)))
+					break
+				}
+			}
+		}
+		return []Result{r.
 			Because("Nothing leaves the box: cron, fail2ban and maldet alerts and all WordPress mail sit in the queue.").
 			Fixed("systemctl status postfix ; systemctl start postfix")}
 	}

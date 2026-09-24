@@ -13,6 +13,7 @@ import (
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/sys"
+	"github.com/valolink/hestiascripts/internal/wpfiles"
 )
 
 func webChecks() []Check {
@@ -109,8 +110,8 @@ func checkTemplateUsage(ctx context.Context, env *Env) []Result {
 	}
 	var rs []Result
 	for _, d := range doms {
-		if !hardenedProxy[d.Proxy] {
-			rs = append(rs, New(Warn, "on the unhardened proxy template "+orDash(d.Proxy)).For(d.Name).
+		if !ProxyHardened(env, d.Proxy) {
+			rs = append(rs, New(Warn, "on proxy template "+orDash(d.Proxy)+", which has no security rules").For(d.Name).
 				Because("None of the deny rules (dumps, logs, xmlrpc, PHP in uploads) apply to it, whatever is installed.").
 				Fixed("v-change-web-domain-proxy-tpl "+d.User+" "+d.Name+" wp-secure   # or wp-rocket for WP Rocket sites"))
 		}
@@ -198,4 +199,14 @@ func lastLine(s string) string {
 		return ""
 	}
 	return l[len(l)-1]
+}
+
+// ProxyHardened reads the template itself: hardened means it carries the
+// security rules, whatever it is called (soutuveneet's hand-rolled
+// "wprocket" does not; a stale wp-rocket copy might not either).
+func ProxyHardened(env *Env, proxy string) bool {
+	if proxy == "" {
+		return false
+	}
+	return strings.Contains(readString(env.Sys, hestia.NginxTpl+"/"+proxy+".tpl"), wpfiles.SecurityMarker)
 }

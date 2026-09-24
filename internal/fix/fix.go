@@ -26,6 +26,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/logcap"
 	"github.com/valolink/hestiascripts/internal/sys"
+	"github.com/valolink/hestiascripts/internal/wpfiles"
 )
 
 type Risk int
@@ -161,8 +162,7 @@ func find(ctx context.Context, s sys.Sys, args ...string) []string {
 	return r
 }
 
-var dumpPatterns = []string{"(", "-name", "wp-config*.bak*", "-o", "-name", "wp-config*.save", "-o", "-name", "wp-config*.old",
-	"-o", "-name", "*.sql", "-o", "-name", "*.sql.gz", ")", "-type", "f"}
+var dumpPatterns = wpfiles.DumpPatterns
 
 func dumpFiles(ctx context.Context, s sys.Sys, d hestia.Domain) []string {
 	return find(ctx, s, append([]string{d.DocRoot(), "-maxdepth", "2"}, dumpPatterns...)...)
@@ -260,8 +260,14 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			files := find(ctx, env.Sys, d.DocRoot()+"/wp-content/uploads", "-type", "f", "(", "-iname", "*.php", "-o", "-iname", "*.phtml",
+			all := find(ctx, env.Sys, d.DocRoot()+"/wp-content/uploads", "-type", "f", "(", "-iname", "*.php", "-o", "-iname", "*.phtml",
 				"-o", "-iname", "*.phar", ")", "!", "-name", "index.php")
+			var files []string
+			for _, f := range all {
+				if wpfiles.KnownUploadsPHP(strings.TrimPrefix(f, d.DocRoot()+"/wp-content/uploads/")) == "" {
+					files = append(files, f) // known plugin caches (WPML twig, Sucuri…) stay
+				}
+			}
 			return quarantineSteps(files, d), nil
 		},
 	})
@@ -519,4 +525,115 @@ func selfExe() string {
 		return p
 	}
 	return "hs"
+}
+
+func init() {
+	fw := Fix{
+		ID: "firewall-restore", Title: "Install iptables and restore Hestia's firewall", Check: "firewall", Scope: "", Risk: Change,
+		Note: "soutuveneet 2026-09-24: no iptables binary — the firewall held no rules and every fail2ban ban failed.",
+		How:  "apt installs the iptables package if it is missing; restarting hestia-iptables re-applies Hestia's rules.conf (the rules shown in the panel); restarting fail2ban lets its jails re-create their chains. The last step prints how many rules are now loaded.",
+		Undo: "Nothing to undo — this restores the intended state. Firewall rules are edited in Hestia → Server → Firewall.",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			var steps []Step
+			if !env.Sys.Have("iptables") {
+				steps = append(steps, Step{Why: "the firewall binary is missing", Argv: []string{"apt-get", "install", "-y", "iptables"}})
+			}
+			return append(steps,
+				Step{Why: "re-apply Hestia's rules", Argv: []string{"systemctl", "restart", "hestia-iptables"}},
+				Step{Why: "let fail2ban re-create its chains", Argv: []string{"systemctl", "restart", "fail2ban"}},
+				Step{Why: "how many rules are loaded now (expect dozens)", Argv: []string{"sh", "-c", "iptables -S | wc -l"}},
+			), nil
+		},
+	}
+	register(fw)
+	fw.ID, fw.Check = "firewall-restore-f2b", "fail2ban"
+	fw.Applies = func(r check.Result) bool { return strings.Contains(r.Summary, "failed") }
+	register(fw)
+
+	register(Fix{
+		ID: "maldet-deps", Title: "Install maldet's monitor dependencies and start it", Check: "maldet", Scope: "", Risk: Change,
+		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "not running") },
+		Note:    "Found on four boxes 2026-09-24: maldet's monitor mode needs `ed` and `inotify-tools`, and dies at start without them.",
+		How:     "apt installs the two packages (small, no services of their own), then maldet.service is restarted and its status printed so you see it stayed up.",
+		Undo:    "systemctl stop maldet; apt-get remove ed inotify-tools.",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			return []Step{
+				{Why: "monitor mode dependencies", Argv: []string{"apt-get", "install", "-y", "ed", "inotify-tools"}},
+				{Why: "start monitoring", Argv: []string{"systemctl", "restart", "maldet"}},
+				{Why: "did it stay up", Argv: []string{"systemctl", "--no-pager", "-n", "5", "status", "maldet"}},
+			}, nil
+		},
+	})
+
+	register(Fix{
+		ID: "redis-guard-all", Title: "Bound the Redis keyspace on every object-cache site", Check: "redis", Scope: "all", Risk: Change,
+		Applies: func(r check.Result) bool {
+			return strings.Contains(r.Summary, "TTL") || strings.Contains(r.Summary, "flush scans")
+		},
+		Note: "alavus, hzenergiatuote, soutuveneet 2026-09-24: 87–119k keys, 1–3 % with a TTL — the state that caused kuumalahde's nightly 504s.",
+		How:  "For each site with the Redis drop-in: `wp config set` adds WP_REDIS_DISABLE_GROUP_FLUSH and WP_REDIS_MAXTTL (as the site's user), then `wp cache flush` empties that site's keys once — existing keys have no TTL and would otherwise stay forever. Pages are a little slower until the cache refills.",
+		Undo: "wp config delete the two constants per site (the flushed cache refills by itself).",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			var steps []Step
+			for _, d := range hestia.WebDomains(env.Sys) {
+				if _, err := env.Sys.Stat(d.DocRoot() + "/wp-content/object-cache.php"); err != nil {
+					continue
+				}
+				conf, _ := env.Sys.ReadFile(d.DocRoot() + "/wp-config.php")
+				if !strings.Contains(string(conf), "WP_REDIS_DISABLE_GROUP_FLUSH") {
+					steps = append(steps, Step{Why: d.Name + ": group flush without a keyspace scan",
+						Argv: wp(d, "config", "set", "WP_REDIS_DISABLE_GROUP_FLUSH", "true", "--raw", "--type=constant")})
+				}
+				if !strings.Contains(string(conf), "WP_REDIS_MAXTTL") {
+					steps = append(steps, Step{Why: d.Name + ": keys expire after a day",
+						Argv: wp(d, "config", "set", "WP_REDIS_MAXTTL", "86400", "--raw", "--type=constant")})
+				}
+				steps = append(steps, Step{Why: d.Name + ": drop the keys written without a TTL", Argv: wp(d, "cache", "flush")})
+			}
+			return steps, nil
+		},
+	})
+
+	register(Fix{
+		ID: "apt-timers", Title: "Turn on automatic security updates", Check: "updates.unattended", Scope: "", Risk: Change,
+		Applies: func(r check.Result) bool {
+			return strings.Contains(r.Summary, "never run") || strings.Contains(r.Summary, "last run was")
+		},
+		Note: "soutuveneet 2026-09-24: unattended-upgrades installed and security-only, but it had never run — 49 security updates waiting.",
+		How:  "`systemctl enable --now` starts apt's two daily timers (refresh lists, then upgrade). The last step is unattended-upgrade's own --dry-run, which changes nothing and shows what the next run will install.",
+		Undo: "systemctl disable --now apt-daily.timer apt-daily-upgrade.timer.",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			return []Step{
+				{Why: "daily list refresh and upgrade", Argv: []string{"systemctl", "enable", "--now", "apt-daily.timer", "apt-daily-upgrade.timer"}},
+				{Why: "when they fire next", Argv: []string{"systemctl", "list-timers", "--no-pager", "apt-daily*"}},
+				{Why: "what the next run will install (dry run, changes nothing)", Argv: []string{"sh", "-c", "unattended-upgrade --dry-run -v 2>&1 | tail -25"}},
+			}, nil
+		},
+	})
+
+	register(Fix{
+		ID: "wp-core-noise", Title: "Quarantine error logs and leftovers from core directories", Check: "site.core", Scope: "site", Risk: Change,
+		Applies: func(r check.Result) bool { return r.State == check.Warn && !strings.Contains(r.Summary, "incomplete") },
+		Note:    "Moves PHP error logs and leftover files out of wp-admin/ and wp-includes/ — no core download needed.",
+		How:     "`wp core verify-checksums` (as the site's user) lists files core does not ship; each moves with `mv -n` to /root/hs-quarantine/<date>/<domain>/ under its original path. Truncated names from an interrupted update are included; if core files were also missing, use Restore WordPress core files instead.",
+		Undo:    "mv the files back from the quarantine to the same path.",
+		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
+			d, err := domainByName(env.Sys, subject)
+			if err != nil {
+				return nil, err
+			}
+			out, err := env.Sys.Run(ctx, "runuser", "-u", d.User, "--", "env", "HOME=/home/"+d.User, "wp", "--path="+d.DocRoot(), "core", "verify-checksums")
+			detail := out
+			if ee, ok := err.(*sys.ExitError); ok {
+				detail += "\n" + ee.Stderr
+			}
+			var files []string
+			for _, l := range lines(detail) {
+				if f, ok := strings.CutPrefix(l, "Warning: File should not exist: "); ok && wpfiles.ClassifyCoreExtra(f) != wpfiles.ExtraSuspicious {
+					files = append(files, d.DocRoot()+"/"+f)
+				}
+			}
+			return quarantineSteps(files, d), nil
+		},
+	})
 }

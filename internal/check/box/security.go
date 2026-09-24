@@ -11,6 +11,7 @@ import (
 
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/wpfiles"
 )
 
 func securityChecks() []Check {
@@ -188,7 +189,9 @@ func checkUnattended(ctx context.Context, env *Env) []Result {
 	// Proof it runs: its log shows a completed run in the last 2 days.
 	last := lastUnattendedRun(env)
 	if last.IsZero() {
-		return []Result{New(Configured, "security-only, no completed run found in its log")}
+		return []Result{New(Warn, "security-only, but it has never run").
+			Because("No completed run in its log: the apt timers are off or the package was never started, so patches wait for a person (soutuveneet: 49 pending).").
+			Fixed("enable the apt timers")}
 	}
 	age := env.Sys.Now().Sub(last)
 	if age > 48*time.Hour {
@@ -367,7 +370,15 @@ func checkMaldet(ctx context.Context, env *Env) []Result {
 	}
 	var rs []Result
 	if !active(ctx, s, "maldet") {
-		rs = append(rs, New(Warn, "maldet.service is not running").
+		cause, _ := s.Run(ctx, "journalctl", "-u", "maldet", "-n", "20", "--no-pager", "-o", "cat")
+		r := New(Warn, "maldet.service is not running")
+		for _, l := range strings.Split(cause, "\n") {
+			if strings.Contains(l, "could not find") || strings.Contains(l, "dependency") {
+				r = r.Ev(strings.TrimSpace(l))
+				break
+			}
+		}
+		rs = append(rs, r.
 			Because("Monitor mode is off, so new files are not scanned as they land.").
 			Fixed("systemctl status maldet   # missing deps are usually 'ed' or inotify-tools"))
 	}
@@ -442,9 +453,7 @@ func checkExposure(ctx context.Context, env *Env) []Result {
 	if len(roots) == 0 {
 		return []Result{New(NA, "no web roots")}
 	}
-	out, _ := s.Run(ctx, "find", append(roots, "-maxdepth", "2", "(",
-		"-name", "wp-config*.bak*", "-o", "-name", "wp-config*.save", "-o", "-name", "wp-config*.old",
-		"-o", "-name", "*.sql", "-o", "-name", "*.sql.gz", ")", "-type", "f")...)
+	out, _ := s.Run(ctx, "find", append(append(roots, "-maxdepth", "2"), wpfiles.DumpPatterns...)...)
 	dumps := map[string][]string{}
 	var doms []string
 	for _, f := range nonEmpty(out) {
@@ -481,20 +490,37 @@ func checkUploadsPHP(ctx context.Context, env *Env) []Result {
 	}
 	out, _ := env.Sys.Run(ctx, "find", append(roots, "-type", "f", "(", "-iname", "*.php", "-o", "-iname", "*.phtml", "-o", "-iname", "*.phar", ")", "!", "-name", "index.php")...)
 	by := map[string][]string{}
+	known := map[string]map[string]int{}
 	var doms []string
 	for _, f := range nonEmpty(out) {
 		dom := strings.Split(f, "/")[4]
-		if _, ok := by[dom]; !ok {
+		if _, ok := by[dom]; !ok && known[dom] == nil {
 			doms = append(doms, dom)
 		}
-		by[dom] = append(by[dom], strings.TrimPrefix(f, "/home/"))
+		rel := f[strings.Index(f, "/wp-content/uploads/")+len("/wp-content/uploads/"):]
+		if p := wpfiles.KnownUploadsPHP(rel); p != "" {
+			if known[dom] == nil {
+				known[dom] = map[string]int{}
+			}
+			known[dom][p]++
+			continue
+		}
+		by[dom] = append(by[dom], "uploads/"+rel)
 	}
 	var rs []Result
 	for _, d := range doms {
-		rs = append(rs, New(Warn, plural(len(by[d]), "PHP file in uploads", "PHP files in uploads")).
-			For(d).Ev(by[d]...).
-			Because("Uploads should hold media only. A PHP file there is either a plugin's test file or a dropped shell — check each one.").
-			Fixed("inspect the files; block PHP execution in uploads in the web template"))
+		var kn []string
+		for p, n := range known[d] {
+			kn = append(kn, fmt.Sprintf("%d × %s (known, left alone)", n, p))
+		}
+		if len(by[d]) == 0 {
+			rs = append(rs, New(Configured, "only known plugin files in uploads").For(d).Ev(kn...))
+			continue
+		}
+		rs = append(rs, New(Warn, plural(len(by[d]), "unexpected PHP file in uploads", "unexpected PHP files in uploads")).
+			For(d).Ev(append(by[d], kn...)...).
+			Because("Uploads should hold media. A PHP file there that no known plugin explains is either a plugin quirk or a dropped shell — read each one.").
+			Fixed("quarantine them (known plugin caches are skipped); block PHP execution in uploads in the web template"))
 	}
 	if len(rs) == 0 {
 		return []Result{New(OK, "no PHP files in any uploads directory")}

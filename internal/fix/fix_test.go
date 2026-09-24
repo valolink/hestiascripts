@@ -9,6 +9,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/sys"
+	"github.com/valolink/hestiascripts/internal/wpfiles"
 )
 
 func fakeBox() *sys.Fake {
@@ -34,7 +35,7 @@ func steps(t *testing.T, id, subject string, f *sys.Fake) []Step {
 func TestDumpsPlanMovesEachFileIntoPrivate(t *testing.T) {
 	f := fakeBox()
 	root := "/home/renea/web/renea.demolink.fi/public_html"
-	f.Cmds["find "+root+" -maxdepth 2 ( -name wp-config*.bak* -o -name wp-config*.save -o -name wp-config*.old -o -name *.sql -o -name *.sql.gz ) -type f"] =
+	f.Cmds["find "+root+" -maxdepth 2 "+strings.Join(wpfiles.DumpPatterns, " ")] =
 		sys.FakeCmd{Out: root + "/renea.sql\n" + root + "/old/test.sql\n"}
 	st := steps(t, "dumps", "renea.demolink.fi", f)
 	if len(st) != 3 {

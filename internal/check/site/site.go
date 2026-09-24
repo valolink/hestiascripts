@@ -22,6 +22,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/logcap"
 	"github.com/valolink/hestiascripts/internal/sys"
+	"github.com/valolink/hestiascripts/internal/wpfiles"
 )
 
 // All builds the site checks for every domain on the box.
@@ -189,31 +190,69 @@ func checkCore(ctx context.Context, env *Env, d hestia.Domain) []Result {
 	if ee, ok := err.(*sys.ExitError); ok {
 		detail += "\n" + ee.Stderr
 	}
-	var bad, missing []string
+	// Classify: of everything verify-checksums reports, only modified files
+	// and unexpected PHP look like a backdoor. PHP error logs in core dirs,
+	// update leftovers (.rnd, truncated names) and missing files are real
+	// but different problems — the fleet sweep found them on almost every
+	// box, and one blanket Fail hid the case that matters.
+	var modified, suspicious, errlogs, leftovers, missing []string
 	for _, l := range strings.Split(detail, "\n") {
 		l = strings.TrimSpace(l)
 		if !strings.HasPrefix(l, "Warning:") {
 			continue // the closing "Error: … doesn't verify" line is a summary, not a file
 		}
 		l = strings.TrimSpace(strings.TrimPrefix(l, "Warning:"))
-		switch {
-		case strings.HasPrefix(l, "File should not exist"), strings.HasPrefix(l, "File doesn't verify against checksum"):
-			bad = append(bad, l)
-		case strings.HasPrefix(l, "File doesn't exist"):
-			missing = append(missing, l)
+		if f, ok := strings.CutPrefix(l, "File should not exist: "); ok {
+			switch wpfiles.ClassifyCoreExtra(f) {
+			case wpfiles.ExtraSuspicious:
+				suspicious = append(suspicious, f)
+			case wpfiles.ExtraErrorLog:
+				errlogs = append(errlogs, f)
+			default:
+				leftovers = append(leftovers, f)
+			}
+		} else if f, ok := strings.CutPrefix(l, "File doesn't verify against checksum: "); ok {
+			modified = append(modified, f)
+		} else if f, ok := strings.CutPrefix(l, "File doesn't exist: "); ok {
+			missing = append(missing, f)
 		}
 	}
+	var parts []string
+	var ev []string
+	add := func(list []string, label string) {
+		if len(list) == 0 {
+			return
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", len(list), label))
+		for _, f := range list[:min(len(list), 6)] {
+			ev = append(ev, label+": "+f)
+		}
+		if len(list) > 6 {
+			ev = append(ev, fmt.Sprintf("%s: … %d more", label, len(list)-6))
+		}
+	}
+	add(modified, "modified")
+	add(suspicious, "unexpected PHP")
+	add(missing, "missing")
+	add(errlogs, "PHP error logs")
+	add(leftovers, "leftovers")
 	switch {
-	case len(bad) > 0:
-		return []Result{New(Fail, fmt.Sprintf("WordPress %s: %d core files added or modified", ver, len(bad))).
-			Ev(bad[:min(len(bad), 12)]...).With("wp", ver).
-			Because("Core files do not change in normal operation. An added or altered file in wp-admin/ or wp-includes/ is the classic place for a backdoor.").
-			Fixed("inspect each file; `wp core download --force --skip-content --version=" + ver + "` restores core")}
+	case len(modified)+len(suspicious) > 0:
+		return []Result{New(Fail, fmt.Sprintf("WordPress %s: %s", ver, strings.Join(parts, ", "))).Ev(ev...).With("wp", ver).
+			Because("Core files do not change in normal operation. A modified core file, or a PHP file core does not ship, is the classic backdoor (alavus: zwfile.php in wp-includes).").
+			Fixed("inspect them; the fix quarantines extras and re-downloads core " + ver)}
 	case len(missing) > 0:
-		return []Result{New(Warn, fmt.Sprintf("WordPress %s: %d core files missing", ver, len(missing))).
-			Ev(missing[:min(len(missing), 12)]...).With("wp", ver).
-			Because("A trimmed or half-updated core breaks in odd places; a deliberate removal should be recorded as an exemption.").
-			Fixed("`wp core download --force --skip-content --version=" + ver + "` restores core")}
+		return []Result{New(Warn, fmt.Sprintf("WordPress %s: incomplete core — %s", ver, strings.Join(parts, ", "))).Ev(ev...).With("wp", ver).
+			Because("Usually an interrupted update; the site breaks in odd places.").
+			Fixed("re-download core " + ver)}
+	case len(errlogs) > 0:
+		return []Result{New(Warn, fmt.Sprintf("WordPress %s: %s in core directories", ver, strings.Join(parts, ", "))).Ev(ev...).With("wp", ver).
+			Because("PHP wrote error logs into wp-admin/ or wp-includes/; they are downloadable over the web and carry paths and internals.").
+			Fixed("move them to quarantine; find what errors in the site's own logs")}
+	case len(leftovers) > 0:
+		return []Result{New(Warn, fmt.Sprintf("WordPress %s: %s from an update or a tool", ver, strings.Join(parts, ", "))).Ev(ev...).With("wp", ver).
+			Because("Not code, but not core either: truncated names mean an update was interrupted; .rnd and .htaccess come from tools.").
+			Fixed("quarantine them; re-download core if names were truncated")}
 	case strings.Contains(detail, "Couldn't get checksums") || strings.Contains(detail, "Could not retrieve"):
 		return []Result{New(Unknown, "WordPress "+ver+": checksums unavailable").With("wp", ver).Ev(lastNonEmpty(detail))}
 	case err != nil && !strings.Contains(detail, "verifies against checksums"):

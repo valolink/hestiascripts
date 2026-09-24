@@ -32,7 +32,7 @@ func TestCoreChecksumsCatchAddedFile(t *testing.T) {
 			"Warning: File should not exist: wp-admin/.rnd\nError: WordPress installation doesn't verify against checksums.\n"},
 	})
 	rs := checkCore(context.Background(), e, dom)
-	if len(rs) != 1 || rs[0].State != Fail || rs[0].Data["wp"] != "7.1.2" || !strings.Contains(strings.Join(rs[0].Evidence, " "), "zwfile.php") {
+	if len(rs) != 1 || rs[0].State != Fail || rs[0].Data["wp"] != "7.1.2" || !strings.Contains(strings.Join(rs[0].Evidence, " "), "unexpected PHP: wp-includes/sodium_compat/namespaced/Core/Curve25519/Ge/zwfile.php") {
 		t.Fatalf("got %+v", rs)
 	}
 
@@ -49,7 +49,7 @@ func TestCoreChecksumsCatchAddedFile(t *testing.T) {
 		wpCmd("core", "version"):          {Out: "6.2.12\n"},
 		wpCmd("core", "verify-checksums"): {Code: 1, Stderr: "Warning: File doesn't exist: index.php\nError: WordPress installation doesn't verify against checksums.\n"},
 	})
-	if rs := checkCore(context.Background(), missing, dom); rs[0].State != Warn || !strings.Contains(rs[0].Summary, "1 core files missing") {
+	if rs := checkCore(context.Background(), missing, dom); rs[0].State != Warn || !strings.Contains(rs[0].Summary, "incomplete core — 1 missing") {
 		t.Errorf("missing file: %+v", rs)
 	}
 
@@ -154,5 +154,18 @@ func TestRedirectLoopAndDNS(t *testing.T) {
 	f.DNS["alavusikkunat.fi"] = []string{"37.27.188.192"}
 	if rs := checkHTTP(context.Background(), &Env{Sys: f}, d); rs[0].State != Fail || rs[0].Data["dns"] != "here" {
 		t.Errorf("loop on the live copy: %+v", rs)
+	}
+}
+
+// hzweb1 / soutuveneet 2026-09-24: error_log files and .rnd are not backdoors.
+func TestCoreNoiseIsNotAFail(t *testing.T) {
+	e := env(map[string]sys.FakeCmd{
+		wpCmd("core", "version"): {Out: "7.1.2\n"},
+		wpCmd("core", "verify-checksums"): {Out: "Warning: File should not exist: wp-admin/error_log\nWarning: File should not exist: wp-admin/.rnd\n" +
+			"Success: WordPress installation verifies against checksums.\n"},
+	})
+	rs := checkCore(context.Background(), e, dom)
+	if rs[0].State != Warn || !strings.Contains(rs[0].Summary, "1 PHP error logs") {
+		t.Errorf("got %+v", rs)
 	}
 }

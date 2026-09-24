@@ -158,7 +158,9 @@ func TestRedisSitesCollideOnlyOnSameDatabaseAndPrefix(t *testing.T) {
 
 func TestTemplateUsage(t *testing.T) {
 	f := &sys.Fake{Files: map[string]string{
-		hestia.UsersDir + "/u/web.conf": "DOMAIN='a.fi' PROXY='wp-rocket'\nDOMAIN='b.fi' PROXY='default'\n",
+		hestia.UsersDir + "/u/web.conf":    "DOMAIN='a.fi' PROXY='wp-rocket'\nDOMAIN='b.fi' PROXY='default'\n",
+		hestia.NginxTpl + "/wp-rocket.tpl": "# Valolink security rules\n",
+		hestia.NginxTpl + "/default.tpl":   "server {}\n",
 	}}
 	rs := checkTemplateUsage(context.Background(), env(f))
 	if states(rs) != "warn" || rs[0].Subject != "b.fi" {
