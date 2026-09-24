@@ -15,6 +15,7 @@ package fix
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/logcap"
 	"github.com/valolink/hestiascripts/internal/sys"
 )
 
@@ -48,7 +50,9 @@ type Fix struct {
 	// site), or "" (the result's own subject, e.g. a hestia.conf key).
 	Scope   string
 	Risk    Risk
-	Note    string
+	Note    string // what it changes, one line
+	How     string // how it works: what each command does, what changes on disk
+	Undo    string // how to reverse it ("" = nothing to undo)
 	Applies func(r check.Result) bool
 	Plan    func(ctx context.Context, env *check.Env, subject string) ([]Step, error)
 }
@@ -174,6 +178,8 @@ func init() {
 	register(Fix{
 		ID: "dumps", Title: "Move database dumps out of the web root", Check: "web.exposure", Scope: "site", Risk: Change,
 		Note:    "Moves *.sql, *.sql.gz and wp-config backups (docroot, two levels deep) to the site's private/ — not web-served, still in the account. Nothing is deleted.",
+		How:     "How: `find` lists *.sql, *.sql.gz and wp-config backups in public_html and one directory below. Each is moved with `mv -n` (never overwrites) into private/hs-moved-<date>/, a directory Hestia never serves; subdirectory paths become a__b__file.sql so names cannot collide. Owner and dates are kept.",
+		Undo:    "Undo: mv the files back from /home/<user>/web/<domain>/private/hs-moved-<date>/ to public_html. Delete them there once you are sure nothing needs them.",
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "dump") },
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			d, err := domainByName(env.Sys, subject)
@@ -186,6 +192,8 @@ func init() {
 	register(Fix{
 		ID: "dumps-all", Title: "Move every dump out of every web root", Check: "web.exposure", Scope: "all", Risk: Change,
 		Note:    "The same move for every site on the box, each into its own private/.",
+		How:     "How: the same find-and-move for every web domain of every user, each into its own site's private/hs-moved-<date>/.",
+		Undo:    "Undo: per site, mv the files back from private/hs-moved-<date>/.",
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "dump") },
 		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
 			var steps []Step
@@ -196,8 +204,10 @@ func init() {
 		},
 	})
 	register(Fix{
-		ID: "debug-log", Title: "Stop debug logging and move the log out", Check: "web.exposure", Scope: "site", Risk: Change,
+		ID: "debug-log", Title: "Turn debug off and move the log out", Check: "web.exposure", Scope: "site", Risk: Change,
 		Note:    "Sets WP_DEBUG false (so the log stops growing), then moves wp-content/debug*.log to private/. Nothing is deleted — remove it there once read.",
+		How:     "How: `wp config set WP_DEBUG false` (run as the site's user, edits wp-config.php) stops new log lines; then wp-content/debug*.log moves to private/hs-moved-<date>/ with `mv -n`.",
+		Undo:    "Undo: `wp config set WP_DEBUG true --raw` in the site shell, and mv the log back if you want it in place.",
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "debug") },
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			d, err := domainByName(env.Sys, subject)
@@ -213,8 +223,25 @@ func init() {
 		},
 	})
 	register(Fix{
+		ID: "debug-keep", Title: "Keep debug on: move the log out and cap its size", Check: "web.exposure", Scope: "site", Risk: Change,
+		Note:    "For sites where you want the debug log: it moves to private/wp-debug.log (not served), errors stop printing to visitors, and it is rotated hourly at " + logcap.DefaultSize + " so it cannot grow without bound.",
+		How:     "wp config set (as the site's user) points WP_DEBUG_LOG at /home/<user>/web/<domain>/private/wp-debug.log and sets WP_DEBUG_DISPLAY false. The current log is archived to private/hs-moved-<date>/. `hs logcap add` writes one logrotate block (shown below) to /etc/hs/logcap.conf and ensures /etc/cron.d/hs-logcap runs `logrotate` on that file hourly with its own state file — the system's daily logrotate is untouched. copytruncate keeps PHP's open handle valid; one compressed previous log is kept.",
+		Undo:    "`hs logcap remove <domain>` stops the rotation; `wp config delete WP_DEBUG_LOG` puts the log back at wp-content/debug.log (served — don't).",
+		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "debug") },
+		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
+			return debugKeepSteps(env, subject)
+		},
+	})
+	if k, ok := ByID("debug-keep"); ok {
+		k.ID, k.Check = "debug-keep-on", "site.debug"
+		k.Applies = func(r check.Result) bool { return r.State != check.OK }
+		register(k)
+	}
+	register(Fix{
 		ID: "wp-debug-off", Title: "Turn WP_DEBUG off", Check: "site.debug", Scope: "site", Risk: Change,
 		Note: "wp config set WP_DEBUG false, as the site's user.",
+		How:  "`wp config set WP_DEBUG false --raw`, run as the site's user — WP-CLI rewrites that one define in wp-config.php.",
+		Undo: "`wp config set WP_DEBUG true --raw` in the site shell.",
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			d, err := domainByName(env.Sys, subject)
 			if err != nil {
@@ -226,6 +253,8 @@ func init() {
 	register(Fix{
 		ID: "uploads-php", Title: "Quarantine PHP files from uploads", Check: "web.uploads-php", Scope: "site", Risk: Change,
 		Note: "Moves every .php/.phtml/.phar in wp-content/uploads (except index.php) to /root/hs-quarantine/<date>/<domain>/, keeping its path. Some are legitimate plugin files (Sucuri, WP All Import) — read the list; move one back if the plugin needs it.",
+		How:  "`find` lists .php/.phtml/.phar files under wp-content/uploads (index.php stubs excluded). Each moves with `mv -n` to /root/hs-quarantine/<date>/<domain>/ under its original path, readable by root only, so the site can no longer execute it and you can inspect it.",
+		Undo: "mv a file back to the same path under public_html (the quarantine keeps the path), then chown it to the site's user.",
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			d, err := domainByName(env.Sys, subject)
 			if err != nil {
@@ -239,6 +268,8 @@ func init() {
 	register(Fix{
 		ID: "wp-core", Title: "Restore WordPress core files", Check: "site.core", Scope: "site", Risk: Destructive,
 		Note:    "Quarantines files that should not exist in core, then re-downloads the same WordPress version over wp-admin/ and wp-includes/ (content untouched). Take a backup first if unsure.",
+		How:     "How: `wp core verify-checksums` (as the site's user) lists files that differ from the official release. Files that should not exist are quarantined under their path in /root/hs-quarantine/<date>/<domain>/. Then `wp core download --force --skip-content --version=<same>` rewrites wp-admin/ and wp-includes/ plus the root core files with the release; wp-content/ and wp-config.php are not touched.",
+		Undo:    "Undo: restore the files from the quarantine, or the site from backup (Site → Restore). Modified core files are overwritten, so a backup first is the safe order.",
 		Applies: func(r check.Result) bool { return r.State == check.Fail || r.State == check.Warn },
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			d, err := domainByName(env.Sys, subject)
@@ -269,6 +300,8 @@ func init() {
 	register(Fix{
 		ID: "redis-guard", Title: "Add the Redis flush guard", Check: "redis.sites", Scope: "site", Risk: Change,
 		Note:    "WP_REDIS_DISABLE_GROUP_FLUSH true and WP_REDIS_MAXTTL 86400 in wp-config (the kuumalahde 504 fix).",
+		How:     "How: `wp config set … --raw --type=constant` as the site's user adds the two defines to wp-config.php. They take effect on the next request.",
+		Undo:    "Undo: `wp config delete WP_REDIS_DISABLE_GROUP_FLUSH` (and WP_REDIS_MAXTTL) in the site shell.",
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "WP_REDIS_DISABLE_GROUP_FLUSH") },
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			d, err := domainByName(env.Sys, subject)
@@ -287,6 +320,7 @@ func init() {
 	register(Fix{
 		ID: "letsencrypt", Title: "Issue a Let's Encrypt certificate", Check: "web.ssl", Scope: "site", Risk: Change,
 		Note: "Fails if the domain's DNS does not point here (see the site's DNS column) — then it was a stale copy, not an outage.",
+		How:  "stock `v-add-letsencrypt-domain` requests a certificate for the domain and its aliases via HTTP validation, installs it and rebuilds the web config.",
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			d, err := domainByName(env.Sys, subject)
 			if err != nil {
@@ -298,6 +332,8 @@ func init() {
 	register(Fix{
 		ID: "hestia-conf-key", Title: "Clear the stale hestia.conf service key", Check: "hestia.services", Scope: "", Risk: Change,
 		Note: "Hestia stops trying to restart a service whose package is gone (and stops emailing root about it).",
+		How:  "stock `v-change-sys-config-value KEY \"\"` empties that one key in /usr/local/hestia/conf/hestia.conf.",
+		Undo: "`v-change-sys-config-value KEY <old value>`.",
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			if !regexp.MustCompile(`^[A-Z_]+_SYSTEM$`).MatchString(subject) {
 				return nil, fmt.Errorf("not a *_SYSTEM key: %q", subject)
@@ -309,6 +345,8 @@ func init() {
 		ID: "postfix-start", Title: "Start postfix and send the queue", Check: "mail.delivery", Scope: "", Risk: Change,
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "postfix is not running") },
 		Note:    "If it stops again, the status output below says why.",
+		How:     "How: `systemctl start postfix`, then `postqueue -f` asks it to retry everything queued, then prints the unit status so you see whether it stayed up.",
+		Undo:    "Undo: `systemctl stop postfix`.",
 		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
 			return []Step{
 				{Why: "start the MTA", Argv: []string{"systemctl", "start", "postfix"}},
@@ -321,6 +359,8 @@ func init() {
 		ID: "netdata-port", Title: "Close port 19999 in the firewall", Check: "netdata", Scope: "", Risk: Change,
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "19999") },
 		Note:    "EngineLink reads Netdata through the streamer; nothing needs 19999 from outside.",
+		How:     "How: reads Hestia's firewall rules (/usr/local/hestia/data/firewall/rules.conf) and deletes each rule opening port 19999 with stock `v-delete-firewall-rule`, which reloads iptables.",
+		Undo:    "Undo: re-add it in Hestia → Server → Firewall (restrict the source IP this time).",
 		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
 			b, _ := env.Sys.ReadFile(hestia.Root + "/data/firewall/rules.conf")
 			var steps []Step
@@ -337,6 +377,7 @@ func init() {
 	register(Fix{
 		ID: "failed-units", Title: "Show why the failed units failed", Check: "systemd.failed", Scope: "", Risk: ReadOnly,
 		Note: "Diagnosis only: restarting blindly hides the cause. Each unit's status and last journal lines.",
+		How:  "`systemctl status` for each failed unit — its state, exit code and last 15 journal lines. Changes nothing.",
 		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
 			out, _ := env.Sys.Run(ctx, "systemctl", "--failed", "--no-legend", "--plain")
 			var steps []Step
@@ -351,6 +392,7 @@ func init() {
 		ID: "storagebox-test", Title: "Test the Storage Box connection", Check: "backups.nightly", Scope: "", Risk: ReadOnly,
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "restic unreachable") },
 		Note:    "TCP to the Storage Box's port 23 from this box. Refused here but open from another box = this IP is banned for failed logins (Hetzner lifts it after a while).",
+		How:     "How: reads the Storage Box host and port from /root/.config/rclone/rclone.conf and opens a TCP connection with `nc -vz` — no login, so it cannot add to a ban.",
 		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
 			host, port := rcloneHost(env.Sys)
 			if host == "" {
@@ -362,6 +404,8 @@ func init() {
 	register(Fix{
 		ID: "proxy-wp-secure", Title: "Put the site on the wp-secure template", Check: "web.template-usage", Scope: "site", Risk: Change,
 		Note: "Hardened proxy template (deny dumps, logs, PHP in uploads, xmlrpc…). Rebuilds the domain's nginx config. Use wp-rocket instead for WP Rocket sites.",
+		How:  "stock `v-change-web-domain-proxy-tpl user domain wp-secure` records the template in the user's web.conf and rebuilds that domain's nginx config from it, then reloads nginx.",
+		Undo: "the same command with the previous template name (shown in the plan).",
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			return proxySteps(env, subject, "wp-secure")
 		},
@@ -369,10 +413,18 @@ func init() {
 	register(Fix{
 		ID: "proxy-wp-rocket", Title: "Put the site on the wp-rocket template", Check: "web.template-usage", Scope: "site", Risk: Change,
 		Note: "Hardened + serves WP Rocket's cached pages straight from nginx. Only for sites running WP Rocket.",
+		How:  "stock `v-change-web-domain-proxy-tpl user domain wp-rocket` — same as wp-secure, with the WP Rocket cache rules.",
+		Undo: "the same command with the previous template name (shown in the plan).",
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
 			return proxySteps(env, subject, "wp-rocket")
 		},
 	})
+}
+
+// DebugLogPath is where a deliberately kept debug log lives: the site's
+// private/ — never served, inside the account and its open_basedir.
+func DebugLogPath(d hestia.Domain) string {
+	return "/home/" + d.User + "/web/" + d.Name + "/private/wp-debug.log"
 }
 
 var wpDebugOn = regexp.MustCompile(`(?m)^\s*define\s*\(\s*['"]WP_DEBUG['"]\s*,\s*(true|1)\s*\)`)
@@ -435,4 +487,36 @@ func Quote(argv []string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func debugKeepSteps(env *check.Env, subject string) ([]Step, error) {
+	d, err := domainByName(env.Sys, subject)
+	if err != nil {
+		return nil, err
+	}
+	logPath := DebugLogPath(d)
+	var steps []Step
+	if _, err := env.Sys.Stat(d.DocRoot() + "/wp-content/plugins/debug-log-config-tool"); err == nil {
+		steps = append(steps, Step{Why: "NOTE: this site has the debug-log-config-tool plugin, which sets its own log path and may\n" +
+			"override WP_DEBUG_LOG. If a wp-content/debug-<hash>.log keeps appearing, turn its logging off or deactivate it.",
+			Argv: []string{"ls", "-la", d.DocRoot() + "/wp-content/plugins/debug-log-config-tool"}})
+	}
+	logs, _ := env.Sys.Glob(d.DocRoot() + "/wp-content/debug*.log")
+	steps = append(steps, moveSteps(logs, d.DocRoot(), private(d), d.User)...)
+	steps = append(steps,
+		Step{Why: "write the log to private/ from now on", Argv: wp(d, "config", "set", "WP_DEBUG_LOG", logPath)},
+		Step{Why: "never print errors to visitors", Argv: wp(d, "config", "set", "WP_DEBUG_DISPLAY", "false", "--raw")},
+		Step{Why: "rotate hourly at " + logcap.DefaultSize + " — adds to /etc/hs/logcap.conf:\n" +
+			strings.TrimRight(logcap.Block(d.Name, logPath, d.User, logcap.DefaultSize), "\n") +
+			"\nand /etc/cron.d/hs-logcap:\n" + strings.TrimRight(logcap.CronLine(), "\n"),
+			Argv: []string{selfExe(), "logcap", "add", d.Name, logPath, d.User, logcap.DefaultSize}},
+	)
+	return steps, nil
+}
+
+func selfExe() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return "hs"
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/compat"
 	"github.com/valolink/hestiascripts/internal/fix"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/logcap"
 	"github.com/valolink/hestiascripts/internal/serve"
 	"github.com/valolink/hestiascripts/internal/state"
 	"github.com/valolink/hestiascripts/internal/sys"
@@ -44,6 +45,8 @@ Usage:
   hs fix ID [SUBJECT] [--dry-run]
                            plan a fix from the live box, print each command, run it
   hs fix --list            every fix and the check it resolves
+  hs logcap add KEY PATH OWNER SIZE | remove KEY | list
+                           hourly size cap for chosen logs (/etc/hs/logcap.conf)
   hs version
 
 Sections: ` + "security, backups, sites, system, performance, web, mail, monitoring" + `
@@ -78,6 +81,8 @@ func main() {
 		os.Exit(cmdServe(os.Args[2:]))
 	case "fix":
 		os.Exit(cmdFix(ctx, env, os.Args[2:]))
+	case "logcap":
+		os.Exit(cmdLogcap(os.Args[2:]))
 	case "site-php":
 		os.Exit(cmdSitePHP(ctx, env, os.Args[2:]))
 	case "version", "--version":
@@ -288,7 +293,13 @@ func cmdFix(ctx context.Context, env *check.Env, args []string) int {
 	failed := 0
 	for i, st := range steps {
 		if st.Why != "" {
-			fmt.Printf("\n# %d/%d %s\n", i+1, len(steps), st.Why)
+			for j, l := range strings.Split(st.Why, "\n") {
+				if j == 0 {
+					fmt.Printf("\n# %d/%d %s\n", i+1, len(steps), l)
+				} else {
+					fmt.Printf("#     %s\n", l)
+				}
+			}
 		}
 		fmt.Println("$ " + fix.Quote(st.Argv))
 		if dry {
@@ -376,5 +387,32 @@ func cmdSitePHP(ctx context.Context, env *check.Env, args []string) int {
 		return 1
 	}
 	fmt.Printf("  %s now uses %s.\n", d.Name, tpls[n-1])
+	return 0
+}
+
+func cmdLogcap(args []string) int {
+	switch {
+	case len(args) == 5 && args[0] == "add":
+		if err := logcap.Add(args[1], args[2], args[3], args[4]); err != nil {
+			fmt.Fprintln(os.Stderr, "hs logcap:", err)
+			return 1
+		}
+		fmt.Printf("capped %s at %s (hourly) — %s, %s\n", args[2], args[4], logcap.ConfPath(), logcap.CronPath())
+	case len(args) == 2 && args[0] == "remove":
+		if err := logcap.Remove(args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, "hs logcap:", err)
+			return 1
+		}
+		fmt.Println("removed", args[1])
+	case len(args) == 1 && args[0] == "list":
+		for _, k := range logcap.Keys() {
+			p := logcap.Entries()[k]
+			size, _ := logcap.Managed(p)
+			fmt.Printf("%-30s %-6s %s\n", k, size, p)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "usage: hs logcap add KEY PATH OWNER SIZE | remove KEY | list")
+		return 2
+	}
 	return 0
 }

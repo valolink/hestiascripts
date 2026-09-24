@@ -276,6 +276,12 @@ Everyday site actions added: shell in the docroot as the site's user, PHP versio
 
 Checked on hzdemolink with dry runs (32-step move across 13 sites; core restore for chat.demolink.fi's missing index.php; firewall rule 11 = 19999 open to 0.0.0.0/0) and two real read-only diagnoses — which showed the Storage Box reachable again (the login ban has lifted) and hestia-web-terminal crash-looping since 2026-09-15. No change fix has been run on a box yet.
 
+### Explained, keep-on debug logs, shells (2026-09-24, same day)
+
+- Every fix carries **How it works** (what each command does, what changes on disk) and **To undo** (exact), shown on the plan screen above the computed steps. Reima: "I want to see what the fix does and how, so I won't be blindly doing stuff I don't remember well enough."
+- **Debug kept on by choice.** Fix `debug-keep` (from the exposed-log finding and from `WP_DEBUG is on`): WP_DEBUG_LOG → `private/wp-debug.log` (never served, inside open_basedir), WP_DEBUG_DISPLAY false, old log archived, and `hs logcap add` — one logrotate block per log in `/etc/hs/logcap.conf` (size 50M, rotate 1, compress, copytruncate, `su` the site user), run hourly by `/etc/cron.d/hs-logcap` with its own state file; the system's daily logrotate is untouched. The plan shows the exact block. `site.debug` now reads that state as OK ("debug on by choice — log in private/, capped"), and warns separately when errors are displayed to visitors (WP_DEBUG_DISPLAY defaults to true) or the log sits in the web root or is uncapped. Detects debug-log-config-tool (alavus), which may override WP_DEBUG_LOG, and says so in the plan.
+- **`!` opens a shell** without a confirmation box (self-evident, still logged with a transcript): on Sites or a site screen as the site's user in public_html with an `[hs] user@domain:path$` prompt (~/.bashrc still loads, `wp` works as-is); elsewhere root in /root. Also listed as actions. Checked on hzdemolink.
+
 ## Open questions
 
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.

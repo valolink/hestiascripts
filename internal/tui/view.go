@@ -189,7 +189,7 @@ func (m *model) detailHeight() int {
 
 func (m *model) footer(extra string) string {
 	l := m.cur()
-	keys := "j/k · ^h/^l tabs · / filter · : palette · r refresh · ? help · q quit"
+	keys := "j/k · ^h/^l tabs · / filter · : palette · ! shell · r refresh · ? help · q quit"
 	if m.hasActions() {
 		keys = "H/L panes · " + keys
 	}
@@ -437,6 +437,12 @@ func (m *model) actionDetail(a action.Action) string {
 	if !(a.NeedsRepo && m.env.RepoDir == "") {
 		b.WriteString(sAcc.Render("$ ") + wrap(a.Plan(t, m.env.RepoDir), m.width-4) + "\n")
 		if a.Preview != nil {
+			if a.How != "" {
+				b.WriteString(wrap(a.How, m.width-2) + "\n")
+			}
+			if a.Undo != "" {
+				b.WriteString(sDim.Render("undo: "+a.Undo) + "\n")
+			}
 			b.WriteString(sDim.Render("enter plans it against the box now and shows every file and command before asking") + "\n")
 		} else {
 			for _, l := range action.Describe(a, t, m.env.RepoDir) {
@@ -624,6 +630,9 @@ func (m *model) confirmView() string {
 		b.WriteString(wrap(a.Note, w-4) + "\n")
 	}
 	b.WriteString(sAcc.Render("$ ") + wrap(a.Plan(p.target, m.env.RepoDir), w-6) + "\n")
+	if a.How != "" {
+		b.WriteString(sBold.Render("How it works") + "\n" + wrap(a.How, w-4) + "\n")
+	}
 	desc := action.Describe(a, p.target, m.env.RepoDir)
 	label := "What it does, from its source:"
 	if a.Preview != nil {
@@ -649,6 +658,9 @@ func (m *model) confirmView() string {
 		if len(desc) > room {
 			b.WriteString(sDim.Render(fmt.Sprintf("│ (%d–%d of %d · ctrl+e/ctrl+y scroll)", off+1, min(off+room, len(desc)), len(desc))) + "\n")
 		}
+	}
+	if a.Undo != "" {
+		b.WriteString(sBold.Render("To undo") + " " + wrap(a.Undo, w-12) + "\n")
 	}
 	if len(a.Recheck) > 0 {
 		b.WriteString(sDim.Render("Afterwards it re-checks: "+strings.Join(a.Recheck, ", ")) + "\n")
@@ -706,6 +718,7 @@ func (m *model) help() string {
 		{"ctrl+e ctrl+y", "scroll the detail pane (and the confirmation box)"},
 		{"l enter  h esc", "open / run · back"},
 		{"[ ]", "previous / next site, on a site screen"},
+		{"!", "shell: as the site's user in public_html (Sites, a site), else root"},
 		{"/", "filter the current list, or the lines of a log (enter keeps it, esc clears)"},
 		{":", "palette: every action, site, log and tab, fuzzy · :q quits"},
 		{"r  R", "refresh (slow probes keep their interval) · force"},

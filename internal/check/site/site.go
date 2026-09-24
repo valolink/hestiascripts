@@ -20,6 +20,7 @@ import (
 
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/logcap"
 	"github.com/valolink/hestiascripts/internal/sys"
 )
 
@@ -270,19 +271,47 @@ func checkUpdates(ctx context.Context, env *Env, d hestia.Domain) []Result {
 		Fixed("v-wp-update --user=" + d.User + " --domain=" + d.Name + " --dry-run")}
 }
 
-var wpDebugOn = regexp.MustCompile(`(?m)^\s*define\s*\(\s*['"]WP_DEBUG['"]\s*,\s*(true|1)\s*\)`)
+var (
+	wpDebugOn  = regexp.MustCompile(`(?m)^\s*define\s*\(\s*['"]WP_DEBUG['"]\s*,\s*(true|1)\s*\)`)
+	displayOff = regexp.MustCompile(`(?m)^\s*define\s*\(\s*['"]WP_DEBUG_DISPLAY['"]\s*,\s*(false|0)\s*\)`)
+	debugLog   = regexp.MustCompile(`(?m)^\s*define\s*\(\s*['"]WP_DEBUG_LOG['"]\s*,\s*['"]([^'"]+)['"]\s*\)`)
+)
 
+// Debug on can be a choice: log kept in private/ (never served), capped by
+// hs logcap, errors not printed to visitors. That reads as OK, not a warning.
 func checkDebug(env *Env, d hestia.Domain) []Result {
 	conf, err := env.Sys.ReadFile(d.DocRoot() + "/wp-config.php")
 	if err != nil {
 		return []Result{New(Unknown, "wp-config.php unreadable")}
 	}
-	if wpDebugOn.Match(conf) {
-		return []Result{New(Warn, "WP_DEBUG is on").
-			Because("Production sites log (or print) every notice; on alavus this grew to 11.8 GB of logs.").
-			Fixed("wp config set WP_DEBUG false --raw --path=" + d.DocRoot())}
+	if !wpDebugOn.Match(conf) {
+		return []Result{New(OK, "WP_DEBUG off")}
 	}
-	return []Result{New(OK, "WP_DEBUG off")}
+	private := "/home/" + d.User + "/web/" + d.Name + "/private/"
+	var logPath string
+	if m := debugLog.FindSubmatch(conf); m != nil {
+		logPath = string(m[1])
+	}
+	switch {
+	case !displayOff.Match(conf):
+		return []Result{New(Warn, "WP_DEBUG is on and errors are shown to visitors").
+			Because("WP_DEBUG_DISPLAY defaults to true: notices and paths print into the pages.").
+			Fixed("keep debug on safely, or turn it off")}
+	case logPath == "" || !strings.HasPrefix(logPath, private):
+		return []Result{New(Warn, "WP_DEBUG is on, logging inside the web root").
+			Because("wp-content/debug.log is served unless a deny rule is deployed, and grows without bound (alavus: 11.8 GB).").
+			Fixed("keep debug on safely (log to private/, capped), or turn it off")}
+	}
+	size, capped := logcap.Managed(logPath)
+	if !capped {
+		return []Result{New(Warn, "WP_DEBUG is on, log in private/ but not size-capped").Ev(logPath).
+			Because("Outside the web root, but nothing stops it growing.").Fixed("keep debug on safely (adds the cap)")}
+	}
+	r := New(OK, "debug on by choice — log in private/, capped at "+size).Ev(logPath)
+	if fi, err := env.Sys.Stat(logPath); err == nil {
+		r = r.Ev(fmt.Sprintf("current size %d MB", fi.Size()>>20))
+	}
+	return []Result{r}
 }
 
 // wpBootFailure turns "WordPress would not start" into the fault it is,

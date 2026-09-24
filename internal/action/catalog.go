@@ -46,11 +46,8 @@ func siteActions() []Action {
 				return []string{bin + "v-add-letsencrypt-domain", t.Domain.User, t.Domain.Name}
 			}},
 		{ID: "site.shell", Title: "Shell in the docroot as the site's user", Site: true, Mode: Interactive, Confirm: ConfirmNone,
-			Note: "bash in public_html as the site's own user — wp-cli works as-is, files keep the right owner. exit returns here.",
-			Command: func(t Target, _ string) []string {
-				return []string{"runuser", "-u", t.Domain.User, "--", "env", "HOME=/home/" + t.Domain.User,
-					"bash", "-c", "cd " + quote(t.Domain.DocRoot()) + " && exec bash -i"}
-			}},
+			Note:    "bash in public_html as the site's own user — wp-cli works as-is, files keep the right owner. exit returns here.",
+			Command: func(t Target, _ string) []string { return SiteShell(t) }},
 		{ID: "site.php", Title: "Switch PHP version / pool template…", Site: true, Mode: Interactive, Confirm: ConfirmNone,
 			Note:    "Lists Hestia's backend templates with the current one marked, shows the exact command, asks before changing.",
 			Recheck: []string{"site.http", "services.idle"},
@@ -176,6 +173,8 @@ func boxActions() []Action {
 			Note: "run.sh menu: install, update, fix disabled PHP CLI functions.", Recheck: []string{"wpcli"}, Command: setupFn("menu_wpcli")},
 
 		// --- system
+		{ID: "system.shell", Title: "Root shell", Section: "system", Mode: Interactive, Confirm: ConfirmNone,
+			Note: "bash as root in /root. exit returns here. (Also: ! from any tab.)", Command: func(Target, string) []string { return RootShell() }},
 		{ID: "system.disk", Title: "Disk cleanup…", Section: "system", Mode: Interactive, NeedsRepo: true,
 			Note: "run.sh menu: apt cache, journal, WP caches/transients, PHP sessions, logs, ncdu.", Recheck: []string{"disk"},
 			Command: setupFn("menu_disk")},

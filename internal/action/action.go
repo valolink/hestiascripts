@@ -64,6 +64,8 @@ type Action struct {
 	Recheck []string
 	// Command builds argv. repo is the hestiascripts checkout.
 	Command func(t Target, repo string) []string
+	// How and Undo: plain explanations shown on the plan screen (fixes).
+	How, Undo string
 	// Preview, when set, computes what will happen from the live box (fixes:
 	// the exact files and commands). Shown instead of the source description.
 	Preview func() ([]string, error)
@@ -304,4 +306,21 @@ func selfExe() string {
 		return p
 	}
 	return "hs"
+}
+
+// SiteShell is bash as the site's user in its public_html, with a prompt
+// that says where you are: [hs] user@domain:path$. ~/.bashrc still loads.
+func SiteShell(t Target) []string {
+	d := t.Domain
+	ps1 := `\[\e[38;2;125;174;163m\][hs]\[\e[0m\] \u@` + d.Name + `:\w\$ `
+	rc := `[ -r ~/.bashrc ] && . ~/.bashrc; PS1=` + quote(ps1)
+	return []string{"runuser", "-u", d.User, "--", "env", "HOME=/home/" + d.User, "USER=" + d.User,
+		"bash", "-c", "cd " + quote(d.DocRoot()) + " && exec bash --rcfile <(printf '%s\\n' " + quote(rc) + ") -i"}
+}
+
+// RootShell is bash as root in /root with an [hs] prompt.
+func RootShell() []string {
+	ps1 := `\[\e[38;2;234;105;97m\][hs root]\[\e[0m\] \h:\w\# `
+	rc := `[ -r ~/.bashrc ] && . ~/.bashrc; PS1=` + quote(ps1)
+	return []string{"bash", "-c", "cd /root && exec bash --rcfile <(printf '%s\\n' " + quote(rc) + ") -i"}
 }

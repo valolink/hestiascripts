@@ -59,6 +59,8 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 	case ":":
 		m.openPalette()
 		return nil
+	case "!":
+		return m.shellHere()
 	case "?":
 		if m.scr == scrHelp {
 			m.scr = m.prev
@@ -413,4 +415,25 @@ func (m *model) recheckChecks(a action.Action, t action.Target) []check.Check {
 		}
 	}
 	return out
+}
+
+// shellHere opens a shell for what is on screen: the selected or open site
+// as its user in public_html, otherwise root. No confirmation box — a shell
+// is self-evident — but it is logged like any action.
+func (m *model) shellHere() tea.Cmd {
+	name := ""
+	switch m.scr {
+	case scrSite:
+		name = m.siteName
+	case scrSites:
+		if rows := m.siteRows(); m.cur().cursor < len(rows) {
+			name = rows[m.cur().cursor].Name
+		}
+	}
+	if d, ok := m.domain(name); ok {
+		a, _ := action.ByID("site.shell")
+		return m.start(a, action.Target{Domain: &d, Host: m.host})
+	}
+	a, _ := action.ByID("system.shell")
+	return m.start(a, action.Target{Host: m.host})
 }

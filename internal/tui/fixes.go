@@ -51,7 +51,7 @@ func (m *model) fixAction(f fix.Fix, subject string) (action.Action, action.Targ
 	env := m.env
 	a := action.Action{
 		ID: "fix." + f.ID, Title: f.Title, Site: f.Scope == "site", Mode: action.Stream,
-		Confirm: riskConfirm[f.Risk], Note: f.Note, Recheck: recheckFor[f.ID],
+		Confirm: riskConfirm[f.Risk], Note: f.Note, How: f.How, Undo: f.Undo, Recheck: recheckFor[f.ID],
 		Command: func(action.Target, string) []string { return argv },
 		Preview: func() ([]string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -65,11 +65,12 @@ func (m *model) fixAction(f fix.Fix, subject string) (action.Action, action.Targ
 			}
 			var out []string
 			for _, s := range steps {
-				line := "$ " + fix.Quote(s.Argv)
-				if s.Why != "" {
-					line = "# " + s.Why + "\n" + line
+				for _, w := range strings.Split(s.Why, "\n") {
+					if w != "" {
+						out = append(out, "# "+w)
+					}
 				}
-				out = append(out, strings.Split(line, "\n")...)
+				out = append(out, "$ "+fix.Quote(s.Argv))
 			}
 			return out, nil
 		},

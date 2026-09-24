@@ -8,6 +8,7 @@ import (
 
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/logcap"
 	"github.com/valolink/hestiascripts/internal/sys"
 )
 
@@ -90,9 +91,20 @@ func TestHTTP(t *testing.T) {
 }
 
 func TestDebug(t *testing.T) {
+	t.Setenv("HS_ETC_DIR", t.TempDir())
+	t.Setenv("HS_CRON_DIR", t.TempDir())
 	f := &sys.Fake{Files: map[string]string{dom.DocRoot() + "/wp-config.php": "<?php\ndefine( 'WP_DEBUG', true );\n"}}
-	if rs := checkDebug(&Env{Sys: f}, dom); rs[0].State != Warn {
-		t.Errorf("debug on: %+v", rs)
+	if rs := checkDebug(&Env{Sys: f}, dom); rs[0].State != Warn || !strings.Contains(rs[0].Summary, "shown to visitors") {
+		t.Errorf("debug on, display default: %+v", rs)
+	}
+	priv := "/home/alavus/web/alavusikkunat.fi/private/wp-debug.log"
+	f.Files[dom.DocRoot()+"/wp-config.php"] = "<?php\ndefine('WP_DEBUG', true);\ndefine('WP_DEBUG_DISPLAY', false);\ndefine( 'WP_DEBUG_LOG', '" + priv + "' );\n"
+	if rs := checkDebug(&Env{Sys: f}, dom); rs[0].State != Warn || !strings.Contains(rs[0].Summary, "not size-capped") {
+		t.Errorf("private but uncapped: %+v", rs)
+	}
+	logcap.Add(dom.Name, priv, "alavus", "50M")
+	if rs := checkDebug(&Env{Sys: f}, dom); rs[0].State != OK || !strings.Contains(rs[0].Summary, "by choice") {
+		t.Errorf("kept on deliberately: %+v", rs)
 	}
 	f.Files[dom.DocRoot()+"/wp-config.php"] = "<?php\n// define('WP_DEBUG', true);\ndefine('WP_DEBUG', false);\n"
 	if rs := checkDebug(&Env{Sys: f}, dom); rs[0].State != OK {

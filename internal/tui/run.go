@@ -223,6 +223,11 @@ func (m *model) execDone(msg execDoneMsg) tea.Cmd {
 	if msg.ev.ID != "" {
 		actlog.End(msg.ev, code, "")
 	}
+	if strings.HasSuffix(msg.act.ID, ".shell") {
+		// a shell's exit code is just the last command typed in it
+		m.setStatus("shell closed — session saved to the Log tab")
+		return nil
+	}
 	if only := m.recheckChecks(msg.act, msg.target); len(only) > 0 {
 		m.setStatus(fmt.Sprintf("%s %s; re-checking %d affected checks", msg.act.Title, res, len(only)))
 		return m.startRefresh(true, only)

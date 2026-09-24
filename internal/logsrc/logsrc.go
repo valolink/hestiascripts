@@ -89,6 +89,12 @@ func List(s sys.Sys) []Source {
 		} {
 			add(Source{Group: "Site " + d.Name, Name: f.name, Path: f.path})
 		}
+		// kept-on debug logs and anything else logged into private/
+		if priv, _ := s.Glob("/home/" + d.User + "/web/" + d.Name + "/private/*.log"); len(priv) > 0 {
+			for _, p := range priv {
+				add(Source{Group: "Site " + d.Name, Name: "private/" + filepath.Base(p), Path: p})
+			}
+		}
 		// WP_DEBUG_LOG pointed elsewhere (debug-log-config-tool: debug-<hash>.log)
 		if extra, _ := s.Glob(d.DocRoot() + "/wp-content/debug-*.log"); len(extra) > 0 {
 			for _, p := range extra {
