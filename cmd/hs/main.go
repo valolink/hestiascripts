@@ -16,9 +16,12 @@ import (
 
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/check/box"
+	"github.com/valolink/hestiascripts/internal/check/site"
 	"github.com/valolink/hestiascripts/internal/compat"
 	"github.com/valolink/hestiascripts/internal/serve"
+	"github.com/valolink/hestiascripts/internal/state"
 	"github.com/valolink/hestiascripts/internal/sys"
+	"github.com/valolink/hestiascripts/internal/tui"
 )
 
 // Set at build time: -ldflags "-X main.version=$(git describe --always --dirty)".
@@ -27,7 +30,8 @@ var version = "dev"
 const usage = `hs — HestiaCP server tool (phase 1: checks)
 
 Usage:
-  hs check [--json] [--brief] [--all] [--section NAME] [--save]
+  hs                       interactive dashboard (read-only)
+  hs check [--json] [--brief] [--all] [--sites] [--section NAME] [--save]
       Run every check and report what is not working. Read-only.
       Exit: 2 any fail · 1 any warn/unknown · 0 clean.
   hs compat health         JSON for EngineLink (v-server-health contract)
@@ -36,18 +40,28 @@ Usage:
                            token from HESTIA_STREAMER_TOKEN
   hs version
 
-Sections: ` + "security, backups, system, performance, web, mail, monitoring" + `
+Sections: ` + "security, backups, sites, system, performance, web, mail, monitoring" + `
 `
 
 func main() {
+	env := &check.Env{Sys: sys.Real{}, RepoDir: repoDir()}
 	if len(os.Args) < 2 {
-		fmt.Print(usage)
-		os.Exit(2)
+		if !isTTY() {
+			fmt.Print(usage)
+			os.Exit(2)
+		}
+		if os.Geteuid() != 0 {
+			fmt.Fprintln(os.Stderr, "hs: run as root — most probes need it")
+			os.Exit(2)
+		}
+		if err := tui.Run(env, version); err != nil {
+			fmt.Fprintln(os.Stderr, "hs:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-
-	env := &check.Env{Sys: sys.Real{}, RepoDir: repoDir()}
 
 	switch os.Args[1] {
 	case "check":
@@ -72,7 +86,8 @@ func cmdCheck(ctx context.Context, env *check.Env, args []string) int {
 	brief := fs.Bool("brief", false, "one line per box plus failures")
 	all := fs.Bool("all", false, "also list working and configured results")
 	section := fs.String("section", "", "only this section")
-	save := fs.Bool("save", false, "write results to "+statePath)
+	save := fs.Bool("save", false, "write results to "+state.Dir()+"/results.json (merged with what is there)")
+	sites := fs.Bool("sites", false, "also run the per-site checks (WP-CLI per WordPress site; slower)")
 	fs.Parse(args)
 
 	if os.Geteuid() != 0 {
@@ -83,6 +98,9 @@ func cmdCheck(ctx context.Context, env *check.Env, args []string) int {
 	}
 
 	checks := box.All()
+	if *sites || *section == "sites" {
+		checks = append(checks, site.All(env)...)
+	}
 	if *section != "" {
 		var sel []check.Check
 		for _, c := range checks {
@@ -108,7 +126,8 @@ func cmdCheck(ctx context.Context, env *check.Env, args []string) int {
 	host, _ := os.Hostname()
 
 	if *save {
-		if err := saveResults(host, shown, now); err != nil {
+		prev, _ := state.Load()
+		if err := state.Save(host, check.Merge(prev, shown), now); err != nil {
 			fmt.Fprintln(os.Stderr, "hs: could not save results:", err)
 		}
 	}
@@ -150,27 +169,6 @@ func cmdCompat(ctx context.Context, env *check.Env, args []string) int {
 	}
 	fmt.Println(string(b))
 	return 0
-}
-
-const statePath = "/var/lib/hs/results.json"
-
-func saveResults(host string, rs []check.Result, now time.Time) error {
-	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
-		return err
-	}
-	tmp := statePath + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if err := check.JSON(f, host, rs, now); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, statePath)
 }
 
 // repoDir is the hestiascripts checkout hs runs from (the binary lives in the

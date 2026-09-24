@@ -2,6 +2,7 @@ package check
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,5 +71,53 @@ func TestExitCode(t *testing.T) {
 		if got := ExitCode(c.rs, t0); got != c.want {
 			t.Errorf("case %d: exit %d, want %d", i, got, c.want)
 		}
+	}
+}
+
+func TestRunCachedReusesWithinMinInterval(t *testing.T) {
+	calls := 0
+	c := Check{ID: "restic", Section: "backups", Title: "R", MinInterval: 6 * time.Hour,
+		Run: func(context.Context, *Env) []Result { calls++; return []Result{New(OK, "fresh").For("alavus")} }}
+	f := &sys.Fake{Clock: t0}
+	env := &Env{Sys: f}
+	first := RunCached(context.Background(), env, []Check{c}, nil, false, nil)
+	f.Clock = t0.Add(time.Hour)
+	second := RunCached(context.Background(), env, []Check{c}, first, false, nil)
+	if calls != 1 || second[0].CheckedAt != t0 {
+		t.Fatalf("within interval: calls=%d at=%v", calls, second[0].CheckedAt)
+	}
+	RunCached(context.Background(), env, []Check{c}, first, true, nil)
+	if calls != 2 {
+		t.Errorf("force should probe: calls=%d", calls)
+	}
+	f.Clock = t0.Add(7 * time.Hour)
+	RunCached(context.Background(), env, []Check{c}, first, false, nil)
+	if calls != 3 {
+		t.Errorf("after interval should probe: calls=%d", calls)
+	}
+}
+
+func TestHeavyChecksAreLimited(t *testing.T) {
+	var cur, peak int32
+	var mu sync.Mutex
+	var cs []Check
+	for i := 0; i < 10; i++ {
+		cs = append(cs, Check{ID: "wp", Subject: string(rune('a' + i)), Heavy: true, Run: func(context.Context, *Env) []Result {
+			mu.Lock()
+			cur++
+			if cur > peak {
+				peak = cur
+			}
+			mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+			mu.Lock()
+			cur--
+			mu.Unlock()
+			return []Result{New(OK, "x")}
+		}})
+	}
+	rs := RunAll(context.Background(), &Env{Sys: &sys.Fake{Clock: t0}}, cs)
+	if len(rs) != 10 || peak > HeavyLimit {
+		t.Errorf("results %d, peak concurrency %d", len(rs), peak)
 	}
 }

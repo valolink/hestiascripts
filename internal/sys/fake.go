@@ -21,6 +21,7 @@ type Fake struct {
 	HTTP     map[string]FakeHTTP
 	Clock    time.Time
 	ModTimes map[string]time.Time
+	DNS      map[string][]string
 }
 
 type FakeCmd struct {
@@ -29,6 +30,21 @@ type FakeCmd struct {
 	Stderr string        // carried on the *ExitError
 	Err    error         // e.g. not found
 	Delay  time.Duration // honours ctx
+}
+
+func (f *Fake) HTTPLocal(ctx context.Context, url, _ string) (int, string, error) {
+	h, ok := f.HTTP["local "+url]
+	if !ok {
+		return 0, "", fs.ErrNotExist
+	}
+	return h.Status, h.Body, h.Err // Body doubles as the Location header
+}
+
+func (f *Fake) LookupHost(ctx context.Context, host string) ([]string, error) {
+	if ips, ok := f.DNS[host]; ok {
+		return ips, nil
+	}
+	return nil, fs.ErrNotExist
 }
 
 type FakeHTTP struct {

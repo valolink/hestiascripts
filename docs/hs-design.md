@@ -205,6 +205,26 @@ Found along the way:
 - **`v-server-health` builds the restic repo path wrong.** It concatenates `${RESTIC_REPO}${u}`; HestiaCP ≥ 1.10.4 stores `REPO` without the trailing slash (hzdemolink: `rclone:storagebox:hestia-hzhestia`), so it queries `…hestia-hzhestiavalolink`, fails, and reports the tarball age instead. hs joins as upstream does (`${REPO%/}/$user`). On a box where restic works, `hs compat health` will therefore report restic ages where the bash script reported tarball ages — confirm on a healthy restic box before swapping the wrapper in.
 - **Restic probes are Storage Box logins.** Every freshness check is one SSH session per enrolled user. Probes run with `--retries 1 --low-level-retries 1` so hs can never add to a login ban, but a 15-minute cron would still be ~4 logins/user/hour. Phase 3's state cache must refresh restic results on a long TTL (≈ 6 h) independently of the fast box checks.
 
+## Phases 2 and 3 — status (2026-09-24)
+
+**Phase 2 — `hs serve`** (`3ac873b`). `main.go`'s five handlers ported to `internal/serve` with the allowlist, token gate and SSE framing unchanged. Run on hzdemolink at `127.0.0.1:8092` beside the live streamer: `/execute` output, refusals, status codes, Netdata proxies and `v-server-health` over SSE all matched. One fix: an output line over 64 KiB used to stop the scanner with the pipe undrained, so the script blocked and `event: exit` never came. **Not yet swapped** into the `hestia-streamer` unit — that is the phase 5 deploy.
+
+**Phase 3 — read-only TUI** (`hs` with no arguments). Overview, Sites, a per-site screen and the section screens; keyboard only; detail pane with evidence / why / fix. Opens on `/var/lib/hs/results.json` (or `HS_STATE_DIR`), refreshes in the background — box checks first, then sites — and saves after each phase.
+
+Engine additions: `Check.MinInterval` (restic 6 h, WP core checksums 6 h, WP updates 1 h — `r` respects them, `R` forces), `Check.Heavy` (at most 3 WP-CLI bootstraps at once), `Result.Data` for table columns, `check.Merge` for partial refreshes.
+
+Site checks (`internal/check/site`), per domain of every user:
+
+- **answers** — requests the site from the domain's own IP on this box (nginx does not listen on 127.0.0.1), follows redirects that stay on the site's hostnames, flags loops; plus a DNS lookup, so a stale copy whose DNS moved to another server reads as *not live here* instead of as an outage.
+- **WordPress core** — `wp core verify-checksums`: added/altered files Fail, missing files Warn.
+- **updates** — `plugin list --skip-update-check` + the `update_core` transient, so the check never refreshes WordPress's own transients (a write). Fresh as WordPress's last check.
+- **debug** — `WP_DEBUG` on.
+- WP-CLI always runs as the site's user (`runuser`), never root.
+
+On hzdemolink (24 domains, 78 site checks, ~25 s cold, cached thereafter) the Sites view surfaced two WordPress installs that cannot reach their database (boostwith.ai, dev.boostwith.ai — the front page is a static index.html, so HTTP alone read fine), one with no tables (rainset.demolink.fi), a missing core `index.php` (chat.demolink.fi), a 403 front page (kotisivulinkki.fi), and a https↔http loop on a copy whose DNS points elsewhere (riverfinland.fi — visitors are fine).
+
+Deferred to phase 4: global `/` search across actions and sites (there are no actions yet to search).
+
 ## Open questions
 
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.

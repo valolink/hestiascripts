@@ -6,9 +6,11 @@ package sys
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -31,6 +33,12 @@ type Sys interface {
 	Now() time.Time
 	// HTTPGet fetches url with optional headers. Bounded by ctx.
 	HTTPGet(ctx context.Context, url string, headers map[string]string) (status int, body []byte, err error)
+	// HTTPLocal requests url from ip on this box with the URL's host as
+	// Host/SNI, no redirects followed, any certificate accepted — "does the
+	// site answer here", independent of DNS and CDN. Hestia's nginx listens
+	// on the domain's configured IP, not on 127.0.0.1.
+	HTTPLocal(ctx context.Context, url, ip string) (status int, location string, err error)
+	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
 // ExitError is a command that ran and exited non-zero.
@@ -109,4 +117,37 @@ func (Real) HTTPGet(ctx context.Context, url string, headers map[string]string) 
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	return resp.StatusCode, body, err
+}
+
+func (Real) HTTPLocal(ctx context.Context, url, ip string) (int, string, error) {
+	if ip == "" {
+		ip = "127.0.0.1"
+	}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, port, _ := net.SplitHostPort(addr)
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
+		},
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, // cert validity is its own check
+		DisableKeepAlives: true,
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("User-Agent", "hs (hestiascripts) site probe")
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, resp.Header.Get("Location"), nil
+}
+
+func (Real) LookupHost(ctx context.Context, host string) ([]string, error) {
+	return net.DefaultResolver.LookupHost(ctx, host)
 }

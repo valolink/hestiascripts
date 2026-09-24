@@ -17,7 +17,8 @@ import (
 func backupChecks() []Check {
 	return []Check{
 		{ID: "backups.setup", Section: "backups", Title: "Backup setup", Run: checkBackupSetup},
-		{ID: "backups.nightly", Section: "backups", Title: "Nightly backup", Timeout: 25 * time.Second, Run: checkNightly},
+		// Each restic probe is a Storage Box login per user: at most every 6 h.
+		{ID: "backups.nightly", Section: "backups", Title: "Nightly backup", Timeout: 25 * time.Second, MinInterval: 6 * time.Hour, Run: checkNightly},
 	}
 }
 
@@ -244,7 +245,8 @@ func checkNightly(ctx context.Context, env *Env) []Result {
 				r = New(Warn, fmt.Sprintf("newest backup is %dh old — last night's run missed it", hours(age))).Ev(ev).
 					Fixed("check /var/log/hestia/backup.log and the nightly cron")
 			default:
-				r = New(OK, fmt.Sprintf("%s snapshot %dh ago", bi.Source, hours(age))).Ev(ev).Valid(26 * time.Hour)
+				what := map[string]string{"restic": "restic snapshot", "tarball": "tarball", "home": "backup file"}[bi.Source]
+				r = New(OK, fmt.Sprintf("%s %dh ago", what, hours(age))).Ev(ev).Valid(26 * time.Hour)
 			}
 			if bi.Keyed && bi.Source != "restic" {
 				// A fresh tarball must not hide a broken restic enrolment.
@@ -256,6 +258,9 @@ func checkNightly(ctx context.Context, env *Env) []Result {
 					r.Fix = "check Storage Box reachability from this box (nc -vz <host> 23); refused from one IP only = a login ban"
 				}
 			}
+		}
+		if !bi.Nightly.IsZero() {
+			r = r.With("ageHours", fmt.Sprint(hours(now.Sub(bi.Nightly)))).With("source", bi.Source)
 		}
 		rs = append(rs, r.For(bi.User))
 

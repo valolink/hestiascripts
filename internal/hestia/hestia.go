@@ -87,6 +87,7 @@ func Users(s sys.Sys) []string {
 type Domain struct {
 	User    string
 	Name    string
+	IP      string // the address nginx listens on for this domain
 	Aliases []string
 	Proxy   string // nginx proxy template (PROXY)
 	Backend string // php-fpm pool template (BACKEND)
@@ -113,7 +114,7 @@ func WebDomains(s sys.Sys) []Domain {
 				continue
 			}
 			d := Domain{
-				User: u, Name: kv["DOMAIN"], Proxy: kv["PROXY"], Backend: kv["BACKEND"], Tpl: kv["TPL"],
+				User: u, Name: kv["DOMAIN"], IP: kv["IP"], Proxy: kv["PROXY"], Backend: kv["BACKEND"], Tpl: kv["TPL"],
 				SSL: kv["SSL"] == "yes", Suspend: kv["SUSPENDED"] == "yes",
 			}
 			if kv["ALIAS"] != "" {

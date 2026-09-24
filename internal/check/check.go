@@ -55,6 +55,8 @@ func (s *State) UnmarshalJSON(b []byte) error {
 // hiding it inside a roll-up.
 type Result struct {
 	ID        string        `json:"id"`
+	Check     string        `json:"check"`
+	Key       string        `json:"key"` // producing check's Key(): cache identity
 	Section   string        `json:"section"`
 	Title     string        `json:"title"`
 	Subject   string        `json:"subject,omitempty"`
@@ -65,6 +67,9 @@ type Result struct {
 	Fix       string        `json:"fix,omitempty"`
 	CheckedAt time.Time     `json:"checkedAt"`
 	TTL       time.Duration `json:"ttl,omitempty"`
+	// Data carries structured facts for display (WP version, update count,
+	// cert days) so screens do not parse summaries.
+	Data map[string]string `json:"data,omitempty"`
 }
 
 // Effective degrades an OK whose evidence has gone stale to Configured: it was
@@ -83,6 +88,16 @@ func (r Result) For(subject string) Result      { r.Subject = subject; return r 
 func (r Result) Because(why string) Result      { r.Why = why; return r }
 func (r Result) Fixed(fix string) Result        { r.Fix = fix; return r }
 func (r Result) Valid(ttl time.Duration) Result { r.TTL = ttl; return r }
+func (r Result) With(key, value string) Result {
+	m := make(map[string]string, len(r.Data)+1)
+	for k, v := range r.Data {
+		m[k] = v
+	}
+	m[key] = value
+	r.Data = m
+	return r
+}
+
 func (r Result) Ev(lines ...string) Result {
 	r.Evidence = append(append([]string{}, r.Evidence...), lines...)
 	return r
@@ -98,37 +113,102 @@ type Check struct {
 	ID      string
 	Section string
 	Title   string
+	Subject string        // default subject for results (per-site checks)
 	Timeout time.Duration // default 10s
-	Run     func(ctx context.Context, env *Env) []Result
+	// MinInterval: RunCached reuses results younger than this instead of
+	// probing again. For probes that cost something outside the box — restic
+	// is a Storage Box login, WP core checksums an api.wordpress.org call.
+	MinInterval time.Duration
+	// Heavy checks (WP-CLI bootstraps) run at most HeavyLimit at a time.
+	Heavy bool
+	Run   func(ctx context.Context, env *Env) []Result
 }
+
+// Key identifies a check instance across runs (ID plus default subject).
+func (c Check) Key() string {
+	if c.Subject == "" {
+		return c.ID
+	}
+	return c.ID + "@" + c.Subject
+}
+
+const HeavyLimit = 3
 
 const DefaultTimeout = 10 * time.Second
 
 // Sections in display order.
-var Sections = []string{"security", "backups", "system", "performance", "web", "mail", "monitoring"}
+var Sections = []string{"security", "backups", "sites", "system", "performance", "web", "mail", "monitoring"}
 
 // RunAll runs checks in parallel, each under its own deadline. A check that
 // times out or panics yields one Unknown result — a wedged daemon costs one
 // line, never the whole run.
 func RunAll(ctx context.Context, env *Env, checks []Check) []Result {
+	return RunCached(ctx, env, checks, nil, false, nil)
+}
+
+// RunCached is RunAll that reuses prev results for checks whose MinInterval
+// has not passed (unless force), and reports progress after each check.
+func RunCached(ctx context.Context, env *Env, checks []Check, prev []Result, force bool, progress func(done, total int)) []Result {
+	byKey := map[string][]Result{}
+	for _, r := range prev {
+		byKey[r.Key] = append(byKey[r.Key], r)
+	}
+	now := env.Sys.Now()
 	var (
-		mu  sync.Mutex
-		wg  sync.WaitGroup
-		out []Result
+		mu    sync.Mutex
+		wg    sync.WaitGroup
+		out   []Result
+		done  int
+		heavy = make(chan struct{}, HeavyLimit)
 	)
+	finish := func(res []Result) {
+		mu.Lock()
+		out = append(out, res...)
+		done++
+		d := done
+		mu.Unlock()
+		if progress != nil {
+			progress(d, len(checks))
+		}
+	}
 	for _, c := range checks {
+		if !force && c.MinInterval > 0 {
+			if old := reusable(byKey, c, now); old != nil {
+				finish(old)
+				continue
+			}
+		}
 		wg.Add(1)
 		go func(c Check) {
 			defer wg.Done()
-			res := runOne(ctx, env, c)
-			mu.Lock()
-			out = append(out, res...)
-			mu.Unlock()
+			if c.Heavy {
+				select {
+				case heavy <- struct{}{}:
+					defer func() { <-heavy }()
+				case <-ctx.Done():
+					finish(nil)
+					return
+				}
+			}
+			finish(runOne(ctx, env, c))
 		}(c)
 	}
 	wg.Wait()
 	Sort(out)
 	return out
+}
+
+func reusable(byKey map[string][]Result, c Check, now time.Time) []Result {
+	old := byKey[c.Key()]
+	if len(old) == 0 {
+		return nil
+	}
+	for _, r := range old {
+		if now.Sub(r.CheckedAt) > c.MinInterval || r.State == Unknown {
+			return nil
+		}
+	}
+	return old
 }
 
 func runOne(parent context.Context, env *Env, c Check) (res []Result) {
@@ -143,7 +223,10 @@ func runOne(parent context.Context, env *Env, c Check) (res []Result) {
 	stamp := func(rs []Result) []Result {
 		for i := range rs {
 			r := &rs[i]
-			r.Section, r.Title, r.CheckedAt = c.Section, c.Title, now
+			r.Section, r.Title, r.CheckedAt, r.Check, r.Key = c.Section, c.Title, now, c.ID, c.Key()
+			if r.Subject == "" {
+				r.Subject = c.Subject
+			}
 			r.ID = c.ID
 			if r.Subject != "" {
 				r.ID = c.ID + ":" + r.Subject
@@ -213,4 +296,21 @@ func ExitCode(rs []Result, now time.Time) int {
 		return 1
 	}
 	return 0
+}
+
+// Merge replaces, per check key, the results in base with those in fresh —
+// so a partial refresh (sites only, one section) updates a full snapshot.
+func Merge(base, fresh []Result) []Result {
+	replaced := map[string]bool{}
+	for _, r := range fresh {
+		replaced[r.Key] = true
+	}
+	out := append([]Result{}, fresh...)
+	for _, r := range base {
+		if !replaced[r.Key] {
+			out = append(out, r)
+		}
+	}
+	Sort(out)
+	return out
 }
