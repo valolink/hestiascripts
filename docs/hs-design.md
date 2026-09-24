@@ -247,6 +247,35 @@ Tested on hzdemolink (tmux-hosted session): site report streamed live with exit/
 
 Only read-only actions were run on hzdemolink; the write paths are covered by the same runner and by tests, not yet exercised on a box.
 
+## Fixes — findings resolve where they are found (2026-09-24)
+
+Reima's test for phase 4: "can I fix stuff easily from here — like moving the *.sql files out of every public_html?" Before this, 10 of 37 checks had no action, and most others pointed at a generic menu that threw away what the finding already knew.
+
+`internal/fix`: a fix belongs to a check, plans from the **live box** at the moment it is opened (rescans; never trusts stored evidence), and produces a list of plain commands with a reason each. The TUI shows that list on the plan screen; `hs fix <id> [subject]` prints each command before running it; `--dry-run` prints the plan. One planner for preview and execution — what is approved is what runs. Logged like any action; affected checks re-run.
+
+Reversible by default — files are moved, never deleted: dumps and debug logs to the site's own `private/hs-moved-<date>/` (outside the web root, inside the account and open_basedir, owned by the site user); suspicious PHP and stray core files to `/root/hs-quarantine/<date>/<domain>/<original path>` (root-only). `mv -n` never overwrites.
+
+| Check | Fix |
+|---|---|
+| web.exposure (dumps) | move to private/ — per site, or every site at once |
+| web.exposure (debug.log) | WP_DEBUG false, then move the log to private/ |
+| site.debug | WP_DEBUG false |
+| web.uploads-php | quarantine the files |
+| site.core | quarantine added files, re-download the same core version (typed confirm) |
+| redis.sites | WP_REDIS_DISABLE_GROUP_FLUSH + WP_REDIS_MAXTTL |
+| web.template-usage (now one result per domain) | switch to wp-secure / wp-rocket |
+| web.ssl | Let's Encrypt |
+| hestia.services | clear that key |
+| mail.delivery (postfix down) | start, flush, status |
+| netdata (19999 open) | delete that firewall rule |
+| systemd.failed | diagnosis: status + journal per unit |
+| backups.nightly (restic unreachable) | diagnosis: TCP to the Storage Box port |
+| site.http (no answer) | enter opens the site's error log |
+
+Everyday site actions added: shell in the docroot as the site's user, PHP version picker (`hs site-php`), suspend / unsuspend, `v-dump-site` for local dev.
+
+Checked on hzdemolink with dry runs (32-step move across 13 sites; core restore for chat.demolink.fi's missing index.php; firewall rule 11 = 19999 open to 0.0.0.0/0) and two real read-only diagnoses — which showed the Storage Box reachable again (the login ban has lifted) and hestia-web-terminal crash-looping since 2026-09-15. No change fix has been run on a box yet.
+
 ## Open questions
 
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.

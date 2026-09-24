@@ -161,12 +161,8 @@ func TestTemplateUsage(t *testing.T) {
 		hestia.UsersDir + "/u/web.conf": "DOMAIN='a.fi' PROXY='wp-rocket'\nDOMAIN='b.fi' PROXY='default'\n",
 	}}
 	rs := checkTemplateUsage(context.Background(), env(f))
-	if states(rs) != "warn" || !strings.Contains(strings.Join(rs[0].Evidence, " "), "b.fi (default)") {
-		t.Errorf("one bare domain: %v", rs)
-	}
-	f.Files[hestia.UsersDir+"/u/web.conf"] = "DOMAIN='b.fi' PROXY='default'\n"
-	if rs := checkTemplateUsage(context.Background(), env(f)); states(rs) != "fail" {
-		t.Errorf("all bare: %s", states(rs))
+	if states(rs) != "warn" || rs[0].Subject != "b.fi" {
+		t.Errorf("one bare domain, as its own result: %v", rs)
 	}
 }
 

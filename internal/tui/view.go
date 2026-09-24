@@ -405,6 +405,9 @@ func (m *model) runDetail(r actlog.Run) string {
 }
 
 func actionMark(a action.Action) string {
+	if strings.HasPrefix(a.ID, "fix.") {
+		return stateStyle(check.Warn).Render("⚑")
+	}
 	if a.Mode == action.Interactive {
 		return sAcc.Render("▸")
 	}
@@ -433,8 +436,12 @@ func (m *model) actionDetail(a action.Action) string {
 	}
 	if !(a.NeedsRepo && m.env.RepoDir == "") {
 		b.WriteString(sAcc.Render("$ ") + wrap(a.Plan(t, m.env.RepoDir), m.width-4) + "\n")
-		for _, l := range action.Describe(a, t, m.env.RepoDir) {
-			b.WriteString(sDim.Render("│ "+l) + "\n")
+		if a.Preview != nil {
+			b.WriteString(sDim.Render("enter plans it against the box now and shows every file and command before asking") + "\n")
+		} else {
+			for _, l := range action.Describe(a, t, m.env.RepoDir) {
+				b.WriteString(sDim.Render("│ "+l) + "\n")
+			}
 		}
 	}
 	return b.String()
@@ -469,7 +476,14 @@ func (m *model) detail(r check.Result) string {
 	if r.Why != "" && st != check.OK {
 		b.WriteString(wrap(r.Why, m.width-2) + "\n")
 	}
-	if id, ok := action.ForCheck[r.Check]; ok && st != check.OK {
+	if fs := m.fixesFor(r); len(fs) > 0 && st != check.OK {
+		b.WriteString(sAcc.Render("⏎ ") + sBold.Render(fs[0].Title) + sDim.Render("  (enter shows exactly what it will do first)") + "\n")
+		for _, f := range fs[1:] {
+			b.WriteString(sDim.Render("  also: "+f.Title+" — in the Actions pane") + "\n")
+		}
+	} else if r.Check == "site.http" && st >= check.Warn {
+		b.WriteString(sAcc.Render("⏎ ") + sBold.Render("Open the site's error log") + "\n")
+	} else if id, ok := action.ForCheck[r.Check]; ok && st != check.OK {
 		if a, ok := action.ByID(id); ok {
 			b.WriteString(sAcc.Render("⏎ ") + sBold.Render(a.Title) + sDim.Render("  (enter shows what it does first)") + "\n")
 		}
@@ -611,13 +625,26 @@ func (m *model) confirmView() string {
 	}
 	b.WriteString(sAcc.Render("$ ") + wrap(a.Plan(p.target, m.env.RepoDir), w-6) + "\n")
 	desc := action.Describe(a, p.target, m.env.RepoDir)
+	label := "What it does, from its source:"
+	if a.Preview != nil {
+		label, desc = "What it will do on this box, step by step (planned just now):", p.preview
+		if p.previewErr != nil {
+			desc = []string{"cannot plan: " + p.previewErr.Error()}
+		}
+	}
 	if len(desc) > 0 {
+		// Wrap, never truncate: the point is to see the whole command.
+		var wrapped []string
+		for _, d := range desc {
+			wrapped = append(wrapped, strings.Split(ansi.Hardwrap(d, w-8, true), "\n")...)
+		}
+		desc = wrapped
 		room := max(m.height/2-8, 4)
 		off := min(m.confirmOff, max(len(desc)-room, 0))
 		m.confirmOff = off
-		b.WriteString(sDim.Render("What it does, from its source:") + "\n")
+		b.WriteString(sDim.Render(label) + "\n")
 		for i := off; i < len(desc) && i < off+room; i++ {
-			b.WriteString(sDim.Render("│ "+trunc(desc[i], w-8)) + "\n")
+			b.WriteString(sDim.Render("│ "+desc[i]) + "\n")
 		}
 		if len(desc) > room {
 			b.WriteString(sDim.Render(fmt.Sprintf("│ (%d–%d of %d · ctrl+e/ctrl+y scroll)", off+1, min(off+room, len(desc)), len(desc))) + "\n")

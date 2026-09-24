@@ -118,9 +118,11 @@ type list struct {
 
 // pendingAction is an action waiting for confirmation.
 type pendingAction struct {
-	act    action.Action
-	target action.Target
-	typed  string
+	act        action.Action
+	target     action.Target
+	typed      string
+	preview    []string // fixes: computed from the live box when opened
+	previewErr error
 }
 
 type model struct {
@@ -460,6 +462,7 @@ func (m *model) actionRows() []action.Action {
 			acts = action.ForSite(isWP(m.env, d))
 		}
 	}
+	acts = append(m.fixesHere(), acts...)
 	l := m.lists[m.listKey()]
 	if l == nil || l.filter == "" {
 		return acts

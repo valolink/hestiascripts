@@ -30,11 +30,17 @@ func TestEveryActionBuildsAndDescribes(t *testing.T) {
 		if plan := a.Plan(tg, repo); plan == "" {
 			t.Errorf("%s: empty plan", a.ID)
 		}
+		// Commands whose source is in the repo must describe themselves from
+		// it; stock Hestia binaries and inline commands carry a Note instead.
 		desc := Describe(a, tg, repo)
-		stock := strings.Contains(a.Plan(tg, repo), "v-add-letsencrypt") || strings.Contains(a.Plan(tg, repo), "v-purge-nginx") ||
-			strings.Contains(a.Plan(tg, repo), "v-update-sys-hestia") || strings.HasPrefix(a.Plan(tg, repo), "mailq")
-		if len(desc) == 0 && !stock {
-			t.Errorf("%s: no description from source", a.ID)
+		if len(desc) == 0 && a.Note == "" {
+			t.Errorf("%s: neither a source description nor a note", a.ID)
+		}
+		argv := a.Command(tg, repo)
+		if name := strings.TrimPrefix(argv[0], bin); name != argv[0] {
+			if _, err := os.Stat(filepath.Join(repo, name+".sh")); err == nil && len(desc) == 0 {
+				t.Errorf("%s: repo script %s has no header or usage text", a.ID, name)
+			}
 		}
 	}
 	for chk, id := range ForCheck {

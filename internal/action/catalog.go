@@ -45,6 +45,30 @@ func siteActions() []Action {
 			Command: func(t Target, _ string) []string {
 				return []string{bin + "v-add-letsencrypt-domain", t.Domain.User, t.Domain.Name}
 			}},
+		{ID: "site.shell", Title: "Shell in the docroot as the site's user", Site: true, Mode: Interactive, Confirm: ConfirmNone,
+			Note: "bash in public_html as the site's own user — wp-cli works as-is, files keep the right owner. exit returns here.",
+			Command: func(t Target, _ string) []string {
+				return []string{"runuser", "-u", t.Domain.User, "--", "env", "HOME=/home/" + t.Domain.User,
+					"bash", "-c", "cd " + quote(t.Domain.DocRoot()) + " && exec bash -i"}
+			}},
+		{ID: "site.php", Title: "Switch PHP version / pool template…", Site: true, Mode: Interactive, Confirm: ConfirmNone,
+			Note:    "Lists Hestia's backend templates with the current one marked, shows the exact command, asks before changing.",
+			Recheck: []string{"site.http", "services.idle"},
+			Command: func(t Target, _ string) []string { return []string{selfExe(), "site-php", t.Domain.Name} }},
+		{ID: "site.suspend", Title: "Suspend the site", Site: true, Mode: Stream, Confirm: ConfirmTyped,
+			Note:    "Visitors get Hestia's suspended page; files and database stay. Unsuspend restores it.",
+			Recheck: []string{"site.http"},
+			Command: func(t Target, _ string) []string {
+				return []string{bin + "v-suspend-web-domain", t.Domain.User, t.Domain.Name}
+			}},
+		{ID: "site.unsuspend", Title: "Unsuspend the site", Site: true, Mode: Stream, Confirm: ConfirmYes,
+			Note: "Stock v-unsuspend-web-domain: the site serves normally again.", Recheck: []string{"site.http"},
+			Command: func(t Target, _ string) []string {
+				return []string{bin + "v-unsuspend-web-domain", t.Domain.User, t.Domain.Name}
+			}},
+		{ID: "site.dump", Title: "Dump the site (files + database) for local dev", Site: true, Mode: Stream, Confirm: ConfirmYes,
+			Note:    "Stock v-dump-site: a zip in /backup, removed again after an hour. The last lines name the file.",
+			Command: func(t Target, _ string) []string { return []string{bin + "v-dump-site", t.Domain.User, t.Domain.Name} }},
 		{ID: "site.wp-config", Title: "Edit wp-config constants", Site: true, WPOnly: true, Mode: Interactive, Confirm: ConfirmNone,
 			Note: "Interactive: lists defines, then add or change them.", Recheck: []string{"site.debug", "redis.sites"},
 			Command: siteScript("v-wp-config")},

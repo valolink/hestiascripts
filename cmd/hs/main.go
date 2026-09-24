@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,8 @@ import (
 	"github.com/valolink/hestiascripts/internal/check/box"
 	"github.com/valolink/hestiascripts/internal/check/site"
 	"github.com/valolink/hestiascripts/internal/compat"
+	"github.com/valolink/hestiascripts/internal/fix"
+	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/serve"
 	"github.com/valolink/hestiascripts/internal/state"
 	"github.com/valolink/hestiascripts/internal/sys"
@@ -38,6 +41,9 @@ Usage:
   hs compat setup-status   JSON for EngineLink (v-server-setup-status contract)
   hs serve [--addr :8091]  the streamer EngineLink talks to (replaces hestia-streamer);
                            token from HESTIA_STREAMER_TOKEN
+  hs fix ID [SUBJECT] [--dry-run]
+                           plan a fix from the live box, print each command, run it
+  hs fix --list            every fix and the check it resolves
   hs version
 
 Sections: ` + "security, backups, sites, system, performance, web, mail, monitoring" + `
@@ -70,6 +76,10 @@ func main() {
 		os.Exit(cmdCompat(ctx, env, os.Args[2:]))
 	case "serve":
 		os.Exit(cmdServe(os.Args[2:]))
+	case "fix":
+		os.Exit(cmdFix(ctx, env, os.Args[2:]))
+	case "site-php":
+		os.Exit(cmdSitePHP(ctx, env, os.Args[2:]))
 	case "version", "--version":
 		fmt.Println("hs", version)
 	case "help", "-h", "--help":
@@ -223,5 +233,148 @@ func cmdServe(args []string) int {
 		fmt.Fprintln(os.Stderr, "hs serve:", err)
 		return 1
 	}
+	return 0
+}
+
+// cmdFix plans a fix from the live box and runs it step by step, printing
+// every command before it runs. --dry-run prints the plan only (the TUI's
+// preview uses the same planner). Stops at the first failing step, except
+// for read-only diagnoses, which run every step.
+func cmdFix(ctx context.Context, env *check.Env, args []string) int {
+	var pos []string
+	dry := false
+	for _, a := range args {
+		switch a {
+		case "--dry-run", "-n":
+			dry = true
+		case "--list":
+			for _, f := range fix.All() {
+				fmt.Printf("%-18s %-20s %s\n", f.ID, f.Check, f.Title)
+			}
+			return 0
+		default:
+			pos = append(pos, a)
+		}
+	}
+	if len(pos) == 0 {
+		fmt.Fprintln(os.Stderr, "hs fix: which fix? (hs fix --list)")
+		return 2
+	}
+	f, ok := fix.ByID(pos[0])
+	if !ok {
+		fmt.Fprintf(os.Stderr, "hs fix: no fix %q (hs fix --list)\n", pos[0])
+		return 2
+	}
+	subject := ""
+	if len(pos) > 1 {
+		subject = pos[1]
+	}
+	if f.Scope == "site" && subject == "" {
+		fmt.Fprintln(os.Stderr, "hs fix: "+f.ID+" needs a domain")
+		return 2
+	}
+	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	steps, err := f.Plan(pctx, env, subject)
+	cancel()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hs fix:", err)
+		return 1
+	}
+	fmt.Printf("# %s%s\n", f.Title, map[bool]string{true: " — " + subject, false: ""}[subject != ""])
+	if len(steps) == 0 {
+		fmt.Println("# nothing to do: the box no longer has what this fix resolves")
+		return 0
+	}
+	failed := 0
+	for i, st := range steps {
+		if st.Why != "" {
+			fmt.Printf("\n# %d/%d %s\n", i+1, len(steps), st.Why)
+		}
+		fmt.Println("$ " + fix.Quote(st.Argv))
+		if dry {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, st.Argv[0], st.Argv[1:]...)
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stdout
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("! %v\n", err)
+			failed++
+			if f.Risk != fix.ReadOnly {
+				fmt.Printf("\n# stopped after step %d of %d; nothing after it ran\n", i+1, len(steps))
+				return 1
+			}
+		}
+	}
+	if dry {
+		fmt.Printf("\n# dry run: %d step(s), nothing ran\n", len(steps))
+		return 0
+	}
+	if failed > 0 {
+		return 1
+	}
+	fmt.Printf("\n# done: %d step(s)\n", len(steps))
+	return 0
+}
+
+// cmdSitePHP lists backend (PHP-FPM pool) templates, marks the current one,
+// shows the exact command and asks before switching.
+func cmdSitePHP(ctx context.Context, env *check.Env, args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: hs site-php DOMAIN")
+		return 2
+	}
+	var d hestia.Domain
+	for _, x := range hestia.WebDomains(env.Sys) {
+		if x.Name == args[0] {
+			d = x
+		}
+	}
+	if d.Name == "" {
+		fmt.Fprintln(os.Stderr, "hs: no web domain", args[0])
+		return 1
+	}
+	out, err := env.Sys.Run(ctx, "/usr/local/hestia/bin/v-list-web-templates-backend", "plain")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hs: v-list-web-templates-backend:", err)
+		return 1
+	}
+	var tpls []string
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) > 0 {
+			tpls = append(tpls, f[0])
+		}
+	}
+	fmt.Printf("\n  %s (user %s) — PHP-FPM pool template\n\n", d.Name, d.User)
+	for i, t := range tpls {
+		mark := "  "
+		if t == d.Backend {
+			mark = "▸ "
+		}
+		fmt.Printf("  %s%2d) %s\n", mark, i+1, t)
+	}
+	fmt.Print("\n  Number (enter cancels): ")
+	var in string
+	fmt.Scanln(&in)
+	n := 0
+	fmt.Sscanf(in, "%d", &n)
+	if n < 1 || n > len(tpls) {
+		fmt.Println("  Cancelled — nothing changed.")
+		return 0
+	}
+	argv := []string{"/usr/local/hestia/bin/v-change-web-domain-backend-tpl", d.User, d.Name, tpls[n-1]}
+	fmt.Printf("\n  $ %s\n  Run it? [y/N] ", fix.Quote(argv))
+	in = ""
+	fmt.Scanln(&in)
+	if in != "y" && in != "Y" {
+		fmt.Println("  Cancelled — nothing changed.")
+		return 0
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stdout
+	if err := cmd.Run(); err != nil {
+		fmt.Println("  !", err)
+		return 1
+	}
+	fmt.Printf("  %s now uses %s.\n", d.Name, tpls[n-1])
 	return 0
 }

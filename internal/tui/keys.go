@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/valolink/hestiascripts/internal/action"
@@ -265,7 +267,12 @@ func (m *model) enter() tea.Cmd {
 		}
 	case m.pane == paneActions:
 		if acts := m.actionRows(); l.cursor < len(acts) {
-			m.ask(acts[l.cursor], m.targetForScreen())
+			a := acts[l.cursor]
+			if strings.HasPrefix(a.ID, "fix.") {
+				m.ask(a, m.fixTarget(a))
+			} else {
+				m.ask(a, m.targetForScreen())
+			}
 		}
 	default:
 		rows := m.resultRows()
@@ -273,6 +280,15 @@ func (m *model) enter() tea.Cmd {
 			return nil
 		}
 		r := rows[l.cursor]
+		if fs := m.fixesFor(r); len(fs) > 0 {
+			m.ask(fs[0], m.fixTarget(fs[0]))
+			return nil
+		}
+		if r.Check == "site.http" && r.Effective(m.now()) >= check.Warn {
+			if src, ok := m.errorLogFor(r.Subject); ok {
+				return m.openLog(src)
+			}
+		}
 		id, ok := action.ForCheck[r.Check]
 		if !ok {
 			// A site result opens its site; others have no single fix.
@@ -325,6 +341,9 @@ func (m *model) ask(a action.Action, t action.Target) {
 	}
 	m.confirming = &pendingAction{act: a, target: t}
 	m.confirmOff = 0
+	if a.Preview != nil {
+		m.confirming.preview, m.confirming.previewErr = a.Preview()
+	}
 }
 
 func (m *model) confirmKey(k tea.KeyMsg) tea.Cmd {

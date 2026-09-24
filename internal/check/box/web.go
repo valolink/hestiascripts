@@ -107,21 +107,16 @@ func checkTemplateUsage(ctx context.Context, env *Env) []Result {
 	if len(doms) == 0 {
 		return []Result{New(NA, "no web domains")}
 	}
-	var bare []string
+	var rs []Result
 	for _, d := range doms {
 		if !hardenedProxy[d.Proxy] {
-			bare = append(bare, fmt.Sprintf("%s (%s)", d.Name, orDash(d.Proxy)))
+			rs = append(rs, New(Warn, "on the unhardened proxy template "+orDash(d.Proxy)).For(d.Name).
+				Because("None of the deny rules (dumps, logs, xmlrpc, PHP in uploads) apply to it, whatever is installed.").
+				Fixed("v-change-web-domain-proxy-tpl "+d.User+" "+d.Name+" wp-secure   # or wp-rocket for WP Rocket sites"))
 		}
 	}
-	if len(bare) > 0 {
-		state := Warn
-		if len(bare) == len(doms) {
-			state = Fail
-		}
-		return []Result{New(state, fmt.Sprintf("%d of %d domains on an unhardened proxy template", len(bare), len(doms))).
-			Ev(bare...).
-			Because("They get none of the deny rules (dumps, logs, xmlrpc, PHP in uploads) regardless of what is installed.").
-			Fixed("v-change-web-domain-proxy-tpl <user> <domain> wp-secure   # or wp-rocket for WP Rocket sites")}
+	if len(rs) > 0 {
+		return rs
 	}
 	return []Result{New(Configured, fmt.Sprintf("all %d domains on a hardened proxy template", len(doms)))}
 }

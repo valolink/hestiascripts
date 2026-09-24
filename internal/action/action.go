@@ -64,6 +64,9 @@ type Action struct {
 	Recheck []string
 	// Command builds argv. repo is the hestiascripts checkout.
 	Command func(t Target, repo string) []string
+	// Preview, when set, computes what will happen from the live box (fixes:
+	// the exact files and commands). Shown instead of the source description.
+	Preview func() ([]string, error)
 	// DescribeFrom: repo-relative script to describe when the command is a
 	// wrapper around it (e.g. a pipeline).
 	DescribeFrom string
@@ -294,3 +297,11 @@ func setupFile(repo, fn string) string {
 }
 
 func isSetupFn(argv []string) bool { _, ok := setupFnName(argv); return ok }
+
+// selfExe is the running hs binary, for actions implemented as hs subcommands.
+func selfExe() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return "hs"
+}
