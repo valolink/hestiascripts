@@ -225,6 +225,28 @@ On hzdemolink (24 domains, 78 site checks, ~25 s cold, cached thereafter) the Si
 
 Deferred to phase 4: global `/` search across actions and sites (there are no actions yet to search).
 
+## Phase 4 — status (2026-09-24)
+
+**Actions** (`internal/action`): ~45 actions wrapping the existing v-scripts, root-shell scripts and every `run.sh` menu function — the done-criterion "everything reachable from hs" is met. Per site (every domain): report, update preview/update, cache flush, permissions, revisions preview/clean, Redis, valolink-plugin, DB export, nginx purge, Let's Encrypt, wp-config editor, clone, staging, restore and restore rehearsal. Per tab: backup guard, hourly DB dry-run, restore, restic onboarding, DR-script check/generate; fail2ban, maldet, hardening, package updates, Hestia update; Redis, PHP-FPM, OpCache, MariaDB, memory audit; templates, cache headers; SMTP, mail queue; Netdata, deploy, WP-CLI; disk cleanup, service removal, apt repos, file-manager fix, safe reboot.
+
+**Transparency over convenience, but no friction** (Reima, 2026-09-24: "I want to know what an action does and see in real time what's happening"):
+
+- Nothing runs unseen: the plan screen shows the one-line note, the exact command, and **what the script says it does, read from its own source** (header comment, usage heredoc, or the setup/ menu's options) — it cannot drift from what runs.
+- Friction scales with risk only: read-only → enter; changes → `y`; destructive → type the site or host name.
+- Streamed actions show output live; interactive ones get the real terminal (`tea.ExecProcess`) — the old menus run unchanged.
+- Afterwards the checks the action affects re-run, and the viewer appends each one's before → after state.
+- Stopping a running action takes ctrl+c twice (SIGTERM to its process group).
+
+**Action log** (`internal/actlog`, `/var/log/hs/`, root-only 700/600): `actions.jsonl` gets a start event (who — SUDO_USER or login@SSH client —, when, action, target, the exact command, mode) before anything runs and an end event with the exit code; `runs/<date>/<id>.log` holds the full transcript. Streamed output is teed; interactive sessions are recorded with `script(1)` (prompts included; input typed with echo off never reaches the file). A run with no end event shows as interrupted.
+
+**Log tab** (`v`): hs actions (newest first, enter opens the transcript) ⇄ **Server logs** — every log present on the box: syslog, kernel, apt, unattended-upgrades, auth, fail2ban, maldet, Hestia's panel/error/backup/auth logs, nginx/apache, mail, MariaDB, Redis, PHP-FPM, journal units (streamer, cron, netdata, postfix), and per domain its nginx/apache access and error logs and WordPress debug logs. Reads are tail-bounded (last 5 000 lines, ≤ 32 MiB read from the end) — alavus had a 7.3 GB debug.log. `/` filters lines, `G` follows.
+
+**Keys** — nvim-flavoured (Reima's request): ctrl+h / ctrl+l tabs; H / L panes inside a tab (Checks ⇄ Actions; on Log: hs actions ⇄ Server logs); j/k with counts, gg, G, 12G; ctrl+d/u/f/b; ctrl+e/y scroll the detail pane and the plan box; l/enter in, h/esc back; [ ] previous/next site; / filter; `:` palette (fuzzy over every action, site, log and tab; `:q`). Multi-character key events (tmux, pastes, fast typing) are replayed key by key so counts survive.
+
+Tested on hzdemolink (tmux-hosted session): site report streamed live with exit/duration; the Fail2ban menu handed the terminal and returned, re-checked, logged with its transcript; Server logs listed, fail2ban.log filtered to its bans. Fixed there: `script(1)` created transcripts world-readable (now pre-created 0600, appended), "3j" arriving as one event, setup/ plans unreadable (now summarised on screen, exact in the log). Found: `v-wp-info` prints blank fields and exits 0 when the site's database is unreachable.
+
+Only read-only actions were run on hzdemolink; the write paths are covered by the same runner and by tests, not yet exercised on a box.
+
 ## Open questions
 
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.

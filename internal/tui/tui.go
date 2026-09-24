@@ -1,8 +1,13 @@
-// Package tui is hs's interactive dashboard (phase 3: read-only).
+// Package tui is hs's interactive dashboard.
 //
 // It opens on the saved results instantly, then refreshes in the background:
 // box checks first (seconds), per-site checks after (WP-CLI, bounded by the
-// engine's heavy limit). Keyboard only, one key per section.
+// engine's heavy limit). Every tab has a Checks pane and, where there is
+// something to do, an Actions pane; actions show their exact command, ask
+// for confirmation, run, and re-run the checks they affect.
+//
+// Keys follow nvim: ctrl+h/l between tabs, H/L between panes inside a tab,
+// counts, gg/G, ctrl+d/u/f/b/e/y, / to filter, : for the palette.
 package tui
 
 import (
@@ -14,10 +19,15 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"fmt"
+
+	"github.com/valolink/hestiascripts/internal/action"
+	"github.com/valolink/hestiascripts/internal/actlog"
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/check/box"
 	"github.com/valolink/hestiascripts/internal/check/site"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/logsrc"
 	"github.com/valolink/hestiascripts/internal/state"
 )
 
@@ -26,6 +36,9 @@ func Run(env *check.Env, version string) error {
 	host, _ := os.Hostname()
 	m := newModel(env, host, version)
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
+	if m.run != nil && m.run.cmd != nil && m.run.cmd.Process != nil && !m.run.done {
+		m.run.cmd.Process.Kill()
+	}
 	return err
 }
 
@@ -37,6 +50,8 @@ const (
 	scrSite
 	scrSection
 	scrHelp
+	scrRun
+	scrLog
 )
 
 type section struct {
@@ -55,9 +70,32 @@ var sections = []section{
 	{"y", "system", "System"},
 }
 
+// tabOrder is the ctrl+h / ctrl+l ring.
+var tabOrder = func() []string {
+	t := []string{"o", "s"}
+	for _, s := range sections {
+		t = append(t, s.key)
+	}
+	return append(t, "v")
+}()
+
+type pane int
+
+const (
+	paneChecks pane = iota
+	paneActions
+)
+
 type list struct {
 	cursor, offset int
 	filter         string
+}
+
+// pendingAction is an action waiting for confirmation.
+type pendingAction struct {
+	act    action.Action
+	target action.Target
+	typed  string
 }
 
 type model struct {
@@ -67,15 +105,29 @@ type model struct {
 
 	results   []check.Result
 	domains   []hestia.Domain
-	loadedAt  time.Time
 	refreshed time.Time
 
-	scr, prev screen
-	sectionID string
-	siteName  string
-	showAll   bool
-	lists     map[string]*list
-	filtering bool
+	scr, prev  screen
+	sectionID  string
+	siteName   string
+	pane       pane
+	showAll    bool
+	lists      map[string]*list
+	filtering  bool
+	count      int  // vim count prefix
+	pendingG   bool // first g of gg
+	detailOff  int  // ctrl+e / ctrl+y
+	confirming *pendingAction
+	palette    *palette
+	run        *run
+	confirmOff int // scroll in the confirmation box
+
+	logRuns    []actlog.Run
+	logSources []logsrc.Source
+
+	// the run whose re-checks are in flight: results before, to report changes
+	recheckRun    *run
+	recheckBefore map[string]check.Result
 
 	refreshing bool
 	phase      string
@@ -85,18 +137,21 @@ type model struct {
 
 	width, height int
 	status        string
+	statusAt      time.Time
 }
 
 func newModel(env *check.Env, host, version string) *model {
 	rs, at := state.Load()
 	return &model{
 		env: env, host: host, version: version,
-		results: rs, loadedAt: at, refreshed: at,
+		results: dropNA(rs), refreshed: at,
 		domains: hestia.WebDomains(env.Sys),
 		lists:   map[string]*list{},
 		width:   100, height: 30,
 	}
 }
+
+func (m *model) setStatus(s string) { m.status, m.statusAt = s, time.Now() }
 
 // --- messages ----------------------------------------------------------------
 
@@ -115,12 +170,13 @@ func tick() tea.Cmd {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.startRefresh(false), tick())
+	return tea.Batch(m.startRefresh(false, nil), tick())
 }
 
-// startRefresh runs box then site checks in a goroutine, feeding progress and
-// results back through m.events. Results are merged and saved per phase.
-func (m *model) startRefresh(force bool) tea.Cmd {
+// startRefresh runs checks in a goroutine, feeding progress and results
+// back through m.events; results are merged and saved per phase. With only
+// set, it re-runs just those checks (after an action), forced.
+func (m *model) startRefresh(force bool, only []check.Check) tea.Cmd {
 	if m.refreshing {
 		return nil
 	}
@@ -138,6 +194,12 @@ func (m *model) startRefresh(force bool) tea.Cmd {
 				default:
 				}
 			}
+		}
+		if only != nil {
+			res := check.RunCached(ctx, env, only, prev, true, send("re-checking"))
+			ch <- phaseDoneMsg{results: check.Merge(prev, res), final: true}
+			close(ch)
+			return
 		}
 		boxRes := check.RunCached(ctx, env, box.All(), prev, force, send("box checks"))
 		merged := check.Merge(prev, boxRes)
@@ -166,22 +228,34 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case tickMsg:
 		m.spin++
+		if m.status != "" && time.Since(m.statusAt) > 6*time.Second {
+			m.status = ""
+		}
 		return m, tick()
 	case progressMsg:
 		m.phase, m.done, m.tot = msg.phase, msg.done, msg.tot
 		return m, m.wait()
 	case phaseDoneMsg:
+		if msg.final && m.recheckRun != nil {
+			m.reportRecheck(msg.results)
+		}
 		m.results = dropNA(msg.results)
 		m.refreshed = time.Now()
 		m.domains = hestia.WebDomains(m.env.Sys)
 		if err := state.Save(m.host, msg.results, m.refreshed); err != nil {
-			m.status = "could not save results: " + err.Error()
+			m.setStatus("could not save results: " + err.Error())
 		}
 		if msg.final {
 			m.refreshing = false
 			return m, nil
 		}
 		return m, m.wait()
+	case runLineMsg, runDoneMsg:
+		return m, m.runUpdate(msg)
+	case execDoneMsg:
+		return m, m.execDone(msg)
+	case logTickMsg:
+		return m, m.reloadLog()
 	case tea.KeyMsg:
 		return m, m.key(msg)
 	}
@@ -198,112 +272,28 @@ func dropNA(rs []check.Result) []check.Result {
 	return out
 }
 
-// --- keys --------------------------------------------------------------------
-
-func (m *model) key(k tea.KeyMsg) tea.Cmd {
-	l := m.cur()
-	if m.filtering {
-		switch k.Type {
-		case tea.KeyEnter:
-			m.filtering = false
-		case tea.KeyEsc:
-			m.filtering, l.filter = false, ""
-		case tea.KeyBackspace:
-			if l.filter != "" {
-				l.filter = l.filter[:len(l.filter)-1]
-			}
-		case tea.KeyRunes, tea.KeySpace:
-			l.filter += string(k.Runes)
-		}
-		l.cursor, l.offset = 0, 0
-		return nil
-	}
-
-	s := k.String()
-	switch s {
-	case "q", "ctrl+c":
-		return tea.Quit
-	case "?":
-		if m.scr == scrHelp {
-			m.scr = m.prev
-		} else {
-			m.prev, m.scr = m.scr, scrHelp
-		}
-		return nil
-	case "esc":
-		switch {
-		case m.scr == scrHelp:
-			m.scr = m.prev
-		case l.filter != "":
-			l.filter = ""
-		case m.scr == scrSite:
-			m.scr = scrSites
-		default:
-			m.scr = scrOverview
-		}
-		return nil
-	case "o":
-		m.scr = scrOverview
-		return nil
-	case "s":
-		m.scr = scrSites
-		return nil
-	case "r":
-		return m.startRefresh(false)
-	case "R":
-		return m.startRefresh(true)
-	case "a":
-		m.showAll = !m.showAll
-		return nil
-	case "/":
-		m.filtering = true
-		return nil
-	case "j", "down":
-		l.cursor++
-	case "k", "up":
-		l.cursor--
-	case "pgdown", "ctrl+d":
-		l.cursor += m.listHeight()
-	case "pgup", "ctrl+u":
-		l.cursor -= m.listHeight()
-	case "g", "home":
-		l.cursor = 0
-	case "G", "end":
-		l.cursor = 1 << 30
-	case "enter", "l", "right":
-		if m.scr == scrSites {
-			if ds := m.siteRows(); l.cursor < len(ds) {
-				m.siteName = ds[l.cursor].Name
-				m.scr = scrSite
-				m.cur().cursor, m.cur().offset = 0, 0
-			}
-		}
-		return nil
-	case "h", "left":
-		if m.scr == scrSite {
-			m.scr = scrSites
-		}
-		return nil
-	}
-	for _, sec := range sections {
-		if s == sec.key {
-			m.scr, m.sectionID = scrSection, sec.id
-			return nil
-		}
-	}
-	return nil
-}
+// --- lists ---------------------------------------------------------------------
 
 func (m *model) listKey() string {
+	var k string
 	switch m.scr {
 	case scrSites:
-		return "sites"
+		k = "sites"
 	case scrSite:
-		return "site:" + m.siteName
+		k = "site:" + m.siteName
 	case scrSection:
-		return "sec:" + m.sectionID
+		k = "sec:" + m.sectionID
+	case scrRun:
+		k = "run"
+	case scrLog:
+		k = "log"
+	default:
+		k = "overview"
 	}
-	return "overview"
+	if m.pane == paneActions {
+		k += ":actions"
+	}
+	return k
 }
 
 func (m *model) cur() *list {
@@ -314,7 +304,78 @@ func (m *model) cur() *list {
 	return m.lists[k]
 }
 
-// --- data for screens ----------------------------------------------------------
+// hasActions: tabs with an Actions pane.
+func (m *model) hasActions() bool {
+	return m.scr == scrSection || m.scr == scrSite || m.scr == scrLog
+}
+
+// loadLogs refreshes the Log tab's two lists.
+func (m *model) loadLogs() {
+	runs, err := actlog.Runs()
+	if err != nil {
+		m.setStatus("action log: " + err.Error())
+	}
+	m.logRuns = runs
+	m.logSources = logsrc.List(m.env.Sys)
+}
+
+func (m *model) logRunRows() []actlog.Run {
+	l := m.lists["log"]
+	var out []actlog.Run
+	for _, r := range m.logRuns {
+		if l == nil || matches(l.filter, r.Title, r.Target, r.Plan, r.Operator) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (m *model) logSourceRows() []logsrc.Source {
+	l := m.lists["log:actions"]
+	var out []logsrc.Source
+	for _, s := range m.logSources {
+		if l == nil || matches(l.filter, s.Group, s.Name, s.Path, s.Unit) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// reportRecheck appends what the action's re-checks found to its viewer:
+// the point is to see the effect, not just "done".
+func (m *model) reportRecheck(after []check.Result) {
+	r := m.recheckRun
+	m.recheckRun = nil
+	now := m.now()
+	var out []string
+	for _, a := range after {
+		b, ok := m.recheckBefore[a.ID]
+		if !ok && !keyIn(a.Key, m.recheckBefore) {
+			continue
+		}
+		was := "new"
+		if ok {
+			was = stateName(b.Effective(now))
+		}
+		out = append(out, fmt.Sprintf("  %s → %s  %s %s: %s", was, stateName(a.Effective(now)), a.Title, a.Subject, a.Summary))
+	}
+	if len(out) == 0 {
+		return
+	}
+	r.lines = append(r.lines, "", "── re-checked afterwards ──")
+	r.lines = append(r.lines, out...)
+}
+
+func keyIn(key string, m map[string]check.Result) bool {
+	for _, r := range m {
+		if r.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// --- data for screens ------------------------------------------------------------
 
 func (m *model) now() time.Time { return m.env.Sys.Now() }
 
@@ -333,7 +394,11 @@ func matches(filter string, fields ...string) bool {
 
 func (m *model) resultRows() []check.Result {
 	now := m.now()
-	l := m.cur()
+	l := m.lists[strings.TrimSuffix(m.listKey(), ":actions")]
+	filter := ""
+	if l != nil {
+		filter = l.filter
+	}
 	var out []check.Result
 	for _, r := range m.results {
 		st := r.Effective(now)
@@ -351,12 +416,41 @@ func (m *model) resultRows() []check.Result {
 				continue
 			}
 		}
-		if matches(l.filter, r.Title, r.Subject, r.Summary, r.Section) {
+		if matches(filter, r.Title, r.Subject, r.Summary, r.Section) {
 			out = append(out, r)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Effective(now) > out[j].Effective(now) })
 	return out
+}
+
+// actionRows: the Actions pane of the current tab.
+func (m *model) actionRows() []action.Action {
+	var acts []action.Action
+	switch m.scr {
+	case scrSection:
+		acts = action.ForSection(m.sectionID)
+	case scrSite:
+		if d, ok := m.domain(m.siteName); ok {
+			acts = action.ForSite(isWP(m.env, d))
+		}
+	}
+	l := m.lists[m.listKey()]
+	if l == nil || l.filter == "" {
+		return acts
+	}
+	var out []action.Action
+	for _, a := range acts {
+		if matches(l.filter, a.Title, a.Note, a.ID) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func isWP(env *check.Env, d hestia.Domain) bool {
+	_, err := env.Sys.Stat(d.DocRoot() + "/wp-config.php")
+	return err == nil
 }
 
 func (m *model) domain(name string) (hestia.Domain, bool) {
