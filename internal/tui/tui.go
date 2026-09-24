@@ -18,6 +18,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"fmt"
 
@@ -33,6 +35,7 @@ import (
 
 // Run starts the dashboard.
 func Run(env *check.Env, version string) error {
+	lipgloss.SetColorProfile(colorProfile(os.Getenv("TERM"), os.Getenv("COLORTERM"), os.Getenv("HS_COLORS"), os.Getenv("NO_COLOR")))
 	host, _ := os.Hostname()
 	m := newModel(env, host, version)
 	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
@@ -40,6 +43,28 @@ func Run(env *check.Env, version string) error {
 		m.run.cmd.Process.Kill()
 	}
 	return err
+}
+
+// colorProfile picks the palette depth. SSH does not forward COLORTERM, so a
+// truecolor terminal (wezterm) arrives as xterm-256color and every Gruvbox
+// colour would be rounded to the 256 palette — the selection most visibly.
+// Plain screen/tmux TERMs are detected as colourless; they do 256.
+func colorProfile(term, colorterm, hsColors, noColor string) termenv.Profile {
+	switch {
+	case noColor != "":
+		return termenv.Ascii
+	case hsColors == "256":
+		return termenv.ANSI256
+	case hsColors == "truecolor", colorterm == "truecolor", colorterm == "24bit":
+		return termenv.TrueColor
+	case strings.Contains(term, "256color"), term == "xterm-kitty", term == "wezterm", term == "alacritty", term == "xterm-ghostty":
+		return termenv.TrueColor
+	case strings.HasPrefix(term, "screen"), strings.HasPrefix(term, "tmux"), strings.HasPrefix(term, "xterm"):
+		return termenv.ANSI256
+	case term == "" || term == "dumb":
+		return termenv.Ascii
+	}
+	return termenv.ANSI256
 }
 
 type screen int

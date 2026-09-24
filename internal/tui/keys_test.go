@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/muesli/termenv"
 
 	"github.com/valolink/hestiascripts/internal/action"
 	"github.com/valolink/hestiascripts/internal/actlog"
@@ -154,5 +155,25 @@ func TestSetupFnPlanIsSummarisedButLogIsExact(t *testing.T) {
 	}
 	if e := a.Exact(tg, repo); !strings.Contains(e, `source "$SCRIPT_DIR/setup/common.sh"`) {
 		t.Errorf("exact: %s", e)
+	}
+}
+
+func TestColorProfile(t *testing.T) {
+	cases := []struct {
+		term, ct, hs, no string
+		want             termenv.Profile
+	}{
+		{"xterm-256color", "", "", "", termenv.TrueColor}, // wezterm over SSH
+		{"screen", "", "", "", termenv.ANSI256},           // default tmux
+		{"tmux-256color", "", "", "", termenv.TrueColor},
+		{"xterm-256color", "", "256", "", termenv.ANSI256},
+		{"linux", "truecolor", "", "", termenv.TrueColor},
+		{"xterm-256color", "", "", "1", termenv.Ascii},
+		{"dumb", "", "", "", termenv.Ascii},
+	}
+	for _, c := range cases {
+		if got := colorProfile(c.term, c.ct, c.hs, c.no); got != c.want {
+			t.Errorf("%+v → %v", c, got)
+		}
 	}
 }

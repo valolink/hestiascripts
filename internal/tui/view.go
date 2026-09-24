@@ -14,13 +14,16 @@ import (
 	"github.com/valolink/hestiascripts/internal/check"
 )
 
+// Gruvbox Material, from Reima's wezterm palette (modules/home/wezterm.nix):
+// dark values are that palette; light values its light counterpart.
+// Background and body text are left to the terminal (opacity shows through).
 var (
-	cFail = lipgloss.AdaptiveColor{Light: "#c0392b", Dark: "#ff6b6b"}
-	cWarn = lipgloss.AdaptiveColor{Light: "#b7791f", Dark: "#f6c453"}
-	cOK   = lipgloss.AdaptiveColor{Light: "#2f855a", Dark: "#68d391"}
-	cDim  = lipgloss.AdaptiveColor{Light: "#718096", Dark: "#8a93a3"}
-	cAcc  = lipgloss.AdaptiveColor{Light: "#2b6cb0", Dark: "#7fb3ff"}
-	cSel  = lipgloss.AdaptiveColor{Light: "#e2e8f0", Dark: "#2d3748"}
+	cFail = lipgloss.AdaptiveColor{Light: "#c14a4a", Dark: "#ea6962"} // red / flamingo
+	cWarn = lipgloss.AdaptiveColor{Light: "#c35e0a", Dark: "#e78a4e"} // orange (its yellow equals the text colour)
+	cOK   = lipgloss.AdaptiveColor{Light: "#6c782e", Dark: "#a9b665"} // green
+	cDim  = lipgloss.AdaptiveColor{Light: "#928374", Dark: "#928374"} // grey
+	cAcc  = lipgloss.AdaptiveColor{Light: "#45707a", Dark: "#7daea3"} // blue
+	cSel  = lipgloss.AdaptiveColor{Light: "#ebdbb2", Dark: "#3c3836"} // surface1
 
 	sBold  = lipgloss.NewStyle().Bold(true)
 	sDim   = lipgloss.NewStyle().Foreground(cDim)
