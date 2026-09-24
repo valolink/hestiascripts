@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/check/box"
 	"github.com/valolink/hestiascripts/internal/compat"
+	"github.com/valolink/hestiascripts/internal/serve"
 	"github.com/valolink/hestiascripts/internal/sys"
 )
 
@@ -30,6 +32,8 @@ Usage:
       Exit: 2 any fail · 1 any warn/unknown · 0 clean.
   hs compat health         JSON for EngineLink (v-server-health contract)
   hs compat setup-status   JSON for EngineLink (v-server-setup-status contract)
+  hs serve [--addr :8091]  the streamer EngineLink talks to (replaces hestia-streamer);
+                           token from HESTIA_STREAMER_TOKEN
   hs version
 
 Sections: ` + "security, backups, system, performance, web, mail, monitoring" + `
@@ -50,6 +54,8 @@ func main() {
 		os.Exit(cmdCheck(ctx, env, os.Args[2:]))
 	case "compat":
 		os.Exit(cmdCompat(ctx, env, os.Args[2:]))
+	case "serve":
+		os.Exit(cmdServe(os.Args[2:]))
 	case "version", "--version":
 		fmt.Println("hs", version)
 	case "help", "-h", "--help":
@@ -196,4 +202,28 @@ func repoDir() string {
 func isTTY() bool {
 	fi, err := os.Stdout.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+func cmdServe(args []string) int {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", ":8091", "listen address")
+	fs.Parse(args)
+
+	token := os.Getenv("HESTIA_STREAMER_TOKEN")
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           serve.Default(token).Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		// No write timeout: /execute streams for as long as the script runs.
+	}
+	auth := "token required"
+	if token == "" {
+		auth = "NO TOKEN — auth disabled"
+	}
+	fmt.Printf("hs %s serving on %s (%s)\n", version, *addr, auth)
+	if err := srv.ListenAndServe(); err != nil {
+		fmt.Fprintln(os.Stderr, "hs serve:", err)
+		return 1
+	}
+	return 0
 }
