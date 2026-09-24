@@ -130,7 +130,17 @@ func cmdCheck(ctx context.Context, env *check.Env, args []string) int {
 		checks = sel
 	}
 
-	rs := check.RunAll(ctx, env, checks)
+	// --save (cron) reuses saved results inside each check's MinInterval, so
+	// a 15-minute refresh does not become a Storage Box login per user and
+	// an api.wordpress.org call per site every 15 minutes.
+	var rs []check.Result
+	var prev []check.Result
+	if *save {
+		prev, _ = state.Load()
+		rs = check.RunCached(ctx, env, checks, prev, false, nil)
+	} else {
+		rs = check.RunAll(ctx, env, checks)
+	}
 	var shown []check.Result
 	for _, r := range rs {
 		if r.State != check.NA {
@@ -141,7 +151,6 @@ func cmdCheck(ctx context.Context, env *check.Env, args []string) int {
 	host, _ := os.Hostname()
 
 	if *save {
-		prev, _ := state.Load()
 		if err := state.Save(host, check.Merge(prev, shown), now); err != nil {
 			fmt.Fprintln(os.Stderr, "hs: could not save results:", err)
 		}

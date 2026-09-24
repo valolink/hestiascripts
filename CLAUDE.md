@@ -9,6 +9,14 @@ WordPress automation and streaming toolkit for **HestiaCP** (Hestia Control Pane
 1. **hestia-streamer** — Go HTTP server that streams custom `v-script` output in real time via Server-Sent Events (SSE). HestiaCP's own API only responds after a script finishes, so this streamer exists to surface progress output while the script is still running.
 2. **Custom `v-scripts`** — Bash scripts placed in `/usr/local/hestia/bin/` that extend HestiaCP with WordPress-specific operations (cloning, info gathering, updates, etc.)
 
+## hs (the rebuild, 2026-09)
+
+`hs` is a single Go binary replacing `run.sh`, the status scripts and (optionally) the streamer: `hs` = dashboard (Bubble Tea TUI), `hs check` = report, `hs fix` = planned fixes, `hs serve` = the streamer, `hs compat health|setup-status` = the JSON EngineLink parses. Source in `cmd/hs` + `internal/`; design, phase status and every decision in `docs/hs-design.md` — read it before changing hs.
+
+- **Build:** `./build-hs.sh` (vet + tests + static build into `./hs`). Boxes have no Go toolchain, so the binary is committed like `hestia-streamer`: commit the source, run `./build-hs.sh`, commit `hs`.
+- **Install on a box:** `git pull`, then `bash install-v2.sh` (hs on PATH, `/var/lib/hs`, `/var/log/hs`); `--cron` refreshes results every 15 min; `--serve` runs the streamer as `hs serve` via a systemd drop-in that install-scripts.sh cannot overwrite (`--no-serve` reverts). `install-scripts.sh` (v1) is unchanged and still deploys the v-scripts.
+- **Principles:** OK means a probe saw it working; checks are read-only and bounded; every action and fix shows its exact commands (and, for fixes, how and how to undo) before running; everything run is logged to `/var/log/hs` with a transcript; files are moved, never deleted.
+
 ## Repo structure
 
 ```
