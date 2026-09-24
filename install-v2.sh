@@ -112,3 +112,4 @@ echo "  hs          dashboard"
 echo "  hs check    report in the terminal (hs help for the rest)"
 [ -f "$DROPIN" ] && echo "  streamer:   hs serve" || echo "  streamer:   $(systemctl show $UNIT -p ExecStart --value 2>/dev/null | grep -o 'path=[^ ;]*' | head -1)"
 [ -f "$CRON" ] && echo "  refresh:    every 15 min ($CRON)"
+exit 0
