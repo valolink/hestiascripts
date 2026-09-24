@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Build the static hs binary into the repo root, where boxes get it with
 # `git pull` (they have no Go toolchain). Run on a dev machine, then commit
 # the binary together with the source it was built from.
