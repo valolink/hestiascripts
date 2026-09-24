@@ -11,6 +11,7 @@ import (
 
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/sys"
 )
 
 func backupChecks() []Check {
@@ -47,6 +48,7 @@ type BackupInfo struct {
 	Nightly time.Time // newest non-hourly snapshot or tarball
 	Hourly  time.Time // newest db-hourly snapshot
 	Source  string    // "restic", "tarball", "home", ""
+	Keyed   bool      // the user is enrolled in restic
 	Err     string    // restic error, when it fell back
 }
 
@@ -74,9 +76,9 @@ func BackupAges(ctx context.Context, env *Env) []BackupInfo {
 			bi := BackupInfo{User: u}
 			key := hestia.UserResticKey(u)
 			if repo != "" && exists(s, key) && s.Have("restic") {
-				rctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 				raw, err := s.Run(rctx, "restic", "--repo", ResticRepoFor(repo, u), "--password-file", key,
-					"--no-lock", "--json", "snapshots", "--latest", "1")
+					"-o", rcloneArgs, "--no-lock", "--json", "snapshots", "--latest", "1")
 				cancel()
 				var snaps []snapshot
 				if err == nil && json.Unmarshal([]byte(raw), &snaps) == nil {
@@ -93,8 +95,9 @@ func BackupAges(ctx context.Context, env *Env) []BackupInfo {
 						bi.Source = "restic"
 					}
 				} else if err != nil {
-					bi.Err = err.Error()
+					bi.Err = resticError(raw, err)
 				}
+				bi.Keyed = true
 			}
 			if bi.Nightly.IsZero() {
 				tars, _ := s.Glob("/backup/" + u + ".*.tar")
@@ -119,6 +122,44 @@ func BackupAges(ctx context.Context, env *Env) []BackupInfo {
 	}
 	wg.Wait()
 	return out
+}
+
+// Storage Boxes ban an IP after repeated failed logins, and rclone's default
+// pacer retries an auth failure ~10 times — one bad probe reads as ten failed
+// logins upstream (hzdemolink, 2026-09-07). A check must never add to that.
+const rcloneArgs = "rclone.args=serve restic --stdio --b2-hard-delete --retries 1 --low-level-retries 1"
+
+// resticError keeps restic's own fatal message (JSON exit_error on stdout)
+// rather than a bare "exit status 1".
+func resticError(raw string, err error) string {
+	lines := nonEmpty(raw)
+	if ee, ok := err.(*sys.ExitError); ok {
+		lines = append(lines, nonEmpty(ee.Stderr)...) // restic writes exit_error to stderr
+	}
+	// rclone's CRITICAL line names the real cause ("connection refused" is a
+	// Storage Box login ban); restic's exit_error only says it could not open.
+	var cause, fatal string
+	for _, l := range lines {
+		var m struct {
+			Type    string `json:"message_type"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal([]byte(l), &m) == nil && m.Type == "exit_error" {
+			fatal = m.Message
+		} else if i := strings.Index(l, "CRITICAL: "); i >= 0 {
+			cause = l[i+len("CRITICAL: "):]
+		}
+	}
+	if fatal != "" && cause != "" {
+		return fatal + " — " + cause
+	}
+	if fatal != "" {
+		return fatal
+	}
+	if len(lines) > 0 {
+		return lines[len(lines)-1]
+	}
+	return err.Error()
 }
 
 func checkBackupSetup(ctx context.Context, env *Env) []Result {
@@ -205,8 +246,15 @@ func checkNightly(ctx context.Context, env *Env) []Result {
 			default:
 				r = New(OK, fmt.Sprintf("%s snapshot %dh ago", bi.Source, hours(age))).Ev(ev).Valid(26 * time.Hour)
 			}
-			if bi.Source != "restic" && bi.Err != "" {
-				r = r.Ev("restic failed, fell back to " + bi.Source + ": " + bi.Err)
+			if bi.Keyed && bi.Source != "restic" {
+				// A fresh tarball must not hide a broken restic enrolment.
+				r.Evidence = append(r.Evidence, "restic: "+orDash(bi.Err))
+				if r.State < Warn {
+					r.State = Warn
+					r.Summary = fmt.Sprintf("restic unreachable — only a %s from %dh ago", bi.Source, hours(age))
+					r.Why = "The user is enrolled in restic but the repository cannot be read, so off-site incremental backups are not happening."
+					r.Fix = "check Storage Box reachability from this box (nc -vz <host> 23); refused from one IP only = a login ban"
+				}
 			}
 		}
 		rs = append(rs, r.For(bi.User))

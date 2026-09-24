@@ -112,7 +112,7 @@ func TestNightlyAndHourlyFromOneResticCall(t *testing.T) {
 		},
 		ModTimes: map[string]time.Time{"/backup/old.2026-09-20_05-10-01.tar": now.Add(-100 * time.Hour)},
 		Cmds: map[string]sys.FakeCmd{
-			"restic --repo rclone:storagebox:hestia-web1/alavus --password-file /usr/local/hestia/data/users/alavus/restic.conf --no-lock --json snapshots --latest 1": {Out: string(snaps)},
+			"restic --repo rclone:storagebox:hestia-web1/alavus --password-file /usr/local/hestia/data/users/alavus/restic.conf -o " + rcloneArgs + " --no-lock --json snapshots --latest 1": {Out: string(snaps)},
 		},
 	}
 	rs := checkNightly(context.Background(), env(f))
@@ -181,5 +181,29 @@ func TestDiskParsesEveryFilesystem(t *testing.T) {
 	}
 	if got["/backup"] != Fail || got["/home inodes"] != Warn || len(rs) != 2 {
 		t.Errorf("disk: %v", got)
+	}
+}
+
+// hzdemolink 2026-09-24: Storage Box refusing the box's IP, fresh tarballs
+// still landing. The tarball must not make the user read as backed up.
+func TestEnrolledUserWithUnreachableResticWarns(t *testing.T) {
+	f := &sys.Fake{
+		Commands: map[string]bool{"restic": true},
+		Files: map[string]string{
+			hestia.ResticSys: "REPO='rclone:storagebox:hestia-hzhestia'\n",
+			hestia.UsersDir + "/valolink/restic.conf":  "secret",
+			"/backup/valolink.2026-09-24_05-10-01.tar": "x",
+		},
+		ModTimes: map[string]time.Time{"/backup/valolink.2026-09-24_05-10-01.tar": now.Add(-6 * time.Hour)},
+		Cmds: map[string]sys.FakeCmd{
+			"restic --repo rclone:storagebox:hestia-hzhestia/valolink --password-file /usr/local/hestia/data/users/valolink/restic.conf -o " + rcloneArgs + " --no-lock --json snapshots --latest 1": {
+				Code:   1,
+				Stderr: `rclone: 2026/09/24 11:21:11 CRITICAL: couldn't connect SSH: dial tcp 62.238.66.142:23: connect: connection refused` + "\n" + `{"message_type":"exit_error","code":1,"message":"Fatal: unable to open repository at rclone:storagebox:hestia-hzhestia/valolink"}`,
+			},
+		},
+	}
+	rs := checkNightly(context.Background(), env(f))
+	if len(rs) != 1 || rs[0].State != Warn || !strings.Contains(strings.Join(rs[0].Evidence, " "), "restic: Fatal: unable to open repository at rclone:storagebox:hestia-hzhestia/valolink — couldn't connect SSH: dial tcp 62.238.66.142:23: connect: connection refused") {
+		t.Fatalf("got %+v", rs)
 	}
 }

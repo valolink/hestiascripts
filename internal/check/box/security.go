@@ -22,6 +22,7 @@ func securityChecks() []Check {
 		{ID: "updates.pending", Section: "security", Title: "Security updates", Timeout: 30 * time.Second, Run: checkPendingUpdates},
 		{ID: "updates.reboot", Section: "security", Title: "Reboot", Run: checkReboot},
 		{ID: "hestia.version", Section: "security", Title: "HestiaCP version", Run: checkHestiaVersion},
+		{ID: "hestia.services", Section: "system", Title: "hestia.conf services", Run: checkServiceDrift},
 		{ID: "maldet", Section: "security", Title: "Maldet", Run: checkMaldet},
 		{ID: "web.exposure", Section: "security", Title: "Exposed files in web roots", Timeout: 30 * time.Second, Run: checkExposure},
 		{ID: "web.uploads-php", Section: "security", Title: "PHP files in uploads", Timeout: 30 * time.Second, Run: checkUploadsPHP},
@@ -282,8 +283,14 @@ func checkHestiaVersion(ctx context.Context, env *Env) []Result {
 	default:
 		rs = append(rs, New(OK, cur+" (latest)"))
 	}
-	rs = append(rs, ServiceDriftResults(ctx, env)...)
 	return rs
+}
+
+func checkServiceDrift(ctx context.Context, env *Env) []Result {
+	if rs := ServiceDriftResults(ctx, env); len(rs) > 0 {
+		return rs
+	}
+	return []Result{New(OK, "every *_SYSTEM service in hestia.conf is installed")}
 }
 
 // Drift is a *_SYSTEM key in hestia.conf naming a service whose package is gone.
@@ -347,7 +354,7 @@ func MaldetLastScan(env *Env) (stamp string, at time.Time) {
 			continue
 		}
 		stamp = f[0] + " " + f[1]
-		at, _ = parseMaldetStamp(f[0]+" "+f[1]+" "+f[2], env.Sys.Now())
+		at, _ = parseMaldetStamp(strings.Join(f[:min(4, len(f))], " "), env.Sys.Now())
 	}
 	return stamp, at
 }
@@ -386,16 +393,24 @@ func checkMaldet(ctx context.Context, env *Env) []Result {
 }
 
 func parseMaldetStamp(v string, now time.Time) (time.Time, bool) {
-	for _, layout := range []string{"Jan 2 15:04:05", "Jan 02 15:04:05", "2006-01-02 15:04:05"} {
-		if ts, err := time.ParseInLocation(layout, v, time.Local); err == nil {
-			if ts.Year() == 0 {
-				ts = ts.AddDate(now.Year(), 0, 0)
-				if ts.After(now.Add(24 * time.Hour)) {
-					ts = ts.AddDate(-1, 0, 0)
-				}
-			}
-			return ts, true
+	// maldet 1.6 writes "Sep 24 2026 06:30:23"; older builds drop the year.
+	fields := strings.Fields(v)
+	for _, layout := range []string{"Jan 2 2006 15:04:05", "Jan 2 15:04:05"} {
+		n := len(strings.Fields(layout))
+		if len(fields) < n {
+			continue
 		}
+		ts, err := time.ParseInLocation(layout, strings.Join(fields[:n], " "), time.Local)
+		if err != nil {
+			continue
+		}
+		if ts.Year() == 0 {
+			ts = ts.AddDate(now.Year(), 0, 0)
+			if ts.After(now.Add(24 * time.Hour)) {
+				ts = ts.AddDate(-1, 0, 0)
+			}
+		}
+		return ts, true
 	}
 	return time.Time{}, false
 }
@@ -430,12 +445,20 @@ func checkExposure(ctx context.Context, env *Env) []Result {
 	out, _ := s.Run(ctx, "find", append(roots, "-maxdepth", "2", "(",
 		"-name", "wp-config*.bak*", "-o", "-name", "wp-config*.save", "-o", "-name", "wp-config*.old",
 		"-o", "-name", "*.sql", "-o", "-name", "*.sql.gz", ")", "-type", "f")...)
+	dumps := map[string][]string{}
+	var doms []string
 	for _, f := range nonEmpty(out) {
 		dom := strings.Split(f, "/")[4]
-		rs = append(rs, New(Fail, "database dump or wp-config backup in the web root: "+filepath.Base(f)).
-			For(dom).Ev(f).
-			Because("It hands database credentials or the whole dataset to anyone who guesses the name, and scanners guess constantly.").
-			Fixed("move it outside public_html (or delete it after checking)"))
+		if _, seen := dumps[dom]; !seen {
+			doms = append(doms, dom)
+		}
+		dumps[dom] = append(dumps[dom], f[strings.Index(f, "/public_html/")+len("/public_html/"):])
+	}
+	for _, dom := range doms {
+		rs = append(rs, New(Fail, plural(len(dumps[dom]), "database dump or wp-config backup", "database dumps or wp-config backups")+" in the web root").
+			For(dom).Ev(dumps[dom]...).
+			Because("They hand database credentials or the whole dataset to anyone who guesses the name, and scanners guess constantly.").
+			Fixed("move them outside public_html (or delete them after checking)"))
 	}
 	if len(rs) == 0 {
 		return []Result{New(OK, "no debug logs or dumps in any web root")}

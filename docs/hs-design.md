@@ -190,6 +190,21 @@ Each phase is shippable on its own and leaves the old tooling working.
 4. **Actions.** Registry with plan/confirm/stream/recheck. Wrap the v-scripts and `setup/*` functions first (exec, not rewrite); port a function to Go only when it needs rollback, validation or structured output (template install, php.ini edits, relay config). *Done when* every `run.sh` path and every root-shell script (`setup-restic-backup`, `v-restore-restic`, `make-restore-script`, `safe-reboot`) is reachable from `hs`.
 5. **Retire** `run.sh`, `setup/`, `main.go`, `hestia-streamer`, the old status scripts. Update CLAUDE.md and `docs/submodules.md` in EngineLink.
 
+## Phase 1 — status (2026-09-24)
+
+Done: `hs check`, `hs compat health`, `hs compat setup-status` (commits `f1b829c`…). Stdlib only; tests run against `sys.Fake`.
+
+Validated on **hzdemolink** (test binary in `/root/hs-test/`, `HS_REPO_DIR=/root/hestiascripts`, nothing installed):
+
+- `compat setup-status` — identical to `v-server-setup-status` (sorted keys).
+- `compat health` — identical to `v-server-health` as a set (user order differs: hs sorts, bash follows `v-list-users`); 1 s vs 11 s.
+- `hs check` finds everything `v-server-audit` finds, plus what it could not see: postfix stopped with 59 queued (the relay line still read "configured"), restic registered but unscheduled, the three restic-enrolled users unreachable (Storage Box refusing the box's IP on :23 — tarballs had been masking it), 24/24 domains on unhardened proxy templates, PHP in `uploads/`, :19999 open.
+
+Found along the way:
+
+- **`v-server-health` builds the restic repo path wrong.** It concatenates `${RESTIC_REPO}${u}`; HestiaCP ≥ 1.10.4 stores `REPO` without the trailing slash (hzdemolink: `rclone:storagebox:hestia-hzhestia`), so it queries `…hestia-hzhestiavalolink`, fails, and reports the tarball age instead. hs joins as upstream does (`${REPO%/}/$user`). On a box where restic works, `hs compat health` will therefore report restic ages where the bash script reported tarball ages — confirm on a healthy restic box before swapping the wrapper in.
+- **Restic probes are Storage Box logins.** Every freshness check is one SSH session per enrolled user. Probes run with `--retries 1 --low-level-retries 1` so hs can never add to a login ban, but a 15-minute cron would still be ~4 logins/user/hour. Phase 3's state cache must refresh restic results on a long TTL (≈ 6 h) independently of the fast box checks.
+
 ## Open questions
 
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.

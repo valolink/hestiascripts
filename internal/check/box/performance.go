@@ -284,9 +284,14 @@ func MariaDBBufferConf(env *Env) string {
 // dataset bigger than the pool is fine while the working set fits.
 func checkMariaDB(ctx context.Context, env *Env) []Result {
 	q := `SELECT VARIABLE_NAME, VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME IN ('UPTIME','INNODB_BUFFER_POOL_READS','INNODB_BUFFER_POOL_READ_REQUESTS')`
-	out, err := env.Sys.Run(ctx, "mysql", "-N", "-B", "-e", q)
+	// Newer MariaDB packages ship only the `mariadb` client.
+	client := "mariadb"
+	if !env.Sys.Have(client) {
+		client = "mysql"
+	}
+	out, err := env.Sys.Run(ctx, client, "-N", "-B", "-e", q)
 	if err != nil {
-		return []Result{New(Unknown, "MariaDB not reachable as root")}
+		return []Result{New(Unknown, "MariaDB not reachable as root via "+client).Ev(err.Error())}
 	}
 	v := map[string]float64{}
 	for _, l := range nonEmpty(out) {

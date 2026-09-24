@@ -24,10 +24,11 @@ type Fake struct {
 }
 
 type FakeCmd struct {
-	Out   string
-	Code  int           // non-zero → *ExitError
-	Err   error         // e.g. not found
-	Delay time.Duration // honours ctx
+	Out    string
+	Code   int           // non-zero → *ExitError
+	Stderr string        // carried on the *ExitError
+	Err    error         // e.g. not found
+	Delay  time.Duration // honours ctx
 }
 
 type FakeHTTP struct {
@@ -53,7 +54,7 @@ func (f *Fake) Run(ctx context.Context, name string, args ...string) (string, er
 		return c.Out, c.Err
 	}
 	if c.Code != 0 {
-		return c.Out, &ExitError{Code: c.Code}
+		return c.Out, &ExitError{Code: c.Code, Stderr: c.Stderr}
 	}
 	return c.Out, nil
 }

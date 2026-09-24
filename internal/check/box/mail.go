@@ -78,6 +78,14 @@ func checkMailDelivery(ctx context.Context, env *Env) []Result {
 	if !env.Sys.Have("postconf") {
 		return []Result{New(NA, "postfix not installed")}
 	}
+	// hzdemolink 2026-09-24: postfix stopped, 59 messages queued, and the
+	// relay line still read "configured".
+	if unitExists(ctx, env.Sys, "postfix") && !active(ctx, env.Sys, "postfix") {
+		n, _ := MailQueue(ctx, env)
+		return []Result{New(Fail, fmt.Sprintf("postfix is not running (%d messages waiting)", n)).
+			Because("Nothing leaves the box: cron, fail2ban and maldet alerts and all WordPress mail sit in the queue.").
+			Fixed("systemctl status postfix ; systemctl start postfix")}
+	}
 	relay := Relay(ctx, env)
 	var rs []Result
 	if relay == "" {
