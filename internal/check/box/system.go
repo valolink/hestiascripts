@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	. "github.com/valolink/hestiascripts/internal/check"
+	"github.com/valolink/hestiascripts/internal/hestia"
 )
 
 func systemChecks() []Check {
@@ -286,6 +287,28 @@ func checkIdleServices(ctx context.Context, env *Env) []Result {
 		rs = append(rs, New(Warn, "clamd is running with no mail stack to serve").For("clamav").
 			Because("ClamAV under Hestia only scans inbound mail; with exim4 and dovecot gone it scans nothing and holds ~1 GB.").
 			Fixed("hs op remove-service service=clamav-daemon"))
+	}
+	// Hardening plan §14: turn off what a box does not serve.
+	anyKV := func(glob, key string) bool {
+		files, _ := s.Glob(glob)
+		for _, f := range files {
+			for _, l := range strings.Split(readString(s, f), "\n") {
+				if hestia.ParseKV(l)[key] != "" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if active(ctx, s, "proftpd") && !anyKV(hestia.UsersDir+"/*/web.conf", "FTP_USER") {
+		rs = append(rs, New(Warn, "ProFTPD is running with no FTP users").For("proftpd").
+			Because("An open plain-FTP port with nothing to serve is attack surface; SFTP over SSH covers file access.").
+			Fixed("hs op remove-service service=proftpd"))
+	}
+	if active(ctx, s, "named") && !anyKV(hestia.UsersDir+"/*/dns.conf", "DOMAIN") {
+		rs = append(rs, New(Warn, "BIND is running with no DNS zones").For("named").
+			Because("A DNS server that hosts nothing still answers queries — and can be abused for amplification.").
+			Fixed("hs op remove-service service=named"))
 	}
 	var eol []string
 	for _, v := range PHPVersions(s) {
