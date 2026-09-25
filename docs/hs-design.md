@@ -298,6 +298,17 @@ A read-only pass over the live Hestia boxes (alavus, hzweb1, hzenergiatuote, kuu
 
 Found but not hs's to fix: ucweb1's SSH host key changed; ucdemolink and five DigitalOcean aliases time out (retired?); no box carries the alavus backdoor indicators.
 
+## Redis object cache — the documented layout (2026-09-25)
+
+Read from the redis-cache plugin's README, FAQ and CHANGELOG and its 2.8.0 drop-in source, then checked on the live boxes. `internal/redisinfo` holds the model; checks and fixes share it.
+
+- Documented layout per site: its own `WP_REDIS_DATABASE` and `WP_REDIS_PREFIX` (FAQ — sharing is how a site ends up redirected to another's domain), `WP_REDIS_MAXTTL`, no `WP_REDIS_SELECTIVE_FLUSH` (README: unsupported, "terribly slow Lua script").
+- `flush()` = FLUSHDB of the site's database (or the selective Lua scan); `flush_group()` = Lua scan of the whole database unless `WP_REDIS_DISABLE_GROUP_FLUSH` redirects it to `flush()`. So DISABLE_GROUP_FLUSH is safe only with a database of its own. Earlier hs advice and v-wp-redis-install set it unconditionally (and SELECTIVE_FLUSH with every own database — where kuumalahde's 393k Lua scans came from); both corrected.
+- Fleet: hzweb1 had five object-cache sites in database 0 (one without a prefix); alavus/hzenergiatuote/soutuveneet one site each in db0 without MAXTTL; staging copies with SELECTIVE_FLUSH; kuumalahde prod already bounded; every box `lazyfree-lazy-user-flush no`; all drop-ins 2.8.0 (3.0.0 fixes stuck pipelines).
+- `redis.sites` is now one finding per site listing every deviation (shared database — Fail when the prefix is shared too —, missing prefix, no MAXTTL, selective flush, group flush off on a shared database, drop-in behind the plugin) plus "more sites than databases". `redis` carries hit rate, FLUSHDB and Lua scans per hour, evictions, and warns on blocking flushes when a database exceeds 50k keys.
+- Fixes: `redis-own-db` (free database by the same rule as v-wp-redis-install, prefix/MAXTTL on the way, old keys removed from the shared database by prefix with SCAN + UNLINK — never FLUSHDB of a shared database), `redis-maxttl` / `redis-maxttl-all` (background FLUSHDB only on an own database), `redis-no-selective`, `redis-dropin` (`wp redis update-dropin`), `redis-group-flush` (own-database sites only, offered when Lua scans are costly), `redis-lazyfree` (CONFIG SET + redis.conf), `redis-databases`.
+- `v-server-audit` no longer advises the guard constant; it reports sites without MAXTTL and sites sharing a database.
+
 ## Open questions
 
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.

@@ -102,3 +102,46 @@ func TestSpecificFixBeforeDiagnosis(t *testing.T) {
 		t.Errorf("order: %v", ids)
 	}
 }
+
+func redisBox() *sys.Fake {
+	dropin := " * Plugin Name: Redis Object Cache Drop-In\n * Version: 2.8.0"
+	f := &sys.Fake{Clock: time.Now(), Files: map[string]string{
+		hestia.UsersDir + "/w/web.conf": "DOMAIN='valolink.fi'\nDOMAIN='kluuvi.fi'\nDOMAIN='solo.fi'\n",
+		"/home/w/web/valolink.fi/public_html/wp-config.php":            "define( 'WP_REDIS_PREFIX', 'valolink_fi_1830bfa8' );",
+		"/home/w/web/valolink.fi/public_html/wp-content/object-cache.php": dropin,
+		"/home/w/web/kluuvi.fi/public_html/wp-config.php":              "define( 'WP_REDIS_PREFIX', 'kluuvi_fi_794c6b23' );",
+		"/home/w/web/kluuvi.fi/public_html/wp-content/object-cache.php":   dropin,
+		"/home/w/web/solo.fi/public_html/wp-config.php":                "define('WP_REDIS_PREFIX','solo_1'); define('WP_REDIS_DATABASE', 1);",
+		"/home/w/web/solo.fi/public_html/wp-content/object-cache.php":     dropin,
+	}, Cmds: map[string]sys.FakeCmd{
+		"redis-cli config get databases": {Out: "databases\n16\n"},
+		"redis-cli info keyspace":        {Out: "# Keyspace\ndb0:keys=51807,expires=187\ndb1:keys=900,expires=900\ndb2:keys=5,expires=0\n"},
+	}}
+	return f
+}
+
+// hzweb1 shape: valolink.fi and kluuvi.fi share database 0.
+func TestRedisOwnDBPicksAFreeDatabaseAndNeverFlushesTheSharedOne(t *testing.T) {
+	st := steps(t, "redis-own-db", "valolink.fi", redisBox())
+	plan := ""
+	for _, s := range st {
+		plan += strings.Join(s.Argv, " ") + "\n"
+	}
+	// 1 is named by solo.fi, 2 holds unknown keys → 3
+	if !strings.Contains(plan, "config set WP_REDIS_DATABASE 3 --raw --type=constant") {
+		t.Errorf("free database:\n%s", plan)
+	}
+	if !strings.Contains(plan, "redis-cli -n 0 --scan --pattern 'valolink_fi_1830bfa8*' | xargs") || strings.Contains(plan, "flushdb") {
+		t.Errorf("old keys must go by prefix, never FLUSHDB of the shared database:\n%s", plan)
+	}
+	if !strings.Contains(plan, "WP_REDIS_MAXTTL 86400") {
+		t.Errorf("missing MAXTTL should be added on the way:\n%s", plan)
+	}
+}
+
+func TestRedisMaxTTLOnOwnDatabaseFlushesInBackground(t *testing.T) {
+	st := steps(t, "redis-maxttl", "solo.fi", redisBox())
+	if len(st) != 2 || Quote(st[1].Argv) != "redis-cli -n 1 flushdb async" {
+		t.Errorf("%+v", st)
+	}
+}

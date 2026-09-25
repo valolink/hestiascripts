@@ -14,11 +14,15 @@ USAGE: v-wp-redis-install [OPTIONS]
 Install the Redis Object Cache plugin on a WordPress site, set a unique
 WP_REDIS_PREFIX in wp-config.php, and activate the plugin.
 
-Also sets two constants that keep the cache from becoming the bottleneck:
-  WP_REDIS_DISABLE_GROUP_FLUSH=true  group flush uses FLUSHDB (O(1)) instead
-                                     of a Lua SCAN over the whole keyspace
+Also sets the layout the redis-cache plugin documents:
   WP_REDIS_MAXTTL=86400              keys expire, so the keyspace stays bounded
-Existing values are never overwritten.
+  WP_REDIS_DATABASE=<free>           a database of its own (skips any database
+                                     another wp-config names or that holds keys)
+  WP_REDIS_DISABLE_GROUP_FLUSH=true  only with a database of its own: group
+                                     flush becomes FLUSHDB of this site alone
+                                     instead of a Lua SCAN that blocks Redis
+and removes WP_REDIS_SELECTIVE_FLUSH (unsupported upstream) once the site has
+its own database. Existing values are never overwritten otherwise.
 
 Redis is NOT enabled (no object-cache.php drop-in is created). Enable it
 manually in the plugin settings or with: wp redis enable --path=...
@@ -140,8 +144,13 @@ redis_next_free_db() {
            /home/*/web/*/public_html/wp-config.php \
            /home/*/web/*/public_html.setup/wp-config.php 2>/dev/null \
          | grep -oE '[0-9]+$' | sort -un)
+  # A database holding keys that no wp-config claims belongs to something
+  # else (another app, a removed site's leftovers) — do not hand it out.
+  keyed=$(redis-cli info keyspace 2>/dev/null | grep -oE '^db[0-9]+' | tr -d 'db' | sort -un)
   for ((i = 1; i < max; i++)); do
-    printf '%s\n' "$used" | grep -qx "$i" || { echo "$i"; return 0; }
+    printf '%s\n' "$used" | grep -qx "$i" && continue
+    printf '%s\n' "$keyed" | grep -qx "$i" && continue
+    echo "$i"; return 0
   done
   return 1
 }
@@ -167,27 +176,27 @@ fi
 
 # --- Cache-behaviour constants -------------------------------------------------
 #
-# Both of these exist because of kuumalahde.fi on 2026-08-30. Redis went live
-# there on 2026-08-27 with only WP_REDIS_PREFIX set, and by the next night the
-# box was serving 504s from 21:00 to 06:00 every night.
+# What the redis-cache drop-in (2.8.0) does, read from its source and its
+# README/FAQ — kuumalahde.fi's nightly 504s (2026-08-30) and a fleet review
+# (2026-09-25) are why each line is here:
 #
-# WP_REDIS_DISABLE_GROUP_FLUSH — the redis-cache plugin's flush_group() runs a
-#   Lua SCAN across the ENTIRE keyspace on every call, and nothing gates that
-#   except this constant. Not WP_REDIS_SELECTIVE_FLUSH, not the prefix, not the
-#   database. On kuumalahde that was 392,916 calls in 46h at ~173ms each —
-#   18.9 hours of Redis CPU, or 41% of a core doing nothing but flushing.
-#   Redis is single-threaded, so every one of those scans blocked all other
-#   cache reads until PHP timed out. With this set, flush_group() falls back to
-#   flush() → FLUSHDB, which is O(1). It invalidates MORE than asked (whole DB,
-#   not one group), so it is conservative: more cache misses, never staleness.
+#   flush()        `wp cache flush` = FLUSHDB of the site's database — or, with
+#                  WP_REDIS_SELECTIVE_FLUSH, a Lua SCAN of the whole database
+#                  deleting the prefix's keys. The README lists SELECTIVE_FLUSH
+#                  as unsupported ("terribly slow"); this script no longer sets
+#                  it.
+#   flush_group()  a Lua SCAN of the whole database per call; Redis is
+#                  single-threaded, so each scan blocks every other read
+#                  (kuumalahde: 392,916 calls in 46h at ~173ms). With
+#                  WP_REDIS_DISABLE_GROUP_FLUSH it calls flush() instead.
 #
-# WP_REDIS_MAXTTL — without it, cache keys never expire and the keyspace only
-#   grows. kuumalahde reached 406,234 keys with just 4,342 carrying a TTL, which
-#   is what made each scan so expensive. 86400 (one day) bounds it.
+# So DISABLE_GROUP_FLUSH is only safe when the site has a database of its own:
+# then FLUSHDB empties just this site (more misses, never stale data). In a
+# shared database it would empty every neighbour on each group flush — so it
+# is set only after a database of its own is confirmed below.
 #
-# Small sites never notice either problem: the keyspace stays small, so the scan
-# stays cheap. It only bites at WooCommerce scale with a write-heavy import.
-# Setting both at install time costs nothing and removes the trap.
+# WP_REDIS_MAXTTL — without it keys never expire and the keyspace only grows,
+# which is what makes every scan slow. The FAQ's own answer to a growing Redis.
 set_const_if_missing() {
   local name="$1" value="$2"
   if $WP config has "$name" &>/dev/null; then
@@ -203,25 +212,40 @@ set_const_if_missing() {
 }
 
 echo ""
-set_const_if_missing WP_REDIS_DISABLE_GROUP_FLUSH true
 set_const_if_missing WP_REDIS_MAXTTL 86400
 
 # --- WP_REDIS_DATABASE ---------------------------------------------------------
-# One Redis database per site. The prefix keeps keys apart; only a database of
-# its own keeps flushes apart, because flush() (and the group-flush fallback
-# above) is FLUSHDB. Two sites in database 0 empty each other's cache on every
-# `wp cache flush` — seen between kuumalahde.fi and its dev clone, 2026-09-19.
-# Only set when absent: moving a live site to another database is a cold cache.
+# One Redis database per site (the FAQ requires it: sharing is how one site
+# ends up serving another's cached pages). The prefix keeps keys apart; only a
+# database of its own keeps flushes apart. Two sites in database 0 empty each
+# other's cache on every `wp cache flush` — seen between kuumalahde.fi and its
+# dev clone, 2026-09-19. Only set when absent: moving a live site to another
+# database is a cold cache.
+OWN_DB=0
 if [ "$($WP config has WP_REDIS_DATABASE 2>/dev/null; echo $?)" -ne 0 ]; then
   REDIS_DB=$(redis_next_free_db || true)
   if [ -n "$REDIS_DB" ]; then
     set_const_if_missing WP_REDIS_DATABASE "$REDIS_DB"
-    set_const_if_missing WP_REDIS_SELECTIVE_FLUSH true
+    OWN_DB=1
   else
     echo "⚠️  No free Redis database found — this site shares database 0; flushes are not isolated."
   fi
 else
-  echo "ℹ️  WP_REDIS_DATABASE already set: $($WP config get WP_REDIS_DATABASE 2>/dev/null)"
+  EXISTING_DB=$($WP config get WP_REDIS_DATABASE 2>/dev/null)
+  echo "ℹ️  WP_REDIS_DATABASE already set: $EXISTING_DB"
+  shared=$(grep -lE "WP_REDIS_DATABASE'[[:space:]]*,[[:space:]]*'?${EXISTING_DB}[^0-9]" \
+             /home/*/web/*/public_html/wp-config.php 2>/dev/null | grep -v "/$DOMAIN/" | head -1)
+  [ -z "$shared" ] && [ "$EXISTING_DB" != "0" ] && OWN_DB=1
+fi
+
+if [ "$OWN_DB" -eq 1 ]; then
+  set_const_if_missing WP_REDIS_DISABLE_GROUP_FLUSH true
+else
+  echo "ℹ️  Not setting WP_REDIS_DISABLE_GROUP_FLUSH: on a shared database it would empty every neighbour's cache."
+fi
+if $WP config has WP_REDIS_SELECTIVE_FLUSH &>/dev/null && [ "$OWN_DB" -eq 1 ]; then
+  echo "Removing WP_REDIS_SELECTIVE_FLUSH (unsupported upstream; pointless with a database of its own) ..."
+  $WP config delete WP_REDIS_SELECTIVE_FLUSH 2>&1 && echo "✅ removed"
 fi
 
 # --- Summary ---

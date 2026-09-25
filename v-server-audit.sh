@@ -419,7 +419,7 @@ audit_redis_cache() {
     if [ "${pct:-0}" -ge 10 ]; then
       finding WARNING "Redis spends ${pct}% of its uptime running object-cache flush scans" \
         "flush_group() SCANs the entire keyspace on every call and Redis is single-threaded, so each scan stalls every other cache read — which surfaces as 504s under load." \
-        "Add to wp-config.php: define('WP_REDIS_DISABLE_GROUP_FLUSH', true); and define('WP_REDIS_MAXTTL', 86400);"
+        "Give each site its own WP_REDIS_DATABASE and WP_REDIS_MAXTTL; then define('WP_REDIS_DISABLE_GROUP_FLUSH', true) is safe for those sites (hs does this per site)"
     fi
   fi
 
@@ -429,21 +429,32 @@ audit_redis_cache() {
     ttl_pct=$(awk -v e="${expires:-0}" -v k="$keys" 'BEGIN{printf "%.0f", e*100/k}')
     [ "${ttl_pct:-100}" -lt 25 ] && finding WARNING "Redis holds ${keys} keys and only ${ttl_pct}% have a TTL" \
       "Nothing bounds the keyspace, so it grows until every flush scan is slow." \
-      "define('WP_REDIS_MAXTTL', 86400); in wp-config.php, then: redis-cli flushdb"
+      "define('WP_REDIS_MAXTTL', 86400); per site, then clear each site's old keys — on a shared database by prefix, not FLUSHDB (hs: Make cache keys expire on every object-cache site)"
   fi
 
-  # Sites with Redis enabled but missing the guard constant.
-  local f dom missing=""
+  # Per site, against the layout the redis-cache plugin documents: keys that
+  # expire (MAXTTL) and a database of its own. (A guard-constant check used to
+  # live here; DISABLE_GROUP_FLUSH is only safe with a database of its own —
+  # on a shared one it empties every neighbour — so it is no longer advised
+  # blindly. hs checks the full layout: `hs check --section performance`.)
+  local f dom db nottl="" shared="" seen=""
   for f in /home/*/web/*/public_html/wp-config.php; do
     [ -f "$f" ] || continue
     [ -f "$(dirname "$f")/wp-content/object-cache.php" ] || continue
-    grep -q "WP_REDIS_DISABLE_GROUP_FLUSH" "$f" 2>/dev/null && continue
     dom=$(echo "$f" | awk -F/ '{print $5}')
-    missing="$missing $dom"
+    grep -qE "WP_REDIS_MAXTTL'[[:space:]]*,[[:space:]]*'?[1-9]" "$f" 2>/dev/null || nottl="$nottl $dom"
+    db=$(grep -oE "WP_REDIS_DATABASE'[[:space:]]*,[[:space:]]*'?[0-9]+" "$f" 2>/dev/null | grep -oE '[0-9]+$')
+    seen="$seen ${db:-0}:$dom"
   done
-  [ -n "$missing" ] && finding ADVISORY "Redis enabled without WP_REDIS_DISABLE_GROUP_FLUSH:$missing" \
-    "Harmless until the keyspace grows — then every group flush scans all of it. v-wp-redis-install sets this on new installs." \
-    "wp config set WP_REDIS_DISABLE_GROUP_FLUSH true --raw --type=constant --path=<docroot>"
+  for db in $(printf '%s\n' $seen | cut -d: -f1 | sort | uniq -d); do
+    shared="$shared db$db($(printf '%s\n' $seen | grep "^$db:" | cut -d: -f2 | paste -sd,))"
+  done
+  [ -n "$nottl" ] && finding ADVISORY "Redis object cache without WP_REDIS_MAXTTL:$nottl" \
+    "Keys never expire, so the keyspace only grows and every flush scan gets slower." \
+    "wp config set WP_REDIS_MAXTTL 86400 --raw --type=constant --path=<docroot>   # or hs: the fix on the finding"
+  [ -n "$shared" ] && finding ADVISORY "Sites sharing a Redis database:$shared" \
+    "The plugin's FAQ requires a database per site; while shared, any site's \`wp cache flush\` (FLUSHDB) empties all of them." \
+    "hs: Performance → Redis object cache per site → Give the site its own Redis database"
 }
 
 # ------------------------------------------------------- exposed WP files ---

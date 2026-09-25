@@ -10,6 +10,7 @@ import (
 
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/redisinfo"
 )
 
 func performanceChecks() []Check {
@@ -108,7 +109,7 @@ func checkRedis(ctx context.Context, env *Env) []Result {
 		if evalPct >= 10 {
 			rs = append(rs, New(Warn, fmt.Sprintf("%.0f%% of uptime spent in object-cache flush scans", evalPct)).
 				Because("flush_group() scans the entire keyspace on every call and Redis is single-threaded, so each scan stalls every other read — 504s under load.").
-				Fixed("wp-config: define('WP_REDIS_DISABLE_GROUP_FLUSH', true); define('WP_REDIS_MAXTTL', 86400);"))
+				Fixed("give each site its own database and WP_REDIS_MAXTTL; then WP_REDIS_DISABLE_GROUP_FLUSH is safe to set"))
 		}
 	}
 	var keys, expires int64
@@ -121,53 +122,123 @@ func checkRedis(ctx context.Context, env *Env) []Result {
 	if keys > 50000 && expires*100/keys < 25 {
 		rs = append(rs, New(Warn, fmt.Sprintf("%d keys, only %d%% with a TTL", keys, expires*100/keys)).
 			Because("Nothing bounds the keyspace, so it grows until every flush scan is slow.").
-			Fixed("define('WP_REDIS_MAXTTL', 86400); in wp-config.php, then flush that site's database"))
+			Fixed("set WP_REDIS_MAXTTL on every object-cache site, then clear the old keys"))
+	}
+	// Evidence worth having on every result: is the cache earning its keep,
+	// and does something flush it constantly (the FAQ's "constant flushing").
+	statsInfo, _ := redisCLI(ctx, env, "info", "stats")
+	hits, _ := strconv.ParseFloat(infoField(statsInfo, "keyspace_hits"), 64)
+	misses, _ := strconv.ParseFloat(infoField(statsInfo, "keyspace_misses"), 64)
+	evicted := infoField(statsInfo, "evicted_keys")
+	var flushes, evals float64
+	if m := regexp.MustCompile(`cmdstat_flushdb:calls=(\d+)`).FindStringSubmatch(stats); m != nil {
+		flushes, _ = strconv.ParseFloat(m[1], 64)
+	}
+	if m := regexp.MustCompile(`cmdstat_eval:calls=(\d+)`).FindStringSubmatch(stats); m != nil {
+		evals, _ = strconv.ParseFloat(m[1], 64)
+	}
+	ev := []string{fmt.Sprintf("%d MB cap, %s, %d keys (%d with a TTL)", st.MaxMemory>>20, st.Policy, keys, expires)}
+	if hits+misses > 0 {
+		ev = append(ev, fmt.Sprintf("hit rate %.0f%% since start (%.0f h ago), %s evicted", 100*hits/(hits+misses), uptime/3600, orDash(evicted)))
+	}
+	if uptime > 3600 {
+		ev = append(ev, fmt.Sprintf("%.1f FLUSHDB/h, %.0f Lua flush scans/h (%.1f%% of uptime)", flushes*3600/uptime, evals*3600/uptime, evalPct))
+	}
+	// A FLUSHDB of a big database blocks Redis while it frees memory; Redis
+	// 6.2+ can do it in the background. The plugin FAQ recommends this.
+	lazy, _ := redisCLI(ctx, env, "config", "get", "lazyfree-lazy-user-flush")
+	if l := nonEmpty(lazy); len(l) > 0 && l[len(l)-1] == "no" {
+		biggest := 0
+		for _, n := range redisinfo.KeysPerDB(ctx, env.Sys) {
+			biggest = max(biggest, n)
+		}
+		if biggest > 50000 {
+			rs = append(rs, New(Warn, fmt.Sprintf("flushes block Redis (lazyfree-lazy-user-flush no, largest database %d keys)", biggest)).
+				Ev(ev...).
+				Because("`wp cache flush` is FLUSHDB: on a large database Redis frees every key before answering anything else. Asynchronous flushing returns at once.").
+				Fixed("CONFIG SET lazyfree-lazy-user-flush yes, and the same line in redis.conf"))
+		}
+	}
+	for i := range rs {
+		if len(rs[i].Evidence) == 0 {
+			rs[i] = rs[i].Ev(ev...)
+		}
 	}
 	if len(rs) > 0 {
 		return rs
 	}
-	return []Result{New(OK, fmt.Sprintf("answering, %d MB cap %s, %d keys, flush scans %.1f%% of uptime",
-		st.MaxMemory>>20, st.Policy, keys, evalPct))}
+	return []Result{New(OK, fmt.Sprintf("answering, %d keys, %.0f%% of them with a TTL", keys, 100*float64(expires)/float64(max(keys, 1)))).Ev(ev...)}
 }
 
+// checkRedisSites compares each object-cache site with the layout the
+// redis-cache plugin documents (see internal/redisinfo): a database of its
+// own, a prefix, MAXTTL, no SELECTIVE_FLUSH, a drop-in matching the plugin.
 func checkRedisSites(ctx context.Context, env *Env) []Result {
 	s := env.Sys
+	sites := redisinfo.Sites(s)
 	var rs []Result
-	prefixes := map[string][]string{}
-	withDropin := 0
-	for _, d := range hestia.WebDomains(s) {
-		root := d.DocRoot()
-		if !exists(s, root+"/wp-content/object-cache.php") {
-			continue
+	for _, st := range sites {
+		var issues []string
+		state := OK
+		worse := func(to State) {
+			if to > state {
+				state = to
+			}
 		}
-		withDropin++
-		conf := readString(s, root+"/wp-config.php")
-		if !strings.Contains(conf, "WP_REDIS_DISABLE_GROUP_FLUSH") {
-			rs = append(rs, New(Warn, "object cache without WP_REDIS_DISABLE_GROUP_FLUSH").For(d.Name).
-				Because("Harmless until the keyspace grows — then every group flush scans all of it.").
-				Fixed(fmt.Sprintf("wp config set WP_REDIS_DISABLE_GROUP_FLUSH true --raw --type=constant --path=%s", root)))
+		var ev []string
+		ev = append(ev, fmt.Sprintf("database %d%s, prefix %s", st.DB, map[bool]string{true: "", false: " (default)"}[st.DBSet], orDash(st.Prefix)))
+		if len(st.SharesWith) > 0 {
+			worse(Warn)
+			issues = append(issues, fmt.Sprintf("shares Redis database %d with %s", st.DB, strings.Join(redisinfo.SortedNames(st.SharesWith), ", ")))
+			if len(st.SamePrefix) > 0 {
+				worse(Fail)
+				label := "the same prefix " + orDash(st.Prefix)
+				if st.Prefix == "" {
+					label = "no prefix either"
+				}
+				issues = append(issues, "with "+label+" as "+strings.Join(redisinfo.SortedNames(st.SamePrefix), ", ")+" — they read each other's cache")
+			}
 		}
-		// Sites collide only when both the Redis database and the key prefix
-		// match — one database per site (the clone/staging default) is enough.
-		db := "0"
-		if m := regexp.MustCompile(`WP_REDIS_DATABASE['"]\s*,\s*['"]?(\d+)`).FindStringSubmatch(conf); m != nil {
-			db = m[1]
+		if st.Prefix == "" && len(st.SharesWith) == 0 {
+			worse(Warn)
+			issues = append(issues, "no WP_REDIS_PREFIX")
 		}
-		prefix := ""
-		if m := regexp.MustCompile(`WP_REDIS_PREFIX['"]\s*,\s*['"]([^'"]+)`).FindStringSubmatch(conf); m != nil {
-			prefix = m[1]
-		} else if m := regexp.MustCompile(`WP_CACHE_KEY_SALT['"]\s*,\s*['"]([^'"]+)`).FindStringSubmatch(conf); m != nil {
-			prefix = m[1]
+		if st.MaxTTL == "" || st.MaxTTL == "0" {
+			worse(Warn)
+			issues = append(issues, "keys never expire (no WP_REDIS_MAXTTL)")
 		}
-		key := "db " + db + ", prefix " + orDash(prefix)
-		prefixes[key] = append(prefixes[key], d.Name)
+		if st.Selective {
+			worse(Warn)
+			issues = append(issues, "WP_REDIS_SELECTIVE_FLUSH is on (unsupported, slow Lua flush)")
+		}
+		if st.GroupFlushOff && len(st.SharesWith) > 0 {
+			worse(Warn)
+			issues = append(issues, "WP_REDIS_DISABLE_GROUP_FLUSH on a shared database (every group flush empties the other sites too)")
+		}
+		switch {
+		case st.DropinVersion == "":
+			worse(Configured)
+			ev = append(ev, "object-cache.php is not the redis-cache drop-in (or has no version) — not checked further")
+		case st.PluginVersion != "" && st.DropinVersion != st.PluginVersion:
+			worse(Warn)
+			issues = append(issues, fmt.Sprintf("drop-in %s behind plugin %s", st.DropinVersion, st.PluginVersion))
+		}
+		if st.DropinVersion != "" {
+			ev = append(ev, "redis-cache drop-in "+st.DropinVersion)
+		}
+		r := New(state, "own database, prefix, keys expire").For(st.Domain.Name).Ev(ev...)
+		if len(issues) > 0 {
+			r.Summary = strings.Join(issues, "; ")
+			r = r.Because("The redis-cache plugin expects a database and prefix per site (its FAQ: sharing is how one site ends up serving another's pages), keys with a TTL, and no selective flush (its README: unsupported, slow). Sharing a database also means any site's `wp cache flush` — FLUSHDB — empties every site in it.").
+				Fixed("the fixes below, one at a time")
+		}
+		r = r.With("redisDb", strconv.Itoa(st.DB)).With("shared", strconv.FormatBool(len(st.SharesWith) > 0))
+		rs = append(rs, r)
 	}
-	for key, doms := range prefixes {
-		if len(doms) > 1 {
-			rs = append(rs, New(Fail, fmt.Sprintf("%d sites share one Redis keyspace (%s)", len(doms), key)).For(key).Ev(doms...).
-				Because("Sites sharing a keyspace read each other's cached options and posts — a staging copy can serve live's data or the reverse.").
-				Fixed("give each site its own WP_REDIS_DATABASE or a unique WP_REDIS_PREFIX (v-wp-redis-install does)"))
-		}
+	// More object-cache sites than Redis databases: they cannot all have one.
+	if max := redisinfo.Databases(ctx, s); len(sites) > max-1 {
+		rs = append(rs, New(Warn, fmt.Sprintf("%d object-cache sites, %d Redis databases (0 is the shared default)", len(sites), max)).For("redis databases").
+			Because("Not every site can have its own database.").Fixed("raise `databases` in /etc/redis/redis.conf and restart Redis"))
 	}
 	// PHP redis extension on every version that serves a pool.
 	for _, v := range PHPVersions(s) {
@@ -181,13 +252,10 @@ func checkRedisSites(ctx context.Context, env *Env) []Result {
 				Fixed("run.sh → 3 (Redis) → 3"))
 		}
 	}
-	if len(rs) > 0 {
-		return rs
-	}
-	if withDropin == 0 {
+	if len(rs) == 0 {
 		return []Result{New(NA, "no site uses the Redis object cache")}
 	}
-	return []Result{New(OK, fmt.Sprintf("%d sites on the object cache, unique prefixes, guard constant set", withDropin))}
+	return rs
 }
 
 func PHPHasRedis(ctx context.Context, env *Env, ver string) bool {

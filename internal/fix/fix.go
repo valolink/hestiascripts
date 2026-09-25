@@ -14,17 +14,21 @@ package fix
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/logcap"
+	"github.com/valolink/hestiascripts/internal/redisinfo"
 	"github.com/valolink/hestiascripts/internal/sys"
 	"github.com/valolink/hestiascripts/internal/wpfiles"
 )
@@ -303,26 +307,6 @@ func init() {
 			steps := quarantineSteps(extra, d)
 			return append(steps, Step{Why: "replace modified or missing core files with the " + ver + " release",
 				Argv: wp(d, "core", "download", "--force", "--skip-content", "--version="+ver)}), nil
-		},
-	})
-	register(Fix{
-		ID: "redis-guard", Title: "Add the Redis flush guard", Check: "redis.sites", Scope: "site", Risk: Change,
-		Note:    "WP_REDIS_DISABLE_GROUP_FLUSH true and WP_REDIS_MAXTTL 86400 in wp-config (the kuumalahde 504 fix).",
-		How:     "How: `wp config set … --raw --type=constant` as the site's user adds the two defines to wp-config.php. They take effect on the next request.",
-		Undo:    "Undo: `wp config delete WP_REDIS_DISABLE_GROUP_FLUSH` (and WP_REDIS_MAXTTL) in the site shell.",
-		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "WP_REDIS_DISABLE_GROUP_FLUSH") },
-		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
-			d, err := domainByName(env.Sys, subject)
-			if err != nil {
-				return nil, err
-			}
-			steps := []Step{{Why: "group flush falls back to FLUSHDB instead of scanning the keyspace",
-				Argv: wp(d, "config", "set", "WP_REDIS_DISABLE_GROUP_FLUSH", "true", "--raw", "--type=constant")}}
-			if b, _ := env.Sys.ReadFile(d.DocRoot() + "/wp-config.php"); !strings.Contains(string(b), "WP_REDIS_MAXTTL") {
-				steps = append(steps, Step{Why: "keys expire, so the keyspace stays bounded",
-					Argv: wp(d, "config", "set", "WP_REDIS_MAXTTL", "86400", "--raw", "--type=constant")})
-			}
-			return steps, nil
 		},
 	})
 	register(Fix{
@@ -605,35 +589,6 @@ func init() {
 	register(maldetDeps)
 
 	register(Fix{
-		ID: "redis-guard-all", Title: "Bound the Redis keyspace on every object-cache site", Check: "redis", Scope: "all", Risk: Change,
-		Applies: func(r check.Result) bool {
-			return strings.Contains(r.Summary, "TTL") || strings.Contains(r.Summary, "flush scans")
-		},
-		Note: "alavus, hzenergiatuote, soutuveneet 2026-09-24: 87–119k keys, 1–3 % with a TTL — the state that caused kuumalahde's nightly 504s.",
-		How:  "For each site with the Redis drop-in: `wp config set` adds WP_REDIS_DISABLE_GROUP_FLUSH and WP_REDIS_MAXTTL (as the site's user), then `wp cache flush` empties that site's keys once — existing keys have no TTL and would otherwise stay forever. Pages are a little slower until the cache refills.",
-		Undo: "wp config delete the two constants per site (the flushed cache refills by itself).",
-		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
-			var steps []Step
-			for _, d := range hestia.WebDomains(env.Sys) {
-				if _, err := env.Sys.Stat(d.DocRoot() + "/wp-content/object-cache.php"); err != nil {
-					continue
-				}
-				conf, _ := env.Sys.ReadFile(d.DocRoot() + "/wp-config.php")
-				if !strings.Contains(string(conf), "WP_REDIS_DISABLE_GROUP_FLUSH") {
-					steps = append(steps, Step{Why: d.Name + ": group flush without a keyspace scan",
-						Argv: wp(d, "config", "set", "WP_REDIS_DISABLE_GROUP_FLUSH", "true", "--raw", "--type=constant")})
-				}
-				if !strings.Contains(string(conf), "WP_REDIS_MAXTTL") {
-					steps = append(steps, Step{Why: d.Name + ": keys expire after a day",
-						Argv: wp(d, "config", "set", "WP_REDIS_MAXTTL", "86400", "--raw", "--type=constant")})
-				}
-				steps = append(steps, Step{Why: d.Name + ": drop the keys written without a TTL", Argv: wp(d, "cache", "flush")})
-			}
-			return steps, nil
-		},
-	})
-
-	register(Fix{
 		ID: "apt-timers", Title: "Turn on automatic security updates", Check: "updates.unattended", Scope: "", Risk: Change,
 		Applies: func(r check.Result) bool {
 			return strings.Contains(r.Summary, "never run") || strings.Contains(r.Summary, "last run was")
@@ -673,6 +628,206 @@ func init() {
 				}
 			}
 			return quarantineSteps(files, d), nil
+		},
+	})
+}
+
+// --- Redis: the layout the redis-cache plugin documents (internal/redisinfo)
+
+func redisSite(env *check.Env, domain string) (redisinfo.Site, error) {
+	for _, st := range redisinfo.Sites(env.Sys) {
+		if st.Domain.Name == domain {
+			return st, nil
+		}
+	}
+	return redisinfo.Site{}, fmt.Errorf("%s has no Redis object cache", domain)
+}
+
+// clearOldKeys removes a site's keys without touching anyone else's: on a
+// database of its own a background FLUSHDB; on a shared one SCAN + UNLINK
+// by prefix (incremental, never blocks Redis the way the plugin's Lua flush
+// does). A site with no prefix on a shared database cannot be told apart —
+// its old keys are left to allkeys-lru eviction.
+func clearOldKeys(st redisinfo.Site, why string) Step {
+	db := strconv.Itoa(st.DB)
+	switch {
+	case len(st.SharesWith) == 0:
+		return Step{Why: why + " — its own database, so a background FLUSHDB", Argv: []string{"redis-cli", "-n", db, "flushdb", "async"}}
+	case st.Prefix != "":
+		pat := st.Prefix + "*"
+		return Step{Why: why + " — shared database: delete only keys starting with " + st.Prefix,
+			Argv: []string{"sh", "-c", "redis-cli -n " + db + " --scan --pattern " + Quote([]string{pat}) +
+				" | xargs -r -d '\\n' -n 500 redis-cli -n " + db + " unlink | awk '{n+=$1} END {print n+0, \"keys removed\"}'"}}
+	}
+	return Step{Why: why + " — no prefix on a shared database: its old keys cannot be told from the others', left to LRU eviction",
+		Argv: []string{"true"}}
+}
+
+func maxTTLSteps(st redisinfo.Site) []Step {
+	return []Step{
+		{Why: st.Domain.Name + ": keys expire within a day", Argv: wp(st.Domain, "config", "set", "WP_REDIS_MAXTTL", "86400", "--raw", "--type=constant")},
+		clearOldKeys(st, st.Domain.Name+": drop the keys written without a TTL"),
+	}
+}
+
+func init() {
+	register(Fix{
+		ID: "redis-own-db", Title: "Give the site its own Redis database", Check: "redis.sites", Scope: "site", Risk: Change,
+		Applies: func(r check.Result) bool { return r.Data["shared"] == "true" },
+		Note:    "The plugin's FAQ: every site needs its own WP_REDIS_DATABASE and prefix. While sites share one, any site's `wp cache flush` (FLUSHDB) empties all of them.",
+		How:     "Picks the lowest database no wp-config on the box names and that holds no keys (the same rule as v-wp-redis-install), writes WP_REDIS_DATABASE (and a prefix if missing, MAXTTL if missing) with `wp config set` as the site's user, drops SELECTIVE_FLUSH (pointless with a database of its own), then deletes the site's old keys from the shared database by prefix with SCAN + UNLINK — other sites' keys are not touched. The site's next request starts on an empty cache.",
+		Undo:    "wp config delete WP_REDIS_DATABASE (back to database 0), in the site shell.",
+		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
+			st, err := redisSite(env, subject)
+			if err != nil {
+				return nil, err
+			}
+			if len(st.SharesWith) == 0 {
+				return nil, nil
+			}
+			n, ok := redisinfo.FreeDB(ctx, env.Sys)
+			if !ok {
+				return nil, fmt.Errorf("no free Redis database — raise `databases` in /etc/redis/redis.conf first")
+			}
+			d := st.Domain
+			var steps []Step
+			old := st
+			if st.Prefix == "" {
+				b := make([]byte, 4)
+				rand.Read(b)
+				p := redisinfo.NewPrefix(d.Name, hex.EncodeToString(b))
+				steps = append(steps, Step{Why: "a prefix of its own", Argv: wp(d, "config", "set", "WP_REDIS_PREFIX", p, "--type=constant")})
+			}
+			steps = append(steps, Step{Why: fmt.Sprintf("database %d (was %d, shared with %s)", n, st.DB, strings.Join(st.SharesWith, ", ")),
+				Argv: wp(d, "config", "set", "WP_REDIS_DATABASE", strconv.Itoa(n), "--raw", "--type=constant")})
+			if st.Selective {
+				steps = append(steps, Step{Why: "selective flush is unsupported and pointless with a database of its own", Argv: wp(d, "config", "delete", "WP_REDIS_SELECTIVE_FLUSH")})
+			}
+			if st.MaxTTL == "" || st.MaxTTL == "0" {
+				steps = append(steps, Step{Why: "keys expire within a day", Argv: wp(d, "config", "set", "WP_REDIS_MAXTTL", "86400", "--raw", "--type=constant")})
+			}
+			return append(steps, clearOldKeys(old, "remove its keys from the old database")), nil
+		},
+	})
+	register(Fix{
+		ID: "redis-maxttl", Title: "Make the site's cache keys expire", Check: "redis.sites", Scope: "site", Risk: Change,
+		Applies: func(r check.Result) bool {
+			return strings.Contains(r.Summary, "never expire") && r.Data["shared"] != "true"
+		},
+		Note: "WP_REDIS_MAXTTL 86400: every key lives at most a day, so the keyspace stays bounded and scans stay cheap. The plugin FAQ's own answer to a growing Redis.",
+		How:  "`wp config set WP_REDIS_MAXTTL 86400` as the site's user, then the keys already written without a TTL are cleared — on its own database a background FLUSHDB (`flushdb async`), which returns at once. The site runs on a cold cache for a few requests.",
+		Undo: "wp config delete WP_REDIS_MAXTTL.",
+		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
+			st, err := redisSite(env, subject)
+			if err != nil {
+				return nil, err
+			}
+			return maxTTLSteps(st), nil
+		},
+	})
+	register(Fix{
+		ID: "redis-maxttl-all", Title: "Make cache keys expire on every object-cache site", Check: "redis", Scope: "all", Risk: Change,
+		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "TTL") },
+		Note:    "WP_REDIS_MAXTTL for every site missing it, and each site's old keys cleared without touching the others'.",
+		How:     "Per site without MAXTTL: `wp config set WP_REDIS_MAXTTL 86400` as its user; then its old keys go — a background FLUSHDB where it has its own database, SCAN + UNLINK by its prefix where the database is shared.",
+		Undo:    "wp config delete WP_REDIS_MAXTTL per site.",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			var steps []Step
+			for _, st := range redisinfo.Sites(env.Sys) {
+				if st.MaxTTL == "" || st.MaxTTL == "0" {
+					steps = append(steps, maxTTLSteps(st)...)
+				}
+			}
+			return steps, nil
+		},
+	})
+	register(Fix{
+		ID: "redis-no-selective", Title: "Turn off selective flushing", Check: "redis.sites", Scope: "site", Risk: Change,
+		Applies: func(r check.Result) bool {
+			return strings.Contains(r.Summary, "SELECTIVE_FLUSH") && r.Data["shared"] != "true"
+		},
+		Note: "The plugin README lists WP_REDIS_SELECTIVE_FLUSH as unsupported (\"terribly slow Lua script\"). With a database of its own the site does not need it: a flush becomes an instant FLUSHDB of that one database.",
+		How:  "`wp config delete WP_REDIS_SELECTIVE_FLUSH` as the site's user. Nothing else changes; the next flush is FLUSHDB of the site's own database instead of a scan.",
+		Undo: "wp config set WP_REDIS_SELECTIVE_FLUSH true --raw --type=constant.",
+		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
+			st, err := redisSite(env, subject)
+			if err != nil {
+				return nil, err
+			}
+			if len(st.SharesWith) > 0 {
+				return nil, fmt.Errorf("%s shares its database — give it its own first (that fix also removes this)", subject)
+			}
+			return []Step{{Why: "flush becomes FLUSHDB of its own database", Argv: wp(st.Domain, "config", "delete", "WP_REDIS_SELECTIVE_FLUSH")}}, nil
+		},
+	})
+	register(Fix{
+		ID: "redis-dropin", Title: "Update the Redis drop-in", Check: "redis.sites", Scope: "site", Risk: Change,
+		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "drop-in") },
+		Note:    "object-cache.php is copied from the plugin when the cache is enabled and does not follow plugin updates on its own.",
+		How:     "`wp redis update-dropin` as the site's user copies the installed plugin's drop-in over wp-content/object-cache.php.",
+		Undo:    "Update or downgrade the plugin, then run the same command.",
+		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
+			st, err := redisSite(env, subject)
+			if err != nil {
+				return nil, err
+			}
+			return []Step{{Why: fmt.Sprintf("drop-in %s → plugin %s", st.DropinVersion, st.PluginVersion), Argv: wp(st.Domain, "redis", "update-dropin")}}, nil
+		},
+	})
+	register(Fix{
+		ID: "redis-group-flush", Title: "Stop group flushes from scanning Redis", Check: "redis", Scope: "all", Risk: Change,
+		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "flush scans") },
+		Note:    "Only for sites with a database of their own: WP_REDIS_DISABLE_GROUP_FLUSH makes a group flush an instant FLUSHDB of that one database instead of a Lua scan that blocks every other request (kuumalahde's 504s). Sites on a shared database are skipped — for them FLUSHDB would empty their neighbours.",
+		How:     "Per site with its own database and no selective flush: `wp config set WP_REDIS_DISABLE_GROUP_FLUSH true --raw --type=constant` as its user. The cost is more cache misses after a group flush (the whole site's cache instead of one group); never stale data.",
+		Undo:    "wp config delete WP_REDIS_DISABLE_GROUP_FLUSH per site.",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			var steps []Step
+			for _, st := range redisinfo.Sites(env.Sys) {
+				switch {
+				case st.GroupFlushOff:
+				case len(st.SharesWith) > 0 || st.Selective:
+					steps = append(steps, Step{Why: st.Domain.Name + ": skipped — needs its own database and no selective flush first", Argv: []string{"true"}})
+				default:
+					steps = append(steps, Step{Why: st.Domain.Name, Argv: wp(st.Domain, "config", "set", "WP_REDIS_DISABLE_GROUP_FLUSH", "true", "--raw", "--type=constant")})
+				}
+			}
+			return steps, nil
+		},
+	})
+	register(Fix{
+		ID: "redis-lazyfree", Title: "Let Redis flush in the background", Check: "redis", Scope: "", Risk: Change,
+		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "lazyfree") },
+		Note:    "lazyfree-lazy-user-flush yes (Redis 6.2+, recommended in the plugin FAQ): FLUSHDB returns at once and memory is freed in the background, so a site's `wp cache flush` never stalls the other sites.",
+		How:     "`redis-cli config set` applies it to the running Redis immediately (no restart, no data lost); the same line is written to /etc/redis/redis.conf so it survives a restart — replacing an existing lazyfree-lazy-user-flush line or appending one. The last step shows the running value.",
+		Undo:    "redis-cli config set lazyfree-lazy-user-flush no, and set the line in /etc/redis/redis.conf back to no.",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			conf := "/etc/redis/redis.conf"
+			if _, err := env.Sys.Stat(conf); err != nil {
+				return nil, fmt.Errorf("%s not found", conf)
+			}
+			return []Step{
+				{Why: "apply to the running Redis", Argv: []string{"redis-cli", "config", "set", "lazyfree-lazy-user-flush", "yes"}},
+				{Why: "keep it across restarts", Argv: []string{"sh", "-c", "grep -q '^lazyfree-lazy-user-flush' " + conf +
+					" && sed -i 's/^lazyfree-lazy-user-flush.*/lazyfree-lazy-user-flush yes/' " + conf +
+					" || echo 'lazyfree-lazy-user-flush yes' >> " + conf + "; grep -n '^lazyfree-lazy-user-flush' " + conf}},
+				{Why: "running value", Argv: []string{"redis-cli", "config", "get", "lazyfree-lazy-user-flush"}},
+			}, nil
+		},
+	})
+	register(Fix{
+		ID: "redis-databases", Title: "Raise the number of Redis databases", Check: "redis.sites", Scope: "", Risk: Change,
+		Applies: func(r check.Result) bool { return r.Subject == "redis databases" },
+		Note:    "More object-cache sites than Redis databases. Raises `databases` to 64 in /etc/redis/redis.conf; needs a Redis restart, which empties the cache for every site on the box (Hestia's Redis is cache-only).",
+		How:     "sed changes (or appends) the `databases` line in /etc/redis/redis.conf, then `systemctl restart redis-server`. Sites reconnect on their next request with a cold cache.",
+		Undo:    "Set the line back and restart Redis — only after sites using databases above the old limit have been moved.",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			conf := "/etc/redis/redis.conf"
+			return []Step{
+				{Why: "64 databases", Argv: []string{"sh", "-c", "grep -q '^databases' " + conf + " && sed -i 's/^databases.*/databases 64/' " + conf +
+					" || echo 'databases 64' >> " + conf + "; grep -n '^databases' " + conf}},
+				{Why: "apply (cache restarts empty)", Argv: []string{"systemctl", "restart", "redis-server"}},
+				{Why: "check", Argv: []string{"redis-cli", "config", "get", "databases"}},
+			}, nil
 		},
 	})
 }

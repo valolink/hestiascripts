@@ -128,31 +128,52 @@ func TestNightlyAndHourlyFromOneResticCall(t *testing.T) {
 	}
 }
 
-func TestRedisSitesCollideOnlyOnSameDatabaseAndPrefix(t *testing.T) {
-	site := func(name, conf string) (string, string, string, string) {
-		root := "/home/u/web/" + name + "/public_html"
-		return root + "/wp-config.php", conf + "\ndefine('WP_REDIS_DISABLE_GROUP_FLUSH', true);", root + "/wp-content/object-cache.php", "<?php"
-	}
-	mk := func(a, b string) *sys.Fake {
+func TestRedisSitesLayout(t *testing.T) {
+	dropin := "<?php\n/*\n * Plugin Name: Redis Object Cache Drop-In\n * Version: 2.8.0\n */"
+	mk := func(confA, confB string) *sys.Fake {
 		f := &sys.Fake{Files: map[string]string{
 			hestia.UsersDir + "/u/web.conf": "DOMAIN='a.fi' PROXY='wp-secure'\nDOMAIN='b.fi' PROXY='wp-secure'\n",
-		}}
-		for _, x := range [][2]string{{"a.fi", a}, {"b.fi", b}} {
-			k1, v1, k2, v2 := site(x[0], x[1])
-			f.Files[k1], f.Files[k2] = v1, v2
+		}, Cmds: map[string]sys.FakeCmd{"redis-cli config get databases": {Out: "databases\n16\n"}}}
+		for _, x := range [][2]string{{"a.fi", confA}, {"b.fi", confB}} {
+			root := "/home/u/web/" + x[0] + "/public_html"
+			f.Files[root+"/wp-config.php"] = x[1]
+			f.Files[root+"/wp-content/object-cache.php"] = dropin
+			f.Files[root+"/wp-content/plugins/redis-cache/redis-cache.php"] = " * Version: 2.8.0"
 		}
 		return f
 	}
-	same := checkRedisSites(context.Background(), env(mk(
-		"define('WP_REDIS_PREFIX', 'shop_');", "define( 'WP_REDIS_PREFIX', 'shop_' );")))
-	if states(same) != "fail" {
-		t.Errorf("same db+prefix: %s", states(same))
+	byDomain := func(rs []Result) map[string]Result {
+		m := map[string]Result{}
+		for _, r := range rs {
+			m[r.Subject] = r
+		}
+		return m
 	}
-	split := checkRedisSites(context.Background(), env(mk(
-		"define('WP_REDIS_PREFIX', 'shop_'); define('WP_REDIS_DATABASE', 1);",
-		"define('WP_REDIS_PREFIX', 'shop_'); define('WP_REDIS_DATABASE', 2);")))
-	if states(split) != "ok" {
-		t.Errorf("separate databases: %s %v", states(split), split)
+	// hzweb1 shape: same database, different prefixes, no MAXTTL
+	rs := byDomain(checkRedisSites(context.Background(), env(mk(
+		"define('WP_REDIS_PREFIX', 'a_1');", "define( 'WP_REDIS_PREFIX', 'b_2' );"))))
+	if rs["a.fi"].State != Warn || !strings.Contains(rs["a.fi"].Summary, "shares Redis database 0 with b.fi") || rs["a.fi"].Data["shared"] != "true" {
+		t.Errorf("shared db: %+v", rs["a.fi"])
+	}
+	// same database AND same prefix: real collision
+	rs = byDomain(checkRedisSites(context.Background(), env(mk(
+		"define('WP_REDIS_PREFIX', 'shop_');", "define('WP_REDIS_PREFIX', 'shop_');"))))
+	if rs["a.fi"].State != Fail || !strings.Contains(rs["a.fi"].Summary, "read each other's cache") {
+		t.Errorf("same db + prefix: %+v", rs["a.fi"])
+	}
+	// the documented layout, two defines on one line, one commented out
+	rs = byDomain(checkRedisSites(context.Background(), env(mk(
+		"define('WP_REDIS_PREFIX', 'a_1'); define('WP_REDIS_DATABASE', 1); define('WP_REDIS_MAXTTL', 86400);\n// define('WP_REDIS_SELECTIVE_FLUSH', true);",
+		"define('WP_REDIS_PREFIX', 'b_2'); define('WP_REDIS_DATABASE', 2); define('WP_REDIS_MAXTTL', 86400);"))))
+	if rs["a.fi"].State != OK || rs["b.fi"].State != OK {
+		t.Errorf("documented layout should be OK: %+v / %+v", rs["a.fi"], rs["b.fi"])
+	}
+	// alavus staging shape: own database, selective flush
+	rs = byDomain(checkRedisSites(context.Background(), env(mk(
+		"define('WP_REDIS_PREFIX', 'a_1'); define('WP_REDIS_DATABASE', 1); define('WP_REDIS_SELECTIVE_FLUSH', true);",
+		"define('WP_REDIS_PREFIX', 'b_2'); define('WP_REDIS_DATABASE', 2); define('WP_REDIS_MAXTTL', 86400);"))))
+	if !strings.Contains(rs["a.fi"].Summary, "SELECTIVE_FLUSH") || !strings.Contains(rs["a.fi"].Summary, "never expire") {
+		t.Errorf("selective + no ttl: %+v", rs["a.fi"])
 	}
 }
 
