@@ -26,16 +26,64 @@ func checkFailedUnits(ctx context.Context, env *Env) []Result {
 	if err != nil {
 		return []Result{New(Unknown, "systemctl --failed did not answer")}
 	}
-	var failed []string
+	var rs []Result
 	for _, l := range nonEmpty(out) {
-		failed = append(failed, strings.Fields(l)[0])
+		unit := strings.Fields(l)[0]
+		if unit == "systemd-quotacheck.service" {
+			rs = append(rs, quotacheckResult(ctx, env))
+			continue
+		}
+		rs = append(rs, New(Fail, "failed").For(unit).Ev(unitCause(ctx, env, unit)...).
+			Because("Something the box is configured to run is not running, and nothing else surfaces it."))
 	}
-	if len(failed) > 0 {
-		return []Result{New(Fail, plural(len(failed), "failed unit", "failed units")+": "+joinMax(failed, 6)).
-			Because("Something the box is configured to run is not running, and nothing else surfaces it.").
-			Fixed("systemctl --failed  →  systemctl status <unit>")}
+	if len(rs) == 0 {
+		return []Result{New(OK, "no failed units")}
 	}
-	return []Result{New(OK, "no failed units")}
+	return rs
+}
+
+// unitCause pulls the lines that say why from the unit's last journal lines —
+// the ones naming a missing dependency, an error or an exit code.
+func unitCause(ctx context.Context, env *Env, unit string) []string {
+	out, _ := env.Sys.Run(ctx, "journalctl", "-u", unit, "-n", "30", "--no-pager", "-o", "cat")
+	var why []string
+	seen := map[string]bool{}
+	for _, l := range nonEmpty(out) {
+		if seen[l] {
+			continue
+		}
+		seen[l] = true
+		ll := strings.ToLower(l)
+		if strings.Contains(ll, "could not") || strings.Contains(ll, "error") || strings.Contains(ll, "not found") ||
+			strings.Contains(ll, "no such file") || strings.Contains(ll, "permission denied") || strings.Contains(ll, "failed with result") {
+			why = append(why, strings.TrimSpace(l))
+		}
+	}
+	if len(why) > 4 {
+		why = why[len(why)-4:]
+	}
+	return why
+}
+
+// systemd-quotacheck fails at every boot on Hestia boxes with journaled ext4
+// quotas, by upstream design: v-add-sys-quota installs /etc/cron.daily/
+// quotacheck, which touches /forcequotacheck daily, forcing a check at boot
+// that cannot remount / read-only. Quotas themselves stay on. Report it as
+// that — and warn only if quotas are actually off.
+func quotacheckResult(ctx context.Context, env *Env) Result {
+	out, _ := env.Sys.Run(ctx, "quotaon", "-pa")
+	userOn := strings.Contains(out, "user quota on / ") && strings.Contains(out, ") is on")
+	daily := exists(env.Sys, "/etc/cron.daily/quotacheck")
+	if !userOn {
+		return New(Warn, "quota check failed and user quotas are off").For("systemd-quotacheck.service").Ev(nonEmpty(out)...).
+			Because("Hestia's per-user disk limits are not enforced.").Fixed("v-add-sys-quota")
+	}
+	r := New(Configured, "fails at every boot by Hestia's design; quotas are on").For("systemd-quotacheck.service").
+		Ev(nonEmpty(out)...)
+	if daily {
+		r = r.Ev("/etc/cron.daily/quotacheck (from v-add-sys-quota) recreates /forcequotacheck daily; the boot-time check cannot remount / read-only")
+	}
+	return r
 }
 
 // CoreServices is the list v-server-health reports: web server, hestia,

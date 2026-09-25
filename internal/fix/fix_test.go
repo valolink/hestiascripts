@@ -90,3 +90,15 @@ func TestEveryFixHasACheckAndPlan(t *testing.T) {
 		}
 	}
 }
+
+func TestSpecificFixBeforeDiagnosis(t *testing.T) {
+	r := check.Result{Check: "systemd.failed", Subject: "maldet.service", State: check.Fail}
+	fs := For(r)
+	if len(fs) < 2 || fs[0].ID != "maldet-deps-unit" || fs[len(fs)-1].ID != "unit-diagnose" {
+		var ids []string
+		for _, f := range fs {
+			ids = append(ids, f.ID)
+		}
+		t.Errorf("order: %v", ids)
+	}
+}

@@ -317,6 +317,12 @@ func cmdFix(ctx context.Context, env *check.Env, args []string) int {
 		cmd := exec.CommandContext(ctx, st.Argv[0], st.Argv[1:]...)
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stdout
 		if err := cmd.Run(); err != nil {
+			if f.Risk == fix.ReadOnly {
+				// Diagnoses look at broken things: `systemctl status` exits 3
+				// for any unit that is not running. Information, not failure.
+				fmt.Printf("# (%v)\n", err)
+				continue
+			}
 			fmt.Printf("! %v\n", err)
 			failed++
 			if f.Risk != fix.ReadOnly {

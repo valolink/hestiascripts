@@ -205,3 +205,25 @@ func TestEnrolledUserWithUnreachableResticWarns(t *testing.T) {
 		t.Fatalf("got %+v", rs)
 	}
 }
+
+// alavus 2026-09-25: maldet missing `ed`; quotacheck failing by Hestia's design.
+func TestFailedUnitsCarryCauseAndKnownPatterns(t *testing.T) {
+	f := &sys.Fake{Files: map[string]string{"/etc/cron.daily/quotacheck": "touch /forcequotacheck"}, Cmds: map[string]sys.FakeCmd{
+		"systemctl --failed --no-legend --plain":               {Out: "maldet.service loaded failed failed Linux Malware Detect\nsystemd-quotacheck.service loaded failed failed File System Quota Check\n"},
+		"journalctl -u maldet.service -n 30 --no-pager -o cat": {Out: "Linux Malware Detect v1.6.6\nmaldet(916): {mon} could not find monitor mode dependency 'ed' in PATH, please apt/yum/dnf install ed and try again.\nmaldet.service: Failed with result 'protocol'.\n"},
+		"quotaon -pa": {Out: "group quota on / (/dev/sda1) is on\nuser quota on / (/dev/sda1) is on\n"},
+	}}
+	rs := checkFailedUnits(context.Background(), env(f))
+	got := map[string]Result{}
+	for _, r := range rs {
+		got[r.Subject] = r
+	}
+	m := got["maldet.service"]
+	if m.State != Fail || !strings.Contains(strings.Join(m.Evidence, " "), "dependency 'ed'") {
+		t.Errorf("maldet: %+v", m)
+	}
+	q := got["systemd-quotacheck.service"]
+	if q.State != Configured || !strings.Contains(q.Summary, "Hestia's design") {
+		t.Errorf("quotacheck: %+v", q)
+	}
+}

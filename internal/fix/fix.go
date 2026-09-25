@@ -73,7 +73,8 @@ func ByID(id string) (Fix, bool) {
 	return Fix{}, false
 }
 
-// For returns the fixes that apply to a result.
+// For returns the fixes that apply to a result: fixes that resolve it first,
+// read-only diagnoses after — Enter should offer the fix when one is known.
 func For(r check.Result) []Fix {
 	var out []Fix
 	for _, f := range all {
@@ -81,6 +82,7 @@ func For(r check.Result) []Fix {
 			out = append(out, f)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Risk != ReadOnly && out[j].Risk == ReadOnly })
 	return out
 }
 
@@ -381,17 +383,50 @@ func init() {
 		},
 	})
 	register(Fix{
-		ID: "failed-units", Title: "Show why the failed units failed", Check: "systemd.failed", Scope: "", Risk: ReadOnly,
-		Note: "Diagnosis only: restarting blindly hides the cause. Each unit's status and last journal lines.",
-		How:  "`systemctl status` for each failed unit — its state, exit code and last 15 journal lines. Changes nothing.",
-		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
-			out, _ := env.Sys.Run(ctx, "systemctl", "--failed", "--no-legend", "--plain")
-			var steps []Step
-			for _, l := range lines(out) {
-				u := strings.Fields(l)[0]
-				steps = append(steps, Step{Why: u, Argv: []string{"systemctl", "--no-pager", "-n", "15", "status", u}})
+		ID: "unit-diagnose", Title: "Show why the unit failed", Check: "systemd.failed", Scope: "", Risk: ReadOnly,
+		Applies: func(r check.Result) bool { return r.State == check.Fail },
+		Note:    "Diagnosis only: restarting blindly hides the cause. The unit's state, exit code and last journal lines.",
+		How:     "`systemctl status` for the unit (exit 3 there just means \"not running\"), then its last 30 journal lines. Changes nothing.",
+		Plan: func(ctx context.Context, env *check.Env, unit string) ([]Step, error) {
+			if !regexp.MustCompile(`^[A-Za-z0-9@._:-]+\.(service|timer|socket|mount)$`).MatchString(unit) {
+				return nil, fmt.Errorf("not a unit name: %q", unit)
 			}
-			return steps, nil
+			return []Step{
+				{Why: unit + " status", Argv: []string{"systemctl", "--no-pager", "-n", "0", "status", unit}},
+				{Why: unit + " journal", Argv: []string{"journalctl", "-u", unit, "-n", "30", "--no-pager", "-o", "short-iso"}},
+			}, nil
+		},
+	})
+	register(Fix{
+		ID: "web-terminal-update", Title: "Update Hestia's web terminal package", Check: "systemd.failed", Scope: "", Risk: Change,
+		Applies: func(r check.Result) bool {
+			return r.Subject == "hestia-web-terminal.service" && strings.Contains(strings.Join(r.Evidence, " "), "node-pty")
+		},
+		Note: "hzdemolink 2026-09-25: hestia-web-terminal 1.0.3 shipped without its node_modules (node-pty), so the panel's browser terminal never started; apt already offers a newer build.",
+		How:  "apt-cache policy shows the installed and candidate versions; apt-get installs the candidate (the upstream build bundles node_modules with `npm ci`); the unit is restarted and its status printed. Only this one package changes.",
+		Undo: "apt-get install hestia-web-terminal=<old version> (shown by the first step).",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			return []Step{
+				{Why: "installed vs available", Argv: []string{"apt-cache", "policy", "hestia-web-terminal"}},
+				{Why: "install the candidate build", Argv: []string{"apt-get", "install", "-y", "hestia-web-terminal"}},
+				{Why: "start it", Argv: []string{"systemctl", "restart", "hestia-web-terminal"}},
+				{Why: "did it stay up", Argv: []string{"systemctl", "--no-pager", "-n", "5", "status", "hestia-web-terminal"}},
+			}, nil
+		},
+	})
+	register(Fix{
+		ID: "quotacheck-reset", Title: "Clear quotacheck's failed state", Check: "systemd.failed", Scope: "", Risk: Change,
+		Applies: func(r check.Result) bool {
+			return r.Subject == "systemd-quotacheck.service" && r.State == check.Configured
+		},
+		Note: "Cosmetic: removes the unit from `systemctl --failed` until the next boot. Quotas are on; nothing is repaired because nothing is broken.",
+		How:  "Hestia's v-add-sys-quota installs /etc/cron.daily/quotacheck, which touches /forcequotacheck every day; at the next boot systemd-quotacheck is forced to run, cannot remount / read-only on a live system, and fails. Journaled ext4 quotas do not need that check. `systemctl reset-failed` clears the recorded failure only; it comes back after a reboot unless the daily cron is removed (worth raising upstream).",
+		Undo: "Nothing to undo.",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			return []Step{
+				{Why: "quotas are on (for the record)", Argv: []string{"quotaon", "-pa"}},
+				{Why: "forget the recorded boot-time failure", Argv: []string{"systemctl", "reset-failed", "systemd-quotacheck.service"}},
+			}, nil
 		},
 	})
 	register(Fix{
@@ -550,7 +585,7 @@ func init() {
 	fw.Applies = func(r check.Result) bool { return strings.Contains(r.Summary, "failed") }
 	register(fw)
 
-	register(Fix{
+	maldetDeps := Fix{
 		ID: "maldet-deps", Title: "Install maldet's monitor dependencies and start it", Check: "maldet", Scope: "", Risk: Change,
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "not running") },
 		Note:    "Found on four boxes 2026-09-24: maldet's monitor mode needs `ed` and `inotify-tools`, and dies at start without them.",
@@ -563,7 +598,11 @@ func init() {
 				{Why: "did it stay up", Argv: []string{"systemctl", "--no-pager", "-n", "5", "status", "maldet"}},
 			}, nil
 		},
-	})
+	}
+	register(maldetDeps)
+	maldetDeps.ID, maldetDeps.Check = "maldet-deps-unit", "systemd.failed"
+	maldetDeps.Applies = func(r check.Result) bool { return r.Subject == "maldet.service" }
+	register(maldetDeps)
 
 	register(Fix{
 		ID: "redis-guard-all", Title: "Bound the Redis keyspace on every object-cache site", Check: "redis", Scope: "all", Risk: Change,
