@@ -162,3 +162,54 @@ func TestSecretsStayOutOfArgv(t *testing.T) {
 		t.Errorf("env %v", e)
 	}
 }
+
+func TestRemoveServiceClearsOnlyItsOwnValue(t *testing.T) {
+	f := box8G()
+	f.Files[hestia.ConfPath] = "FTP_SYSTEM='proftpd'\nANTIVIRUS_SYSTEM='clamav-daemon'\n"
+	f.Files["/etc/exim4/exim4.conf.template"] = "av_scanner = clamd:/run/clamav/clamd.ctl\n"
+	o, _ := ByID("remove-service")
+	cs := o.Fields[0].Choices(context.Background(), &check.Env{Sys: f}, Target{})
+	if len(cs) != 1 || cs[0][0] != "ANTIVIRUS_SYSTEM" {
+		t.Fatalf("a proftpd box must not offer the vsftpd cleanup: %v", cs)
+	}
+	p := text(planOf(t, "remove-service", f, Values{"service": "ANTIVIRUS_SYSTEM"}))
+	for _, want := range []string{"v-change-sys-config-value ANTIVIRUS_SYSTEM ''", "exim4 -bV", "sed -i.hs-clamav-daemon"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %q in\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "apt-get remove") {
+		t.Errorf("the package is already gone:\n%s", p)
+	}
+}
+
+func TestUpgradePlanCarriesTheClassifiedList(t *testing.T) {
+	f := box8G()
+	f.Cmds["apt-get -s upgrade"] = sys.FakeCmd{Out: "Inst mariadb-server [1:10.11.11-0+deb12u1] (1:10.11.13-0+deb12u1 Debian:12.11/stable [amd64])\n"}
+	p := text(planOf(t, "updates-apply", f, nil))
+	if !strings.Contains(p, "mariadb-server") || !strings.Contains(p, "restarts the database") || !strings.Contains(p, "--force-confold") {
+		t.Errorf("plan:\n%s", p)
+	}
+	f.Cmds["apt-get -s upgrade"] = sys.FakeCmd{Out: "0 upgraded\n"}
+	if st := planOf(t, "updates-apply", f, nil); len(st) != 0 {
+		t.Errorf("nothing pending, planned %v", st)
+	}
+}
+
+func TestLogTrimWritesInPlace(t *testing.T) {
+	f := box8G()
+	log := "/home/u/web/a.fi/public_html/wp-content/debug.log"
+	f.Files[log] = "x\n"
+	f.Cmds["tail -n 3 "+log] = sys.FakeCmd{Out: "PHP Warning\n"}
+	for how, want := range map[string]string{"truncate": "truncate -s 0 " + log, "keep500": `cat "$t" > "$1"`, "cap": "logcap add a.fi_debug.log " + log + " u 50M"} {
+		o, _ := ByID("log-trim") // validation limits file to the listed logs; plan directly
+		st, err := o.Plan(context.Background(), &check.Env{Sys: f}, Target{}, Values{"file": log, "how": how})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := text(st)
+		if !strings.Contains(p, want) || strings.Contains(p, "rm -f "+log) {
+			t.Errorf("%s:\n%s", how, p)
+		}
+	}
+}

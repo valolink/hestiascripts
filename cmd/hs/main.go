@@ -52,6 +52,7 @@ Usage:
   hs op --list             every operation and its fields
   hs logcap add KEY PATH OWNER SIZE | remove KEY | list
                            hourly size cap for chosen logs (/etc/hs/logcap.conf)
+  hs apt preview|repos     pending updates classified; failing repositories explained
   hs conf set|install|get  edit a config file, printing before → after, backup kept (hs conf)
   hs version
 
@@ -93,6 +94,8 @@ func main() {
 		os.Exit(cmdLogcap(os.Args[2:]))
 	case "conf":
 		os.Exit(cmdConf(os.Args[2:]))
+	case "apt":
+		os.Exit(cmdApt(os.Args[2:]))
 	case "site-php":
 		os.Exit(cmdSitePHP(ctx, env, os.Args[2:]))
 	case "version", "--version":
