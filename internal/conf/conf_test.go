@@ -90,3 +90,13 @@ func TestSetFileBacksUpOutsideTheDirectoryAndSkipsNoops(t *testing.T) {
 		t.Errorf("stray files next to the config: %v", ents)
 	}
 }
+
+func TestPoolTemplateKeysStayTogether(t *testing.T) {
+	in := "[%domain%]\npm = ondemand\npm.max_children = 8\npm.max_requests = 4000\npm.process_idle_timeout = 10s\n\nenv[TMP] = /tmp\n"
+	out, _ := Set(in, Opts{Style: INI, After: "pm.max_children"}, "pm", "dynamic", "pm.start_servers", "4")
+	out, _ = Unset(out, Opts{Comment: ";"}, "pm.process_idle_timeout")
+	want := "[%domain%]\npm = dynamic\npm.max_children = 8\npm.start_servers = 4\npm.max_requests = 4000\n;pm.process_idle_timeout = 10s\n\nenv[TMP] = /tmp\n"
+	if out != want {
+		t.Fatalf("got\n%s", out)
+	}
+}

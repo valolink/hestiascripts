@@ -73,7 +73,7 @@ func (m *model) opAction(o op.Op, t op.Target, v op.Values) (action.Action, acti
 	a := action.Action{
 		ID: "op." + o.ID, Title: o.Title, Site: o.Site, Mode: mode,
 		Confirm: confirmFor(o.RiskFor(v)), Env: v.Env(o),
-		Note:    o.Note, How: o.How, Undo: o.Undo, Recheck: o.Recheck,
+		Note: o.Note, How: o.How, Undo: o.Undo, Recheck: o.Recheck,
 		Command: func(action.Target, string) []string { return argv },
 		Preview: func() ([]string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -264,16 +264,27 @@ func (m *model) opsHere() []action.Action {
 // fix (action.ForCheck; an "op.<id>" value names an operation, whose form
 // opens). Site-scoped ones target the result's site, else the open site.
 func (m *model) forCheck(r check.Result) (string, func(), bool) {
-	id, ok := action.ForCheck[r.Check]
-	if !ok {
-		return "", nil, false
-	}
 	site := func() (*hestia.Domain, bool) {
 		d, ok := m.domain(r.Subject)
 		if !ok {
 			d, ok = m.domain(m.siteName)
 		}
 		return &d, ok
+	}
+	for _, o := range op.ForResult(r) {
+		var t op.Target
+		if o.Site {
+			d, ok := site()
+			if !ok {
+				continue
+			}
+			t.Domain = d
+		}
+		return o.Title + "…", func() { m.openForm(o, t) }, true
+	}
+	id, ok := action.ForCheck[r.Check]
+	if !ok {
+		return "", nil, false
 	}
 	if oid, isOp := strings.CutPrefix(id, "op."); isOp {
 		o, ok := op.ByID(oid)

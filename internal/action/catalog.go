@@ -135,15 +135,6 @@ func boxActions() []Action {
 			Note: "The bash audit hs replaces — kept for comparison until phase 5.", Command: vscript("v-server-audit")},
 
 		// --- performance
-		{ID: "performance.redis", Title: "Redis…", Section: "performance", Mode: Interactive, NeedsRepo: true,
-			Note: "run.sh menu: install, maxmemory/policy, PHP extension.", Recheck: []string{"redis", "redis.sites"}, Command: setupFn("menu_redis")},
-		{ID: "performance.php-fpm", Title: "PHP-FPM profiles and versions…", Section: "performance", Mode: Interactive, NeedsRepo: true,
-			Note: "run.sh menu: install a profile, show details, add a PHP version.", Recheck: []string{"php.fpm-profiles", "memory.fpm-ceiling"},
-			Command: setupFn("menu_php_fpm")},
-		{ID: "performance.opcache", Title: "OpCache…", Section: "performance", Mode: Interactive, NeedsRepo: true,
-			Note: "Apply recommended settings to a PHP version.", Recheck: []string{"php.opcache"}, Command: setupFn("menu_opcache")},
-		{ID: "performance.mariadb", Title: "MariaDB buffer pool…", Section: "performance", Mode: Interactive, NeedsRepo: true,
-			Note: "Set innodb_buffer_pool_size.", Recheck: []string{"mariadb.buffer"}, Command: setupFn("menu_mariadb")},
 		{ID: "performance.memory", Title: "Memory audit", Section: "performance", Mode: Stream, Confirm: ConfirmNone,
 			Note: "Read-only: where the RAM goes and whether it matters (~5 s).", Command: vscript("v-server-memory")},
 
@@ -163,14 +154,9 @@ func boxActions() []Action {
 			Note: "Read-only: mailq.", Command: func(Target, string) []string { return []string{"mailq"} }},
 
 		// --- monitoring
-		{ID: "monitoring.netdata", Title: "Netdata…", Section: "monitoring", Mode: Interactive, NeedsRepo: true,
-			Note:    "run.sh menu: install, low-footprint tuning. (Its 'open port 19999' option is obsolete — the streamer proxies.)",
-			Recheck: []string{"netdata"}, Command: setupFn("menu_netdata")},
 		{ID: "monitoring.deploy", Title: "Deploy v-scripts and streamer", Section: "monitoring", Mode: Stream, Confirm: ConfirmYes, NeedsRepo: true,
 			Note: "install-scripts.sh: symlinks, systemd unit, cache headers. Restarts hestia-streamer.", Recheck: []string{"streamer"},
 			Command: repoScript("install-scripts.sh")},
-		{ID: "monitoring.wpcli", Title: "WP-CLI…", Section: "monitoring", Mode: Interactive, NeedsRepo: true,
-			Note: "run.sh menu: install, update, fix disabled PHP CLI functions.", Recheck: []string{"wpcli"}, Command: setupFn("menu_wpcli")},
 
 		// --- system
 		{ID: "system.shell", Title: "Root shell", Section: "system", Mode: Interactive, Confirm: ConfirmNone,
@@ -237,19 +223,11 @@ var ForCheck = map[string]string{
 	"updates.pending":    "security.updates-preview",
 	"hestia.version":     "security.hestia-update",
 	"backups.setup":      "backups.guard-preview",
-	"redis":              "performance.redis",
-	"redis.sites":        "performance.redis",
-	"php.opcache":        "performance.opcache",
-	"php.fpm-profiles":   "performance.php-fpm",
-	"memory.fpm-ceiling": "performance.php-fpm",
-	"mariadb.buffer":     "performance.mariadb",
 	"web.templates":      "web.templates",
 	"web.cache-headers":  "web.cache-headers",
 	"mail.delivery":      "mail.smtp",
 	"mail.queue":         "mail.queue",
-	"netdata":            "monitoring.netdata",
 	"streamer":           "monitoring.deploy",
-	"wpcli":              "monitoring.wpcli",
 	"disk":               "system.disk",
 	"hestia.services":    "system.services",
 	"services.idle":      "system.services",

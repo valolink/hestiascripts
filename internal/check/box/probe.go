@@ -148,3 +148,16 @@ func joinMax(items []string, max int) string {
 func hours(d time.Duration) int { return int(d.Hours()) }
 
 var _ = hostname
+
+// RAMMB is installed memory in MB.
+func RAMMB(s sys.Sys) int { return int(meminfo(s)["MemTotal"] / 1024) }
+
+// PkgInstalled reports whether any of the packages is installed (dpkg).
+func PkgInstalled(ctx context.Context, s sys.Sys, pkgs ...string) bool {
+	return pkgInstalled(ctx, s, pkgs...)
+}
+
+// RedisCLI runs redis-cli with a short timeout.
+func RedisCLI(ctx context.Context, env *check.Env, args ...string) (string, error) {
+	return redisCLI(ctx, env, args...)
+}

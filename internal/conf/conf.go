@@ -35,6 +35,9 @@ type Opts struct {
 	Section string // "" = the whole file
 	Style   Style
 	Comment string // comment prefix for superseded duplicates ("#" default)
+	// After: a missing key with no commented example goes after this key's
+	// line (keeps pm.* together in a pool template) instead of at the end.
+	After string
 }
 
 // Change is one key's outcome.
@@ -163,6 +166,14 @@ func Set(content string, o Opts, kv ...string) (string, []Change) {
 			for at > start && strings.TrimSpace(lines[at-1]) == "" {
 				at--
 			}
+			if o.After != "" {
+				are := keyRe(o.After)
+				for j := start; j < end; j++ {
+					if are.MatchString(lines[j]) {
+						at = j + 1
+					}
+				}
+			}
 			nl := render(o.Style, key, val)
 			lines = append(lines[:at], append([]string{nl}, lines[at:]...)...)
 			changes = append(changes, Change{Key: key, New: nl})
@@ -173,6 +184,44 @@ func Set(content string, o Opts, kv ...string) (string, []Change) {
 		out += "\n"
 	}
 	return out, changes
+}
+
+// Unset comments out every active line of each key in the scope.
+func Unset(content string, o Opts, keys ...string) (string, []Change) {
+	if o.Comment == "" {
+		o.Comment = "#"
+	}
+	lines := strings.Split(content, "\n")
+	start, end := scope(lines, o.Section)
+	var changes []Change
+	if start < 0 {
+		return content, nil
+	}
+	for _, key := range keys {
+		re := keyRe(key)
+		for j := start; j < end; j++ {
+			if re.MatchString(lines[j]) {
+				old := strings.TrimSpace(lines[j])
+				lines[j] = o.Comment + old
+				changes = append(changes, Change{key, old, lines[j]})
+			}
+		}
+	}
+	return strings.Join(lines, "\n"), changes
+}
+
+// UnsetFile applies Unset to a file.
+func UnsetFile(path string, o Opts, keys ...string) ([]Change, string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	out, changes := Unset(string(b), o, keys...)
+	if out == string(b) {
+		return changes, "", nil
+	}
+	bak, err := write(path, out, 0o644)
+	return changes, bak, err
 }
 
 // Get returns a key's active value in the scope ("" if unset).

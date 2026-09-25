@@ -11,12 +11,14 @@ import (
 
 const confUsage = `hs conf — edit configuration files the way operations do
 
-  hs conf set [--section S] [--style space|ini|eq|shell] [--comment ';'] FILE KEY VALUE [KEY VALUE ...]
+  hs conf set [--section S] [--style space|ini|eq|shell] [--comment ';'] [--after KEY] FILE KEY VALUE [KEY VALUE ...]
       Set keys (inside [S] when given), keeping each existing line's own form;
       a missing key goes after its commented example or at the end of the
       section. Prints before → after; the previous file is kept under
       /var/lib/hs/backups. A VALUE of @env:NAME is read from that environment
       variable (secrets never appear in argv or the log).
+  hs conf unset [--section S] [--comment ';'] FILE KEY [KEY ...]
+      Comment the keys out.
   hs conf install [--mode 0644] SRC DST
       Write SRC's content to DST, printing the lines that change.
   hs conf get [--section S] FILE KEY
@@ -45,6 +47,10 @@ func cmdConf(args []string) int {
 				continue
 			case "--comment":
 				o.Comment = args[i+1]
+				i++
+				continue
+			case "--after":
+				o.After = args[i+1]
 				i++
 				continue
 			case "--mode":
@@ -91,6 +97,18 @@ func cmdConf(args []string) int {
 					changes[i].New = strings.ReplaceAll(changes[i].New, kv[j], "(secret)")
 				}
 			}
+		}
+		fmt.Print(conf.Report(rest[0], changes, bak))
+		return 0
+	case "unset":
+		if len(rest) < 2 {
+			fmt.Fprint(os.Stderr, confUsage)
+			return 2
+		}
+		changes, bak, err := conf.UnsetFile(rest[0], o, rest[1:]...)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "hs conf:", err)
+			return 1
 		}
 		fmt.Print(conf.Report(rest[0], changes, bak))
 		return 0

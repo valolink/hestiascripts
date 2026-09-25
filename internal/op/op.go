@@ -77,12 +77,16 @@ type Op struct {
 	RiskOf func(v Values) Risk
 	// Interactive: the steps get the terminal (ncdu); the TUI hands it over.
 	Interactive bool
-	Note    string
-	How     string
-	Undo    string
-	Fields  []Field
-	Recheck []string
-	Plan    func(ctx context.Context, env *check.Env, t Target, v Values) ([]plan.Step, error)
+	Note        string
+	How         string
+	Undo        string
+	Fields      []Field
+	Recheck     []string
+	// Resolves: the check whose findings this operation addresses; enter
+	// on such a finding opens the form. Applies narrows it to some findings.
+	Resolves string
+	Applies  func(r check.Result) bool
+	Plan     func(ctx context.Context, env *check.Env, t Target, v Values) ([]plan.Step, error)
 }
 
 type Values map[string]string
@@ -116,6 +120,22 @@ func ForSection(section string) []Op {
 		}
 	}
 	return out
+}
+
+// ForResult: the operations that address a finding.
+func ForResult(r check.Result) []Op {
+	var out []Op
+	for _, o := range all {
+		if o.Resolves == r.Check && (o.Applies == nil || o.Applies(r)) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// summaryHas is an Applies helper.
+func summaryHas(sub string) func(check.Result) bool {
+	return func(r check.Result) bool { return strings.Contains(r.Summary, sub) }
 }
 
 // RiskFor is the risk of running o with v.
