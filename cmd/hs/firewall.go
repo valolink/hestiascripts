@@ -71,11 +71,15 @@ func cmdFirewall(repo string, args []string) int {
 	os.Chmod(fwgen.ScriptPath, 0o700)
 
 	old, _ := os.ReadFile(fwgen.CustomSh)
-	bak, err = conf.Write(fwgen.CustomSh, fwgen.WithCustomBlock(string(old)), 0o755)
+	bak, err = conf.Write(fwgen.CustomSh, fwgen.WithCustomBlock(string(old)), 0o700)
 	if !report(fwgen.CustomSh+" (runs it on every v-update-firewall)", bak, err) {
 		return 1
 	}
-	os.Chmod(fwgen.CustomSh, 0o755) // Hestia runs custom.sh only when executable
+	// Hestia runs custom.sh only when executable: add the owner's x bit,
+	// never widen what is there (it is 700 on boxes where someone set it).
+	if st, err := os.Stat(fwgen.CustomSh); err == nil && st.Mode().Perm()&0o100 == 0 {
+		os.Chmod(fwgen.CustomSh, st.Mode().Perm()|0o100)
+	}
 
 	bak, err = conf.Write(fwgen.UnitPath, fwgen.Unit(), 0o644)
 	if !report(fwgen.UnitPath+" (runs it at boot, after Hestia restores IPv4)", bak, err) {

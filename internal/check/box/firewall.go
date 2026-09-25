@@ -153,10 +153,27 @@ func egressLog(ctx context.Context, env *Env) (n int, top []string) {
 
 func checkEgress(ctx context.Context, env *Env) []Result {
 	c := firewallConf(env)
-	out, _ := env.Sys.Run(ctx, "iptables", "-S", "HS_OUT")
 	var rs []Result
-	if !strings.Contains(out, "-j DROP") {
-		rs = append(rs, New(Warn, "known C2 hosts are not blocked outbound").For("block list").
+	var rules string
+	for _, chain := range []string{"OUTPUT", "HS_OUT"} {
+		out, _ := env.Sys.Run(ctx, "iptables", "-S", chain)
+		rules += out
+	}
+	var unblocked []string
+	for _, h := range indicators(env).Values("host") {
+		if strings.Contains(h, ":") {
+			continue // IPv6 hosts: ip6tables, checked when the list has any
+		}
+		cidr := h
+		if !strings.Contains(cidr, "/") {
+			cidr += "/32"
+		}
+		if !strings.Contains(rules, "-d "+cidr) {
+			unblocked = append(unblocked, h)
+		}
+	}
+	if len(unblocked) > 0 {
+		rs = append(rs, New(Warn, "known C2 hosts are not blocked outbound").For("block list").Ev("not dropped: "+strings.Join(unblocked, " ")).
 			Because("The block list (internal/ioc/indicators.txt hosts) is the only thing stopping a leftover implant from calling home.").
 			Fixed("hs op egress   # applies the block list in any mode"))
 	}

@@ -144,34 +144,17 @@ func Script(c Config, rules []Rule) string {
 	w("# change the settings with the hs operations and re-apply. Idempotent: own chains, rebuilt each run.")
 	w("# Run by Hestia's custom.sh (every v-update-firewall) and by hs-firewall.service at boot.")
 	w("")
-	w("chain() { # TOOL CHAIN PARENT — create/flush CHAIN and make sure PARENT jumps to it first")
+	w("chain() { # TOOL CHAIN PARENT — create/flush CHAIN and put PARENT's one jump to it at the top")
 	w("  $1 -w -N $2 2>/dev/null || true")
 	w("  $1 -w -F $2")
-	w("  $1 -w -C $3 -j $2 2>/dev/null || $1 -w -I $3 1 -j $2")
+	w("  while $1 -w -D $3 -j $2 2>/dev/null; do :; done")
+	w("  $1 -w -I $3 1 -j $2")
 	w("}")
 	w("unchain() { # TOOL CHAIN PARENT")
 	w("  while $1 -w -D $3 -j $2 2>/dev/null; do :; done")
 	w("  $1 -w -F $2 2>/dev/null; $1 -w -X $2 2>/dev/null; true")
 	w("}")
 	w("HAVE6=; command -v ip6tables >/dev/null 2>&1 && HAVE6=1")
-	w("")
-
-	// --- known-bad hosts inbound (both families), before Hestia's rules
-	w("# --- known-bad hosts: dropped inbound, before Hestia's own rules")
-	w("chain iptables HS_BLOCK INPUT")
-	for _, h := range c.BlockHosts {
-		if !isV6(h) {
-			w("iptables -w -A HS_BLOCK -s %s -j DROP", h)
-		}
-	}
-	w("if [ -n \"$HAVE6\" ]; then")
-	w("  chain ip6tables HS_BLOCK INPUT")
-	for _, h := range c.BlockHosts {
-		if isV6(h) {
-			w("  ip6tables -w -A HS_BLOCK -s %s -j DROP", h)
-		}
-	}
-	w("fi")
 	w("")
 
 	// --- IPv6 inbound
@@ -207,6 +190,24 @@ func Script(c Config, rules []Rule) string {
 	} else {
 		w("[ -n \"$HAVE6\" ] && unchain ip6tables HS_IN6 INPUT")
 	}
+	w("")
+
+	// --- known-bad hosts inbound (both families), inserted last so it is first in INPUT, ahead of HS_IN6 and Hestia's rules
+	w("# --- known-bad hosts: dropped inbound, before Hestia's own rules")
+	w("chain iptables HS_BLOCK INPUT")
+	for _, h := range c.BlockHosts {
+		if !isV6(h) {
+			w("iptables -w -A HS_BLOCK -s %s -j DROP", h)
+		}
+	}
+	w("if [ -n \"$HAVE6\" ]; then")
+	w("  chain ip6tables HS_BLOCK INPUT")
+	for _, h := range c.BlockHosts {
+		if isV6(h) {
+			w("  ip6tables -w -A HS_BLOCK -s %s -j DROP", h)
+		}
+	}
+	w("fi")
 	w("")
 
 	// --- outbound

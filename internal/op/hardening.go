@@ -42,9 +42,10 @@ func AuditRules(env *check.Env) string {
 	for _, h := range homes {
 		lines = append(lines, "-w "+h+" -p wa -k hs_keys")
 	}
-	for _, d := range []string{"/tmp", "/var/tmp", "/dev/shm"} {
-		lines = append(lines, "-a always,exit -F arch=b64 -S execve -F dir="+d+" -k hs_tmpexec")
-	}
+	// No "exec from /tmp" rule: `-F dir=/tmp` with execve, and `-w /tmp -p x`,
+	// both loaded but recorded nothing on Debian 12 (tested on hzdemolink
+	// 2026-09-25, while a plain execve rule did record the same exec). Running
+	// programs from /tmp is covered by tmp-noexec and the persist.processes check.
 	lines = append(lines, "-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k hs_modules")
 	return strings.Join(lines, "\n") + "\n"
 }
@@ -92,8 +93,8 @@ func init() {
 	register(Op{
 		ID: "audit", Title: "Audit trail (auditd)", Section: "security", Risk: Change,
 		Resolves: "audit.trail",
-		Note:     "Records who changed systemd units, cron, accounts, sudoers and authorized_keys, every program started from /tmp, /var/tmp or /dev/shm, and kernel module loads — the \"who ran what, when\" that bash history only half answered in May 2026. A small rule set, not a whole-disk watch.",
-		How:      "apt installs auditd; the rules go to " + auditRules + " (listed in the plan; each authorized_keys directory by name); `augenrules --load` activates them now and at boot. Search with `ausearch -k hs_units` (hs_cron, hs_keys, hs_accounts, hs_tmpexec, hs_modules, hs_preload); logs in /var/log/audit/.",
+		Note:     "Records who changed systemd units, cron, accounts, sudoers and authorized_keys, and kernel module loads — the \"who ran what, when\" that bash history only half answered in May 2026. A small rule set, not a whole-disk watch.",
+		How:      "apt installs auditd; the rules go to " + auditRules + " (listed in the plan; each authorized_keys directory by name); `augenrules --load` activates them now and at boot. Search with `ausearch -k hs_units` (hs_cron, hs_keys, hs_accounts, hs_modules, hs_preload) — in a script, add `--input /var/log/audit/audit.log` (without a terminal ausearch reads stdin); logs in /var/log/audit/. Programs run from /tmp are not audited (the directory rule records nothing on Debian 12): tmp-noexec and the Suspicious processes check cover that.",
 		Undo:     "rm " + auditRules + " && augenrules --load (or apt purge auditd).",
 		Recheck:  []string{"audit.trail"},
 		Plan: func(ctx context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {

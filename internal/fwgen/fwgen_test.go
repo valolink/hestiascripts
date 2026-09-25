@@ -30,6 +30,10 @@ func TestIPv6MirrorsOnlyThePublicRules(t *testing.T) {
 			t.Errorf("missing %q", want)
 		}
 	}
+	// The drop chain is inserted after HS_IN6, so it lands first in INPUT.
+	if strings.Index(s, "chain ip6tables HS_BLOCK INPUT") < strings.Index(s, "chain ip6tables HS_IN6 INPUT") {
+		t.Error("HS_BLOCK must be inserted after HS_IN6 to be evaluated first")
+	}
 	// The streamer (IPv4-limited) and Netdata (suspended) must not open on IPv6.
 	for _, bad := range []string{"--dport 8091", "--dport 19999", "LOG"} {
 		if strings.Contains(s, bad) {
