@@ -7,7 +7,7 @@
 // for confirmation, run, and re-run the checks they affect.
 //
 // Keys follow nvim: ctrl+h/l between tabs, H/L between panes inside a tab,
-// counts, gg/G, ctrl+d/u/f/b/e/y, / to filter, : for the palette.
+// digits 1–0 for tabs, gg/G, ctrl+d/u/f/b/e/y, / to filter, : for the palette.
 package tui
 
 import (
@@ -141,7 +141,6 @@ type model struct {
 	showAll    bool
 	lists      map[string]*list
 	filtering  bool
-	count      int  // vim count prefix
 	pendingG   bool // first g of gg
 	detailOff  int  // ctrl+e / ctrl+y
 	confirming *pendingAction

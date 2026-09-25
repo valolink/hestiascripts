@@ -31,24 +31,25 @@ func TestCtrlHLCycleTabsAndWrap(t *testing.T) {
 
 func TestPanesAndVimMotions(t *testing.T) {
 	m := testModel(t)
-	press(m, "b", "L")
+	press(m, "3", "L")
 	if m.pane != paneActions {
 		t.Fatal("L should switch to the Actions pane")
 	}
 	if len(m.actionRows()) == 0 {
 		t.Fatal("Backups has actions")
 	}
-	press(m, "3", "j")
+	press(m, "j", "j", "j")
 	if m.cur().cursor != 3 {
-		t.Errorf("3j → cursor %d", m.cur().cursor)
+		t.Errorf("jjj → cursor %d", m.cur().cursor)
 	}
 	press(m, "g", "g")
 	if m.cur().cursor != 0 {
 		t.Errorf("gg → %d", m.cur().cursor)
 	}
-	press(m, "2", "G")
-	if m.cur().cursor != 1 {
-		t.Errorf("2G → %d", m.cur().cursor)
+	press(m, "G")
+	m.View() // the cursor is clamped to the list when drawn
+	if m.cur().cursor != len(m.actionRows())-1 {
+		t.Errorf("G → %d", m.cur().cursor)
 	}
 	press(m, "H")
 	if m.pane != paneChecks {
@@ -126,7 +127,7 @@ func TestStreamedActionIsLiveAndLogged(t *testing.T) {
 	if !strings.Contains(string(tr), "first\nsecond\n") || !strings.Contains(string(tr), "# exit 4") {
 		t.Errorf("transcript:\n%s", tr)
 	}
-	press(m, "esc", "v")
+	press(m, "esc", "0")
 	if !strings.Contains(m.View(), "Demo") {
 		t.Error("Log tab should list the run")
 	}
@@ -136,13 +137,28 @@ func TestStreamedActionIsLiveAndLogged(t *testing.T) {
 	}
 }
 
-// tmux delivered "3j" as one event on hzdemolink; the count was lost.
+// tmux delivers fast keys as one event ("jjj", "gg"); they are replayed.
 func TestMultiRuneKeyEventIsReplayed(t *testing.T) {
 	m := testModel(t)
-	press(m, "b", "L")
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3j")})
+	press(m, "3", "L")
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("jjj")})
 	if m.cur().cursor != 3 {
-		t.Errorf("3j as one event → cursor %d", m.cur().cursor)
+		t.Errorf("jjj as one event → cursor %d", m.cur().cursor)
+	}
+}
+
+// Tabs are digits; letters no longer switch tabs (a stray y meant System).
+func TestDigitsSwitchTabsLettersDoNot(t *testing.T) {
+	m := testModel(t)
+	for key, want := range map[string]string{"1": "o", "2": "s", "3": "b", "9": "y", "0": "v"} {
+		press(m, key)
+		if m.currentTab() != want {
+			t.Errorf("%s → tab %s, want %s", key, m.currentTab(), want)
+		}
+	}
+	press(m, "1", "y")
+	if m.currentTab() != "o" {
+		t.Errorf("y switched to %s", m.currentTab())
 	}
 }
 

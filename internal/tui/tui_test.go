@@ -78,7 +78,7 @@ func TestOverviewShowsProblemsOnly(t *testing.T) {
 
 func TestSitesAndSiteScreen(t *testing.T) {
 	m := testModel(t)
-	press(m, "s")
+	press(m, "2")
 	out := m.View()
 	for _, want := range []string{"alavusikkunat.fi", "kehitys.alavusikkunat.fi", "7.1.2", "60d", "6h restic"} {
 		if !strings.Contains(out, want) {
@@ -102,7 +102,7 @@ func TestSitesAndSiteScreen(t *testing.T) {
 
 func TestFilter(t *testing.T) {
 	m := testModel(t)
-	press(m, "s", "/", "k", "e", "h", "enter")
+	press(m, "2", "/", "k", "e", "h", "enter")
 	if rows := m.siteRows(); len(rows) != 1 || rows[0].Name != "kehitys.alavusikkunat.fi" {
 		t.Errorf("filter: %+v", rows)
 	}
@@ -114,7 +114,7 @@ func TestFilter(t *testing.T) {
 
 func TestSitesCursorOpensTheSelectedRow(t *testing.T) {
 	m := testModel(t)
-	press(m, "s")
+	press(m, "2")
 	m.View()
 	press(m, "j")
 	m.View()

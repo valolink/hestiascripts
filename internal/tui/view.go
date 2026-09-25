@@ -115,9 +115,6 @@ func (m *model) header() string {
 	default:
 		right = sDim.Render("no saved results")
 	}
-	if m.count > 0 {
-		right = sAcc.Render(strconv.Itoa(m.count)) + " " + right
-	}
 	return padBetween(left, right, m.width)
 }
 
@@ -133,15 +130,25 @@ func tabName(key string) string {
 	return key
 }
 
+// tabNumber is the digit that opens a tab: 1–9, then 0.
+func tabNumber(key string) string {
+	for i, t := range tabOrder {
+		if t == key {
+			return strconv.Itoa((i + 1) % 10)
+		}
+	}
+	return "?"
+}
+
 func (m *model) tabs() string {
 	cur := m.currentTab()
 	var parts []string
 	for _, key := range tabOrder {
 		// Label and badge styled separately: re-styling an already styled
 		// string (underline on the active tab) leaks raw escapes.
-		label := sTab.Render(key + " " + tabName(key))
+		label := sTab.Render(tabNumber(key) + " " + tabName(key))
 		if key == cur && m.scr != scrHelp && m.scr != scrRun {
-			label = sTabOn.Render(key + " " + tabName(key))
+			label = sTabOn.Render(tabNumber(key) + " " + tabName(key))
 		}
 		if n := m.badCount(key); n > 0 {
 			label += stateStyle(check.Warn).Render(strconv.Itoa(n))
@@ -191,7 +198,7 @@ func (m *model) detailHeight() int {
 
 func (m *model) footer(extra string) string {
 	l := m.cur()
-	keys := "j/k · ^h/^l tabs · / filter · : palette · ! shell · r refresh · ? help · q quit"
+	keys := "j/k · 1–0 or ^h/^l tabs · / filter · : palette · ! shell · r refresh · ? help · q quit"
 	if m.hasActions() {
 		keys = "H/L panes · " + keys
 	}
@@ -714,9 +721,9 @@ func (m *model) help() string {
 	rows := [][2]string{
 		{"ctrl+h ctrl+l", "previous / next tab"},
 		{"H L", "switch pane inside a tab: Checks ⇄ Actions, or on Log: hs actions ⇄ Server logs"},
-		{"o s b x p w m n y v", "Overview · Sites · Backups · Security · Performance · Web · Mail · Monitoring · System · Log"},
-		{"j k  5j", "move, with a count"},
-		{"gg G  12G", "top · bottom · line 12"},
+		{"1 2 … 9 0", "Overview · Sites · Backups · Security · Performance · Web · Mail · Monitoring · System · Log"},
+		{"j k", "move"},
+		{"gg G", "top · bottom"},
 		{"ctrl+d ctrl+u", "half page down / up        ctrl+f ctrl+b  full page"},
 		{"ctrl+e ctrl+y", "scroll the detail pane (and the confirmation box)"},
 		{"l enter  h esc", "open / run · back"},

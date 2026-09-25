@@ -14,7 +14,7 @@ import (
 
 func (m *model) key(k tea.KeyMsg) tea.Cmd {
 	// Fast typing, tmux and pastes can deliver "3j" as one event. Outside
-	// text entry, replay it one key at a time so counts and gg work.
+	// text entry, replay it one key at a time so gg and jjj work.
 	if k.Type == tea.KeyRunes && len(k.Runes) > 1 && !k.Paste && m.palette == nil && !m.filtering &&
 		(m.confirming == nil || m.confirming.act.Confirm != action.ConfirmTyped) &&
 		!(m.scr == scrRun && m.run != nil && m.run.filtering) {
@@ -39,17 +39,18 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 		return m.runKey(k)
 	}
 
-	// vim count prefix: 5j, 12G
-	if len(s) == 1 && s[0] >= '1' && s[0] <= '9' || (s == "0" && m.count > 0) {
-		m.count = m.count*10 + int(s[0]-'0')
-		if m.count > 9999 {
-			m.count = 9999
+	// Tabs are numbered 1–9, 0 (Log). Letters used to switch tabs, and a
+	// stray y (meant for a confirmation) jumped to System.
+	if len(s) == 1 && s[0] >= '0' && s[0] <= '9' {
+		i := int(s[0]-'0') - 1
+		if s == "0" {
+			i = 9
+		}
+		if i < len(tabOrder) {
+			m.gotoTab(tabOrder[i])
 		}
 		return nil
 	}
-	n := max(m.count, 1)
-	hadCount := m.count > 0
-	m.count = 0
 	if s != "g" {
 		m.pendingG = false
 	}
@@ -111,9 +112,9 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 
 	// movement
 	case "j", "down":
-		m.move(l, n)
+		m.move(l, 1)
 	case "k", "up":
-		m.move(l, -n)
+		m.move(l, -1)
 	case "ctrl+d":
 		m.move(l, page/2)
 	case "ctrl+u":
@@ -131,12 +132,7 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 	case "home":
 		l.cursor, m.detailOff = 0, 0
 	case "G", "end":
-		if hadCount {
-			l.cursor = n - 1
-		} else {
-			l.cursor = 1 << 30
-		}
-		m.detailOff = 0
+		l.cursor, m.detailOff = 1<<30, 0
 	case "ctrl+e":
 		m.detailOff++
 	case "ctrl+y":
@@ -156,15 +152,6 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 		m.filtering = true
 	case "enter", "l", "right":
 		return m.enter()
-	default:
-		for _, sec := range sections {
-			if s == sec.key {
-				m.gotoTab(s)
-			}
-		}
-		if s == "o" || s == "s" || s == "v" {
-			m.gotoTab(s)
-		}
 	}
 	return nil
 }
