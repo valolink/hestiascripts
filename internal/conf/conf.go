@@ -297,6 +297,15 @@ func write(path, content string, mode os.FileMode) (string, error) {
 	return bak, nil
 }
 
+// Write replaces path with content (backup kept, mode and owner preserved;
+// a new file gets mode). Returns the backup path, "" when unchanged or new.
+func Write(path, content string, mode os.FileMode) (string, error) {
+	if old, err := os.ReadFile(path); err == nil && string(old) == content {
+		return "", nil
+	}
+	return write(path, content, mode)
+}
+
 // SetFile applies Set to a file and reports what changed. Nothing is
 // written (and no backup made) when every key already has its value.
 func SetFile(path string, o Opts, kv ...string) ([]Change, string, error) {

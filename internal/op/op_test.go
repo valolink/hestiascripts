@@ -213,3 +213,65 @@ func TestLogTrimWritesInPlace(t *testing.T) {
 		}
 	}
 }
+
+func sshBox(keys, journal string) *sys.Fake {
+	f := box8G()
+	f.Files["/root/.ssh/authorized_keys"] = keys
+	f.Files["/etc/ssh/sshd_config"] = "Include /etc/ssh/sshd_config.d/*.conf\n"
+	f.Cmds["journalctl --since=-30d --no-pager -o cat -u ssh -u sshd --grep Accepted (publickey|password) for root"] = sys.FakeCmd{Out: journal}
+	return f
+}
+
+func TestSSHKeysOnlyRefusesWhatWouldLockRootOut(t *testing.T) {
+	o, _ := ByID("ssh-keys-only")
+	plan := func(f *sys.Fake) error {
+		_, err := o.Plan(context.Background(), &check.Env{Sys: f}, Target{}, Values{})
+		return err
+	}
+	if err := plan(sshBox("", "Accepted publickey for root from 1.2.3.4 port 5 ssh2")); err == nil || !strings.Contains(err.Error(), "no key") {
+		t.Errorf("no authorized key: %v", err)
+	}
+	if err := plan(sshBox("ssh-ed25519 AAAA reima", "Accepted password for root from 1.2.3.4 port 5 ssh2")); err == nil {
+		t.Error("no key login seen, yet allowed")
+	}
+	t.Setenv("SSH_CONNECTION", "1.2.3.4 5555 10.0.0.1 22")
+	if err := plan(sshBox("ssh-ed25519 AAAA reima", "Accepted publickey for root from 9.9.9.9 port 1 ssh2\nAccepted password for root from 1.2.3.4 port 5555 ssh2")); err == nil {
+		t.Error("this session used a password, yet allowed")
+	}
+	st := planOf(t, "ssh-keys-only", sshBox("ssh-ed25519 AAAA reima", "Accepted publickey for root from 1.2.3.4 port 5555 ssh2"), nil)
+	p := text(st)
+	if !strings.Contains(p, "sshd -t") || strings.Index(p, "sshd -t") > strings.Index(p, "systemctl reload ssh") {
+		t.Errorf("config must be tested before reload:\n%s", p)
+	}
+}
+
+func TestResendKeyNeverInThePlan(t *testing.T) {
+	f := box8G()
+	f.Commands["postconf"] = true
+	f.Files["/etc/postfix/main.cf"] = "relayhost =\n"
+	f.Cmds["dpkg-query -W -f=${Status} libsasl2-modules"] = sys.FakeCmd{Out: "install ok installed"}
+	o, _ := ByID("smtp-relay")
+	v := Values{"api-key": "re_TOPSECRET", "sender": "noreply@valolink.fi"}
+	if err := o.Validate(context.Background(), &check.Env{Sys: f}, Target{}, v); err != nil {
+		t.Fatal(err)
+	}
+	st, err := o.Plan(context.Background(), &check.Env{Sys: f}, Target{}, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := text(st); strings.Contains(p, "TOPSECRET") || !strings.Contains(p, "$HS_SECRET_API_KEY") {
+		t.Errorf("plan:\n%s", p)
+	}
+	if strings.Contains(strings.Join(v.Args(o), " "), "TOPSECRET") {
+		t.Error("key in argv")
+	}
+}
+
+func TestPostfixRefusedWhereEximRuns(t *testing.T) {
+	f := box8G()
+	f.Cmds["dpkg-query -W -f=${Status} exim4-daemon-heavy"] = sys.FakeCmd{Out: "install ok installed"}
+	o, _ := ByID("smtp-install")
+	if _, err := o.Plan(context.Background(), &check.Env{Sys: f}, Target{}, nil); err == nil {
+		t.Error("installing postfix would remove exim4")
+	}
+}

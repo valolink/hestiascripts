@@ -53,6 +53,8 @@ Usage:
   hs logcap add KEY PATH OWNER SIZE | remove KEY | list
                            hourly size cap for chosen logs (/etc/hs/logcap.conf)
   hs apt preview|repos     pending updates classified; failing repositories explained
+  hs f2b repair|reload|restart
+                           fail2ban: self-ban guard, quiet ban mails, jails without logs; bounded reload
   hs conf set|install|get  edit a config file, printing before → after, backup kept (hs conf)
   hs version
 
@@ -96,6 +98,8 @@ func main() {
 		os.Exit(cmdConf(os.Args[2:]))
 	case "apt":
 		os.Exit(cmdApt(os.Args[2:]))
+	case "f2b":
+		os.Exit(cmdF2B(ctx, os.Args[2:]))
 	case "site-php":
 		os.Exit(cmdSitePHP(ctx, env, os.Args[2:]))
 	case "version", "--version":
@@ -459,9 +463,14 @@ func cmdOp(ctx context.Context, env *check.Env, args []string) int {
 	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	for _, f := range o.Fields {
-		if _, set := vals[f.Key]; !set && f.Kind == op.Secret {
-			vals[f.Key] = os.Getenv(op.SecretEnv(f.Key))
+		if f.Kind != op.Secret {
+			continue
 		}
+		if _, set := vals[f.Key]; set {
+			fmt.Fprintf(os.Stderr, "hs op: %s is a secret — pass it in %s, not on the command line (argv is visible in ps and shell history)\n", f.Key, op.SecretEnv(f.Key))
+			return 2
+		}
+		vals[f.Key] = os.Getenv(op.SecretEnv(f.Key))
 	}
 	for k, v := range o.Defaults(pctx, env, t) {
 		if _, set := vals[k]; !set {

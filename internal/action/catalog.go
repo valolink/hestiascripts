@@ -117,13 +117,6 @@ func boxActions() []Action {
 			Command: repoScript("make-restore-script.sh")},
 
 		// --- security
-		{ID: "security.fail2ban", Title: "Fail2ban…", Section: "security", Mode: Interactive, NeedsRepo: true,
-			Note: "run.sh menu: WordPress jail, restart, jail limits.", Recheck: []string{"fail2ban"}, Command: setupFn("menu_fail2ban")},
-		{ID: "security.maldet", Title: "Maldet…", Section: "security", Mode: Interactive, NeedsRepo: true,
-			Note: "run.sh menu: install, configure, scan now.", Recheck: []string{"maldet"}, Command: setupFn("menu_maldet")},
-		{ID: "security.hardening", Title: "Swap, SSH keys, unattended upgrades…", Section: "security", Mode: Interactive, NeedsRepo: true,
-			Note:    "run.sh Security menu. Confirm your SSH key works BEFORE disabling passwords.",
-			Recheck: []string{"ssh.auth", "updates.unattended", "memory.swap"}, Command: setupFn("menu_security")},
 		{ID: "security.hestia-update", Title: "Update HestiaCP", Section: "security", Mode: Stream, Confirm: ConfirmYes,
 			Note: "v-update-sys-hestia-all.", Recheck: []string{"hestia.version"}, Command: vscript("v-update-sys-hestia-all")},
 		{ID: "security.audit", Title: "Legacy audit report (v-server-audit)", Section: "security", Mode: Stream, Confirm: ConfirmNone,
@@ -142,9 +135,6 @@ func boxActions() []Action {
 			Command: repoScript("setup/install-cache-headers.sh")},
 
 		// --- mail
-		{ID: "mail.smtp", Title: "SMTP relay and recipients…", Section: "mail", Mode: Interactive, NeedsRepo: true,
-			Note: "run.sh menu: dependencies, relay, notification recipients, test email.", Recheck: []string{"mail.delivery", "mail.queue"},
-			Command: setupFn("menu_smtp")},
 		{ID: "mail.queue", Title: "Show mail queue", Section: "mail", Mode: Stream, Confirm: ConfirmNone,
 			Note: "Read-only: mailq.", Command: func(Target, string) []string { return []string{"mailq"} }},
 
@@ -198,19 +188,13 @@ func ByID(id string) (Action, bool) {
 // ForCheck maps a check to the action that fixes it — the detail pane's
 // "enter to fix". Only where one action is the obvious fix.
 var ForCheck = map[string]string{
-	"site.updates":       "site.update-preview",
-	"site.debug":         "site.wp-config",
-	"fail2ban":           "security.fail2ban",
-	"maldet":             "security.maldet",
-	"ssh.auth":           "security.hardening",
-	"updates.unattended": "security.hardening",
-	"memory.swap":        "security.hardening",
-	"hestia.version":     "security.hestia-update",
-	"backups.setup":      "backups.guard-preview",
-	"web.templates":      "web.templates",
-	"web.cache-headers":  "web.cache-headers",
-	"mail.delivery":      "mail.smtp",
-	"mail.queue":         "mail.queue",
-	"streamer":           "monitoring.deploy",
-	"updates.reboot":     "system.reboot",
+	"site.updates":      "site.update-preview",
+	"site.debug":        "site.wp-config",
+	"hestia.version":    "security.hestia-update",
+	"backups.setup":     "backups.guard-preview",
+	"web.templates":     "web.templates",
+	"web.cache-headers": "web.cache-headers",
+	"mail.queue":        "mail.queue",
+	"streamer":          "monitoring.deploy",
+	"updates.reboot":    "system.reboot",
 }

@@ -147,10 +147,10 @@ func TestMultiRuneKeyEventIsReplayed(t *testing.T) {
 }
 
 func TestSetupFnPlanIsSummarisedButLogIsExact(t *testing.T) {
-	a, _ := action.ByID("security.fail2ban")
+	a, _ := action.ByID("web.templates")
 	repo, _ := filepath.Abs("../..")
 	tg := action.Target{Host: "h"}
-	if p := a.Plan(tg, repo); !strings.HasPrefix(p, "setup/fail2ban.sh → menu_fail2ban") {
+	if p := a.Plan(tg, repo); !strings.HasPrefix(p, "setup/nginx-templates.sh → _nginx_install_profiles") {
 		t.Errorf("plan: %s", p)
 	}
 	if e := a.Exact(tg, repo); !strings.Contains(e, `source "$SCRIPT_DIR/setup/common.sh"`) {
