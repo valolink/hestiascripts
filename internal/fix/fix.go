@@ -379,6 +379,23 @@ func init() {
 			}, nil
 		},
 	})
+	register(Fix{
+		ID: "ssh-private-key-remove", Title: "Remove this private key from the server", Check: "ssh.private-keys", Scope: "", Risk: Destructive,
+		Note: "Removing it here does not revoke it: first take its public half out of every authorized_keys it opens (and GitHub), or replace the key.",
+		How:  "`shred -u` overwrites the file and deletes it; its .pub neighbour is deleted too. A private key is a credential — keeping a moved copy on the same box would keep the exposure.",
+		Undo: "None. Generate a new key where it is needed.",
+		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
+			if !strings.HasPrefix(subject, "/root/.ssh/") && !regexp.MustCompile(`^/home/[^/]+/\.ssh/`).MatchString(subject) {
+				return nil, fmt.Errorf("not a key under an .ssh directory: %q", subject)
+			}
+			fp, _ := env.Sys.Run(ctx, "ssh-keygen", "-lf", subject)
+			steps := []Step{{Why: "fingerprint, to find where it is authorized: " + strings.TrimSpace(fp), Argv: []string{"shred", "-u", subject}}}
+			if _, err := env.Sys.Stat(subject + ".pub"); err == nil {
+				steps = append(steps, Step{Argv: []string{"rm", "-f", subject + ".pub"}})
+			}
+			return steps, nil
+		},
+	})
 	webTerminalOff := Fix{
 		ID: "web-terminal-off", Title: "Turn the Hestia web terminal off", Check: "hestia.web-terminal", Scope: "", Risk: Change,
 		Note: "The panel's browser terminal is a root shell on the panel port; its 1.0.2 build admitted unauthenticated visitors — the entry point of the May 2026 compromise.",

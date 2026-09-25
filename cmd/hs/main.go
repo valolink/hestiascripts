@@ -56,6 +56,7 @@ Usage:
   hs apt preview|repos     pending updates classified; failing repositories explained
   hs f2b repair|reload|restart
                            fail2ban: self-ban guard, quiet ban mails, jails without logs; bounded reload
+  hs firewall show|apply   rules Hestia does not make: IPv6 inbound, outbound filter, C2 blocks
   hs templates install     write and verify the web templates (needs the cache-headers drop-in)
   hs conf set|install|get  edit a config file, printing before → after, backup kept (hs conf)
   hs version
@@ -104,6 +105,8 @@ func main() {
 		os.Exit(cmdF2B(ctx, os.Args[2:]))
 	case "templates":
 		os.Exit(cmdTemplates(env.RepoDir, os.Args[2:]))
+	case "firewall":
+		os.Exit(cmdFirewall(env.RepoDir, os.Args[2:]))
 	case "site-php":
 		os.Exit(cmdSitePHP(ctx, env, os.Args[2:]))
 	case "version", "--version":

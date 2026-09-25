@@ -21,6 +21,10 @@ const (
 	uuFile      = "/etc/apt/apt.conf.d/50unattended-upgrades"
 	sshDropIn   = "/etc/ssh/sshd_config.d/00-hs-keys-only.conf"
 	uuOriginSed = `[[:space:]]*"origin=Debian[^"]*,label=Debian";`
+	// MaxAuthTries is left at sshd's default (6): an ssh agent offers each of
+	// its keys as one try, so 3 locks out a legitimate client carrying a few
+	// keys; fail2ban and key-only login already cover guessing.
+	sshDropInText = `# hs: key-only SSH (hs op ssh-keys-only)\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\nAllowAgentForwarding no\nX11Forwarding no\n`
 )
 
 var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
@@ -267,7 +271,7 @@ func init() {
 		ID: "ssh-keys-only", Title: "SSH: keys only, no passwords", Section: "security", Risk: Destructive,
 		Resolves: "ssh.auth",
 		Note:     "Refused unless root has authorized keys and has logged in with one in the last 30 days — and not if this session came in with a password. Keep this session open until a NEW key login works.",
-		How:      "A drop-in, " + sshDropIn + " (PasswordAuthentication no, KbdInteractiveAuthentication no), is read before every other sshd_config.d file, so a cloud image's `PasswordAuthentication yes` there cannot override it (run.sh edited sshd_config, which those drop-ins silently beat). `sshd -t` must accept the config before `systemctl reload ssh`; open sessions are not affected. The last step prints the effective settings from `sshd -T`.",
+		How:      "A drop-in, " + sshDropIn + " (PasswordAuthentication no, KbdInteractiveAuthentication no, PermitRootLogin prohibit-password, AllowAgentForwarding no, X11Forwarding no), is read before every other sshd_config.d file, so a cloud image's `PasswordAuthentication yes` there cannot override it (run.sh edited sshd_config, which those drop-ins silently beat). `sshd -t` must accept the config before `systemctl reload ssh`; open sessions are not affected. The last step prints the effective settings from `sshd -T`.",
 		Undo:     "rm " + sshDropIn + " && systemctl reload ssh (from the open session, or the provider's console).",
 		Recheck:  []string{"ssh.auth"},
 		Plan: func(ctx context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
@@ -292,7 +296,7 @@ func init() {
 			}
 			evidence := fmt.Sprintf("preflight: %d key(s) in /root/.ssh/authorized_keys; last key login: %s", n, keys[len(keys)-1])
 			return []Step{
-				{Why: evidence + "\nthe drop-in", Argv: []string{"sh", "-c", "printf '# hs: key-only SSH (hs op ssh-keys-only)\\nPasswordAuthentication no\\nKbdInteractiveAuthentication no\\n' > " + sshDropIn + " && cat " + sshDropIn}},
+				{Why: evidence + "\nthe drop-in", Argv: []string{"sh", "-c", "printf '" + sshDropInText + "' > " + sshDropIn + " && cat " + sshDropIn}},
 				{Why: "sshd accepts the config", Argv: []string{"sshd", "-t"}},
 				{Why: "apply (open sessions stay)", Argv: []string{"systemctl", "reload", "ssh"}},
 				{Why: "effective settings", Argv: []string{"sh", "-c", "sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication) '"}},
@@ -313,6 +317,45 @@ func init() {
 				return nil, nil
 			}
 			return []Step{confInstall("history settings for every login shell", src, "/etc/profile.d/hs-history.sh")}, nil
+		},
+	})
+	register(Op{
+		ID: "ssh-keys-accept", Title: "Accept the current authorized SSH keys", Section: "security", Risk: Change,
+		Resolves: "ssh.authorized-keys", Applies: summaryHas("none reviewed"),
+		Note:    "Records the fingerprint of every authorized_keys line on the box as reviewed. From then on a key nobody accepted is a finding (and a watch alert). Read the list in the plan first — accept only keys you recognise.",
+		How:     "Writes " + box.AcceptedKeys + " (root, 600): one line per key, `fingerprint file comment`, from `ssh-keygen -lf` of /root/.ssh and /home/*/.ssh authorized_keys files. Nothing in the key files changes.",
+		Undo:    "rm " + box.AcceptedKeys + " (the check then asks for a review again).",
+		Recheck: []string{"ssh.authorized-keys"},
+		Plan: func(ctx context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
+			keys := box.AuthorizedKeys(ctx, env)
+			if len(keys) == 0 {
+				return nil, fmt.Errorf("no authorized keys found")
+			}
+			args := []string{"sh", "-c", `install -d -m 700 /etc/hs && umask 077 && printf '%s\n' "$@" > ` + box.AcceptedKeys + ` && cat ` + box.AcceptedKeys, "sh"}
+			var list []string
+			for _, k := range keys {
+				args = append(args, k.Fingerprint+" "+k.File+" "+k.Comment)
+				list = append(list, k.File+"  "+k.Fingerprint+"  "+k.Comment)
+			}
+			return []Step{{Why: "accepting:\n" + strings.Join(list, "\n"), Argv: args}}, nil
+		},
+	})
+	register(Op{
+		ID: "ssh-private-key-allow", Title: "Allow an automation key on this server", Section: "security", Risk: Change,
+		Note: "For a key that must live here (a deploy or backup key with a narrow purpose) — not for a personal key.",
+		How:  "Appends the path to " + box.AllowedPrivate + "; the private-key check skips it.",
+		Undo: "Remove the line from " + box.AllowedPrivate + ".",
+		Fields: []Field{{Key: "path", Label: "Key file", Kind: Choice,
+			Choices: func(_ context.Context, env *check.Env, _ Target) [][2]string {
+				var out [][2]string
+				for _, p := range box.PrivateKeys(env) {
+					out = append(out, [2]string{p, ""})
+				}
+				return out
+			}}},
+		Recheck: []string{"ssh.private-keys"},
+		Plan: func(_ context.Context, _ *check.Env, _ Target, v Values) ([]Step, error) {
+			return []Step{{Why: "allow " + v["path"], Argv: []string{"sh", "-c", `install -d -m 700 /etc/hs && echo "$1" >> ` + box.AllowedPrivate + ` && cat ` + box.AllowedPrivate, "sh", v["path"]}}}, nil
 		},
 	})
 }

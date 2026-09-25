@@ -20,11 +20,16 @@ func securityChecks() []Check {
 		{ID: "firewall", Section: "security", Title: "Firewall", Run: checkFirewall},
 		{ID: "fail2ban", Section: "security", Title: "Fail2ban", Run: checkFail2ban},
 		{ID: "ssh.auth", Section: "security", Title: "SSH authentication", Run: checkSSH},
+		{ID: "ssh.private-keys", Section: "security", Title: "Private keys on the server", Run: checkPrivateKeys},
+		{ID: "ssh.authorized-keys", Section: "security", Title: "Authorized SSH keys", Run: checkAuthorizedKeys},
 		{ID: "updates.unattended", Section: "security", Title: "Unattended upgrades", Run: checkUnattended},
 		{ID: "updates.pending", Section: "security", Title: "Security updates", Timeout: 30 * time.Second, Run: checkPendingUpdates},
 		{ID: "updates.reboot", Section: "security", Title: "Reboot", Run: checkReboot},
 		{ID: "hestia.version", Section: "security", Title: "HestiaCP version", Run: checkHestiaVersion},
 		{ID: "hestia.web-terminal", Section: "security", Title: "Hestia web terminal", Run: checkWebTerminal},
+		{ID: "hestia.advisories", Section: "security", Title: "Hestia security advisories", MinInterval: 12 * time.Hour, Run: checkAdvisories},
+		{ID: "hestia.api", Section: "security", Title: "Hestia API", Run: checkAPI},
+		{ID: "hestia.2fa", Section: "security", Title: "Panel two-factor login", Run: check2FA},
 		{ID: "hestia.services", Section: "system", Title: "hestia.conf services", Run: checkServiceDrift},
 		{ID: "maldet", Section: "security", Title: "Maldet", Run: checkMaldet},
 		{ID: "web.exposure", Section: "security", Title: "Exposed files in web roots", Timeout: 30 * time.Second, Run: checkExposure},
@@ -149,19 +154,39 @@ func checkSSH(ctx context.Context, env *Env) []Result {
 	if err != nil {
 		return []Result{New(Unknown, "sshd -T failed")}
 	}
+	eff := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
-		f := strings.Fields(line)
-		if len(f) == 2 && f[0] == "passwordauthentication" {
-			if f[1] == "no" {
-				return []Result{New(OK, "key-only (effective sshd config)").Ev("sshd -T: passwordauthentication no")}
-			}
-			return []Result{New(Warn, "accepts password authentication").
-				Ev("sshd -T: passwordauthentication " + f[1]).
-				Because("Every exposed box gets continuous SSH brute force; keys remove the attack entirely.").
-				Fixed("hs op ssh-keys-only   # refuses unless a key login is proven")}
+		if f := strings.Fields(line); len(f) == 2 {
+			eff[f[0]] = f[1]
 		}
 	}
-	return []Result{New(Unknown, "passwordauthentication not in sshd -T output")}
+	pa, ok := eff["passwordauthentication"]
+	if !ok {
+		return []Result{New(Unknown, "passwordauthentication not in sshd -T output")}
+	}
+	if pa != "no" {
+		return []Result{New(Warn, "accepts password authentication").
+			Ev("sshd -T: passwordauthentication " + pa).
+			Because("Every exposed box gets continuous SSH brute force; keys remove the attack entirely.").
+			Fixed("hs op ssh-keys-only   # refuses unless a key login is proven")}
+	}
+	// The rest of the key-only drop-in (hardening plan §3).
+	var loose []string
+	if v := eff["permitrootlogin"]; v == "yes" {
+		loose = append(loose, "permitrootlogin yes")
+	}
+	if v := eff["kbdinteractiveauthentication"]; v == "yes" {
+		loose = append(loose, "kbdinteractiveauthentication yes")
+	}
+	if v := eff["allowagentforwarding"]; v == "yes" {
+		loose = append(loose, "allowagentforwarding yes")
+	}
+	if len(loose) > 0 {
+		return []Result{New(Warn, "key-only, but "+strings.Join(loose, ", ")).Ev(loose...).
+			Because("Root should log in with a key only, and a forwarded agent on a compromised box lends the attacker every key it holds.").
+			Fixed("hs op ssh-keys-only")}
+	}
+	return []Result{New(OK, "key-only (effective sshd config)").Ev("sshd -T: passwordauthentication no, permitrootlogin " + eff["permitrootlogin"])}
 }
 
 // UnattendedScope is "missing", "unknown" (no config), "all" or "security-only".
@@ -605,4 +630,68 @@ func checkWebTerminal(ctx context.Context, env *Env) []Result {
 		return []Result{New(Configured, "off (package still installed)").Ev(ev...)}
 	}
 	return []Result{New(OK, "off and not installed")}
+}
+
+// The panel API runs any v-* command as the authenticated user. Hestia gates
+// it by API/API_SYSTEM and API_ALLOWED_IP: an empty list denies every address
+// (web/api/index.php compares the client IP with the list plus ""), only
+// 'allow-all' skips the check.
+func checkAPI(ctx context.Context, env *Env) []Result {
+	c := hestia.Conf(env.Sys)
+	on := c["API"] == "yes" || (c["API_SYSTEM"] != "" && c["API_SYSTEM"] != "0")
+	allowed := c["API_ALLOWED_IP"]
+	ev := fmt.Sprintf("API='%s' API_SYSTEM='%s' API_ALLOWED_IP='%s'", c["API"], c["API_SYSTEM"], allowed)
+	switch {
+	case !on:
+		return []Result{New(OK, "API off").Ev(ev)}
+	case allowed == "allow-all":
+		return []Result{New(Fail, "API on and open to every address").Ev(ev).
+			Because("Anyone who guesses or steals a panel password or access key can run Hestia commands from anywhere; nothing here uses the API.").
+			Fixed("v-change-sys-api disable   # or v-change-sys-config-value API_ALLOWED_IP 'IP1,IP2'")}
+	case allowed == "":
+		return []Result{New(OK, "API on but no address allowed").Ev(ev)}
+	}
+	return []Result{New(Configured, "API on, limited to "+allowed).Ev(ev)}
+}
+
+// Hestia keeps a user's TOTP secret in TWOFA in user.conf. Every panel login
+// without it is one password away from the panel — and from the root-level
+// advisories that need only a login.
+func check2FA(ctx context.Context, env *Env) []Result {
+	root := hestia.Conf(env.Sys)["ROOT_USER"]
+	if root == "" {
+		root = "admin"
+	}
+	var admins, users []string
+	total := 0
+	for _, u := range hestia.Users(env.Sys) {
+		kv := hestia.ParseKV(strings.ReplaceAll(readString(env.Sys, hestia.UsersDir+"/"+u+"/user.conf"), "\n", " "))
+		if kv["SUSPENDED"] == "yes" {
+			continue
+		}
+		total++
+		if kv["TWOFA"] != "" {
+			continue
+		}
+		if u == root || kv["ROLE"] == "admin" {
+			admins = append(admins, u)
+		} else {
+			users = append(users, u)
+		}
+	}
+	why := "A stolen or guessed password is a panel login, and most 2026 Hestia advisories turn any login into root."
+	var rs []Result
+	for _, u := range admins {
+		rs = append(rs, New(Fail, "administrator without two-factor login").For(u).Because(why).
+			Fixed("log in as "+u+" → Edit user → Two-factor authentication"))
+	}
+	if len(users) > 0 {
+		rs = append(rs, New(Warn, fmt.Sprintf("%d of %d panel users without two-factor login", len(users), total)).For("users").
+			Ev(strings.Join(users, " ")).Because(why+" Accounts nobody logs in to are safest with login disabled.").
+			Fixed("per user: Edit user → Two-factor authentication, or v-change-user-password USER to an unknown random value"))
+	}
+	if len(rs) == 0 {
+		return []Result{New(OK, fmt.Sprintf("all %d active panel users have two-factor login", total))}
+	}
+	return rs
 }
