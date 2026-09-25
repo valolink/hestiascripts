@@ -15,6 +15,7 @@ func monitoringChecks() []Check {
 		{ID: "netdata", Section: "monitoring", Title: "Netdata", Run: checkNetdata},
 		{ID: "streamer", Section: "monitoring", Title: "hestia-streamer", Run: checkStreamer},
 		{ID: "wpcli", Section: "monitoring", Title: "WP-CLI", Run: checkWPCLI},
+		{ID: "updates.signing", Section: "security", Title: "Signed hestiascripts updates", Run: checkSigning},
 	}
 }
 
@@ -90,10 +91,12 @@ func checkStreamer(ctx context.Context, env *Env) []Result {
 			Fixed("systemctl status hestia-streamer ; bash install-scripts.sh")}
 	}
 	tok := StreamerToken(env)
-	h := map[string]string{}
-	if tok != "" {
-		h["X-Streamer-Token"] = tok
+	if tok == "" {
+		return []Result{New(Fail, "no token configured").
+			Because("The streamer refuses every request without one (it fails closed since the 2026-09 hardening), so EngineLink cannot reach this box.").
+			Fixed("bash install-scripts.sh   # generates /etc/hestia-streamer.env, then restarts the streamer")}
 	}
+	h := map[string]string{"X-Streamer-Token": tok}
 	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	code, _, err := s.HTTPGet(hctx, "http://127.0.0.1:8091/netdata/alarms", h)
 	cancel()
@@ -103,10 +106,6 @@ func checkStreamer(ctx context.Context, env *Env) []Result {
 	case code == 403:
 		return []Result{New(Fail, "rejects its own token").Ev("/etc/hestia-streamer.env token → HTTP 403").
 			Fixed("systemctl restart hestia-streamer   # env file changed since start")}
-	case tok == "":
-		return []Result{New(Warn, "answering, but no token is configured").
-			Because("Anyone the firewall lets through to :8091 can run the allowlisted scripts.").
-			Fixed("bash install-scripts.sh   # generates /etc/hestia-streamer.env")}
 	}
 	ours, _ := LinkedScripts(env)
 	return []Result{New(OK, fmt.Sprintf("answering with token (HTTP %d via /netdata/alarms)", code)).
@@ -159,4 +158,30 @@ func checkWPCLI(ctx context.Context, env *Env) []Result {
 			Because("Usually disabled PHP CLI functions after a PHP update.").Fixed("hs op php-cli-functions")}
 	}
 	return []Result{New(OK, "WP-CLI "+v+" runs")}
+}
+
+const allowedSigners = "/etc/hs/allowed_signers"
+
+// v-hestiascripts-update refuses a commit that is not signed by a key in
+// allowedSigners (a file on the box, outside the repo), so push access to the
+// repository is not root on every box (hardening plan §13).
+func checkSigning(ctx context.Context, env *Env) []Result {
+	s := env.Sys
+	if strings.TrimSpace(readString(s, allowedSigners)) == "" {
+		return []Result{New(Warn, "signed updates are not set up").
+			Because("Without " + allowedSigners + ", v-hestiascripts-update (EngineLink's update button) refuses to install anything; updating needs a root terminal and --allow-unsigned.").
+			Fixed("put the signing key(s) in " + allowedSigners + " (\"email ssh-ed25519 AAAA…\" per line) and sign commits")}
+	}
+	if env.RepoDir == "" {
+		return []Result{New(Configured, "trusted signers configured; checkout not found to verify")}
+	}
+	vctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := s.Run(vctx, "git", "-C", env.RepoDir, "-c", "gpg.format=ssh", "-c", "gpg.ssh.allowedSignersFile="+allowedSigners, "verify-commit", "HEAD")
+	if err != nil {
+		return []Result{New(Warn, "the installed checkout's HEAD is not signed by a trusted key").Ev(strings.TrimSpace(out)).
+			Because("Code running as root here was not verified — pulled by hand, or signed by an unknown key.").
+			Fixed("git -C " + env.RepoDir + " log --show-signature -1")}
+	}
+	return []Result{New(OK, "checkout HEAD signed by a trusted key").Ev(strings.TrimSpace(out))}
 }

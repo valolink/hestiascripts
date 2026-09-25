@@ -299,4 +299,20 @@ func init() {
 			}, nil
 		},
 	})
+	register(Op{
+		ID: "shell-history", Title: "Shell history: timestamps, no leading-space commands", Section: "security", Risk: Change,
+		Note: "A command typed with a leading space is not saved — the way to keep a secret you must type out of history — and every entry gets a timestamp, so history can answer \"when\" after an incident. For logins from now on.",
+		How:  "`hs conf install` writes templates/profile/hs-history.sh to /etc/profile.d/hs-history.sh (HISTCONTROL=ignoreboth, HISTTIMEFORMAT, larger history). Login shells read it; existing sessions keep their settings.",
+		Undo: "rm /etc/profile.d/hs-history.sh",
+		Plan: func(_ context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
+			src, err := repoFile(env, "templates/profile/hs-history.sh")
+			if err != nil {
+				return nil, err
+			}
+			if readFile(env, src) == readFile(env, "/etc/profile.d/hs-history.sh") {
+				return nil, nil
+			}
+			return []Step{confInstall("history settings for every login shell", src, "/etc/profile.d/hs-history.sh")}, nil
+		},
+	})
 }

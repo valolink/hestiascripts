@@ -31,7 +31,7 @@ import (
 )
 
 type Server struct {
-	Token      string        // "" disables the gate (pre-token installs)
+	Token      string        // required: "" refuses every request (fail closed)
 	BinDir     string        // where allowlisted scripts live
 	BackupDir  func() string // Hestia's $BACKUP, resolved per request
 	NetdataURL string        // box-local Netdata base
@@ -57,10 +57,13 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// checkToken enforces the shared secret when configured; writes the 403.
+// checkToken enforces the shared secret; writes the 403. No token
+// configured means no access: an open streamer is a root API on the network
+// (hardening plan §6) — a missing env file must be an outage, not an opening.
 func (s *Server) checkToken(w http.ResponseWriter, r *http.Request) bool {
 	if s.Token == "" {
-		return true
+		http.Error(w, "Forbidden: streamer has no token configured", http.StatusForbidden)
+		return false
 	}
 	got := r.Header.Get("X-Streamer-Token")
 	if subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {

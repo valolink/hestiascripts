@@ -1,8 +1,11 @@
 #!/bin/bash
 # info: update the hestiascripts checkout and redeploy scripts + streamer
-# options: NONE
+# options: [--allow-unsigned]   (terminal only)
 #
 # example: v-hestiascripts-update
+#
+# The new commit must be signed by a key listed in /etc/hs/allowed_signers
+# (on the box, not in the repo) — otherwise nothing is changed.
 #
 # Pulls the latest hestiascripts from git (fast-forward only) and re-runs
 # install-scripts.sh. Designed to be driven from EngineLink over the
@@ -60,19 +63,58 @@ if [ -n "$(git status --porcelain)" ]; then
 	echo "(recover with: cd $REPO_DIR && git stash pop)"
 fi
 
-echo "Pulling (fast-forward only)..."
-if ! git pull --ff-only 2>&1; then
+# Signed updates (docs/security-hardening.md §13). This script runs as root
+# and can be fired over the network: whoever can push to the repository would
+# otherwise get root on every box at the next update. So the new commit must
+# carry a signature from a key in /etc/hs/allowed_signers — a file on the box,
+# outside the repository, so a push cannot change who is trusted. It is
+# verified BEFORE anything is merged into the checkout.
+ALLOWED_SIGNERS=/etc/hs/allowed_signers
+ALLOW_UNSIGNED=false
+[ "${1:-}" = "--allow-unsigned" ] && ALLOW_UNSIGNED=true
+if [ "$ALLOW_UNSIGNED" = true ] && ! { [ -t 0 ] && [ -t 1 ]; }; then
+	echo "REFUSED: --allow-unsigned only works from a terminal on the box, never over the streamer."
+	exit 1
+fi
+
+echo "Fetching..."
+if ! git fetch --quiet origin 2>&1; then
 	# Two very different causes, and the operator needs to know which. With
 	# terminal prompts disabled above, an auth/rate-limit rejection surfaces as
-	# "could not read Username" rather than hanging — name it explicitly so it
-	# is not misread as a history problem.
-	echo "ERROR: git pull failed."
+	# "could not read Username" rather than hanging — name it explicitly.
+	echo "ERROR: git fetch failed."
 	echo "  If the message above mentions 'could not read Username', GitHub"
 	echo "  rejected an unauthenticated fetch (it does this to datacenter IPs"
 	echo "  even for public repos). Retrying usually works; switching origin to"
 	echo "  SSH fixes it for good:"
 	echo "    git -C $REPO_DIR remote set-url origin git@github.com:valolink/hestiascripts.git"
-	echo "  Otherwise the history has diverged and needs a manual look."
+	exit 1
+fi
+UPSTREAM=$(git rev-parse '@{u}' 2> /dev/null) || {
+	echo "ERROR: the checkout's branch has no upstream"
+	exit 1
+}
+
+if [ "$ALLOW_UNSIGNED" = true ]; then
+	echo "WARNING: --allow-unsigned — installing $(git rev-parse --short "$UPSTREAM") without checking its signature."
+elif [ ! -s "$ALLOWED_SIGNERS" ]; then
+	echo "REFUSED: signed updates are not set up on this box ($ALLOWED_SIGNERS is missing)."
+	echo "  Nothing was changed. Put the trusted signing key(s) there, one per line:"
+	echo "    reima@valolink.fi ssh-ed25519 AAAA…"
+	echo "  and sign commits (git config commit.gpgsign true, gpg.format ssh)."
+	echo "  To update anyway from a terminal on the box: v-hestiascripts-update --allow-unsigned"
+	exit 1
+elif ! git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$ALLOWED_SIGNERS" verify-commit "$UPSTREAM" 2>&1; then
+	echo "REFUSED: $(git rev-parse --short "$UPSTREAM") is not signed by a key in $ALLOWED_SIGNERS."
+	echo "  Nothing was changed. Whoever pushed it is not trusted to run code as root here."
+	exit 1
+else
+	echo "Signature OK: $(git rev-parse --short "$UPSTREAM") is signed by a trusted key."
+fi
+
+echo "Merging (fast-forward only)..."
+if ! git merge --ff-only --quiet "$UPSTREAM" 2>&1; then
+	echo "ERROR: the local history has diverged from origin; it needs a manual look."
 	exit 1
 fi
 

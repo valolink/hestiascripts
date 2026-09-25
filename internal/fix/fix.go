@@ -379,23 +379,24 @@ func init() {
 			}, nil
 		},
 	})
-	register(Fix{
-		ID: "web-terminal-update", Title: "Update Hestia's web terminal package", Check: "systemd.failed", Scope: "", Risk: Change,
-		Applies: func(r check.Result) bool {
-			return r.Subject == "hestia-web-terminal.service" && strings.Contains(strings.Join(r.Evidence, " "), "node-pty")
-		},
-		Note: "hzdemolink 2026-09-25: hestia-web-terminal 1.0.3 shipped without its node_modules (node-pty), so the panel's browser terminal never started; apt already offers a newer build.",
-		How:  "apt-cache policy shows the installed and candidate versions; apt-get installs the candidate (the upstream build bundles node_modules with `npm ci`); the unit is restarted and its status printed. Only this one package changes.",
-		Undo: "apt-get install hestia-web-terminal=<old version> (shown by the first step).",
+	webTerminalOff := Fix{
+		ID: "web-terminal-off", Title: "Turn the Hestia web terminal off", Check: "hestia.web-terminal", Scope: "", Risk: Change,
+		Note: "The panel's browser terminal is a root shell on the panel port; its 1.0.2 build admitted unauthenticated visitors — the entry point of the May 2026 compromise.",
+		How:  "Stock `v-delete-sys-web-terminal`: sets WEB_TERMINAL='false' in hestia.conf, stops and disables hestia-web-terminal.service. The package stays installed but does nothing; the last steps show the unit state and that nothing listens on :8085.",
+		Undo: "v-add-sys-web-terminal — only for the minutes it is needed, then turn it off again.",
 		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
 			return []Step{
-				{Why: "installed vs available", Argv: []string{"apt-cache", "policy", "hestia-web-terminal"}},
-				{Why: "install the candidate build", Argv: []string{"apt-get", "install", "-y", "hestia-web-terminal"}},
-				{Why: "start it", Argv: []string{"systemctl", "restart", "hestia-web-terminal"}},
-				{Why: "did it stay up", Argv: []string{"systemctl", "--no-pager", "-n", "5", "status", "hestia-web-terminal"}},
+				{Why: "Hestia's own switch", Argv: []string{bin + "v-delete-sys-web-terminal"}},
+				{Why: "make sure the unit is down even if hestia.conf already said false", Argv: []string{"systemctl", "disable", "--now", "hestia-web-terminal"}},
+				{Why: "nothing listens on :8085 any more", Argv: []string{"sh", "-c", "ss -Hltn 'sport = :8085' | grep . && echo 'STILL LISTENING' && exit 1 || echo 'port 8085: nothing listening'"}},
 			}, nil
 		},
-	})
+	}
+	register(webTerminalOff)
+	// A failed hestia-web-terminal unit is not something to repair: turn it off.
+	webTerminalOff.ID, webTerminalOff.Check = "web-terminal-off-unit", "systemd.failed"
+	webTerminalOff.Applies = func(r check.Result) bool { return r.Subject == "hestia-web-terminal.service" }
+	register(webTerminalOff)
 	register(Fix{
 		ID: "quotacheck-reset", Title: "Clear quotacheck's failed state", Check: "systemd.failed", Scope: "", Risk: Change,
 		Applies: func(r check.Result) bool {

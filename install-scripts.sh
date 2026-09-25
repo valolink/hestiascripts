@@ -87,8 +87,14 @@ if [ -f "$STREAMER_BIN" ]; then
     STREAMER_TOKEN=$(grep -oP '^HESTIA_STREAMER_TOKEN=\K.*' "$STREAMER_ENV")
     echo "  🔑 Using existing streamer token."
   fi
-  echo "  ➡️  EngineLink server settings → Streamer token:"
-  echo "      $STREAMER_TOKEN"
+  # Print the token only to a terminal: v-hestiascripts-update runs this
+  # under systemd-run, where stdout is the journal (hardening plan §5).
+  if [ -t 1 ]; then
+    echo "  ➡️  EngineLink server settings → Streamer token:"
+    echo "      $STREAMER_TOKEN"
+  else
+    echo "  ➡️  Streamer token is in $STREAMER_ENV (not printed: no terminal)."
+  fi
 
   # Create the systemd service file dynamically
   cat <<EOF >"$SYSTEMD_DIR/hestia-streamer.service"

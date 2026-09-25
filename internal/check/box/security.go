@@ -24,6 +24,7 @@ func securityChecks() []Check {
 		{ID: "updates.pending", Section: "security", Title: "Security updates", Timeout: 30 * time.Second, Run: checkPendingUpdates},
 		{ID: "updates.reboot", Section: "security", Title: "Reboot", Run: checkReboot},
 		{ID: "hestia.version", Section: "security", Title: "HestiaCP version", Run: checkHestiaVersion},
+		{ID: "hestia.web-terminal", Section: "security", Title: "Hestia web terminal", Run: checkWebTerminal},
 		{ID: "hestia.services", Section: "system", Title: "hestia.conf services", Run: checkServiceDrift},
 		{ID: "maldet", Section: "security", Title: "Maldet", Run: checkMaldet},
 		{ID: "web.exposure", Section: "security", Title: "Exposed files in web roots", Timeout: 30 * time.Second, Run: checkExposure},
@@ -567,4 +568,41 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%d KB", n>>10)
 	}
 	return fmt.Sprintf("%d B", n)
+}
+
+// The panel's browser terminal (/_shell/, hestia-web-terminal) was the entry
+// point of the May 2026 compromise: 1.0.2 accepted a session that had only
+// loaded /login/ as root. It stays off; a Hestia upgrade must not bring it
+// back unnoticed, so on, running or listening are all Fail.
+func checkWebTerminal(ctx context.Context, env *Env) []Result {
+	s := env.Sys
+	var ev []string
+	if hestia.Conf(s)["WEB_TERMINAL"] == "true" {
+		ev = append(ev, "hestia.conf: WEB_TERMINAL='true'")
+	}
+	if active(ctx, s, "hestia-web-terminal") {
+		ev = append(ev, "hestia-web-terminal.service is active")
+	}
+	if out, _ := s.Run(ctx, "ss", "-Hltn", "sport = :8085"); strings.TrimSpace(out) != "" {
+		ev = append(ev, "something listens on :8085: "+strings.Join(strings.Fields(out), " "))
+	}
+	ver, _ := s.Run(ctx, "dpkg-query", "-W", "-f=${Status} ${Version}", "hestia-web-terminal")
+	installed := strings.HasPrefix(ver, "install ok installed")
+	if installed {
+		f := strings.Fields(ver)
+		v := f[len(f)-1]
+		ev = append(ev, "package hestia-web-terminal "+v+" installed")
+		if versionLess(v, "1.0.3") {
+			ev = append(ev, "versions before 1.0.3 accept an unauthenticated session as root")
+		}
+	}
+	switch {
+	case len(ev) > 0 && (len(ev) > 1 || !installed):
+		return []Result{New(Fail, "the web terminal is on").Ev(ev...).
+			Because("The browser terminal on the panel port gives a root shell; its 1.0.2 build let unauthenticated visitors in, which is how three boxes were compromised in May 2026. Keep it off; enable it only for the minutes it is used.").
+			Fixed("v-delete-sys-web-terminal")}
+	case installed:
+		return []Result{New(Configured, "off (package still installed)").Ev(ev...)}
+	}
+	return []Result{New(OK, "off and not installed")}
 }

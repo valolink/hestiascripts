@@ -10,7 +10,12 @@ import (
 	"testing"
 )
 
+const testToken = "test-token"
+
 func newTestServer(t *testing.T, token string) (*Server, string, string) {
+	if token == "" {
+		token = testToken
+	}
 	t.Helper()
 	bin, backup := t.TempDir(), t.TempDir()
 	script := func(name, body string) {
@@ -33,7 +38,11 @@ func newTestServer(t *testing.T, token string) (*Server, string, string) {
 func get(t *testing.T, h http.Handler, method, target, token string, body io.Reader) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest(method, target, body)
-	if token != "" {
+	switch token {
+	case "none": // no header at all
+	case "":
+		req.Header.Set("X-Streamer-Token", testToken)
+	default:
 		req.Header.Set("X-Streamer-Token", token)
 	}
 	rec := httptest.NewRecorder()
@@ -45,11 +54,23 @@ func TestTokenGate(t *testing.T) {
 	s, _, _ := newTestServer(t, "sekrit")
 	h := s.Handler()
 	for _, path := range []string{"/execute?script=v-wp-echo", "/download?file=a.zip", "/netdata/alarms", "/netdata/data?chart=system.cpu"} {
-		if code, _ := get(t, h, "GET", path, "", nil); code != 403 {
+		if code, _ := get(t, h, "GET", path, "none", nil); code != 403 {
 			t.Errorf("%s without token: %d", path, code)
 		}
 		if code, _ := get(t, h, "GET", path, "wrong", nil); code != 403 {
 			t.Errorf("%s wrong token: %d", path, code)
+		}
+	}
+}
+
+// Fail closed: a server with no token configured refuses everything
+// (hardening plan §6) instead of serving a root API to anyone.
+func TestNoTokenConfiguredRefusesEverything(t *testing.T) {
+	s, _, _ := newTestServer(t, "")
+	s.Token = ""
+	for _, tok := range []string{"none", "anything"} {
+		if code, _ := get(t, s.Handler(), "GET", "/execute?script=v-wp-echo", tok, nil); code != 403 {
+			t.Errorf("token %q: %d", tok, code)
 		}
 	}
 }

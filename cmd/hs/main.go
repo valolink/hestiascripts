@@ -43,7 +43,8 @@ Usage:
   hs compat health         JSON for EngineLink (v-server-health contract)
   hs compat setup-status   JSON for EngineLink (v-server-setup-status contract)
   hs serve [--addr :8091]  the streamer EngineLink talks to (replaces hestia-streamer);
-                           token from HESTIA_STREAMER_TOKEN
+                           token from HESTIA_STREAMER_TOKEN (required), address from
+                           HESTIA_STREAMER_ADDR
   hs fix ID [SUBJECT] [--dry-run]
                            plan a fix from the live box, print each command, run it
   hs fix --list            every fix and the check it resolves
@@ -248,21 +249,28 @@ func isTTY() bool {
 
 func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", ":8091", "listen address")
+	def := os.Getenv("HESTIA_STREAMER_ADDR")
+	if def == "" {
+		def = ":8091"
+	}
+	addr := fs.String("addr", def, "listen address (default $HESTIA_STREAMER_ADDR, else :8091)")
 	fs.Parse(args)
 
+	// Fail closed (hardening plan §6): without a token the streamer would be
+	// an unauthenticated root API. Refuse to start; the unit's restart loop
+	// and this message make the missing env file visible.
 	token := os.Getenv("HESTIA_STREAMER_TOKEN")
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "hs serve: HESTIA_STREAMER_TOKEN is not set (/etc/hestia-streamer.env) — refusing to start without authentication. install-scripts.sh generates it.")
+		return 1
+	}
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           serve.Default(token).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// No write timeout: /execute streams for as long as the script runs.
 	}
-	auth := "token required"
-	if token == "" {
-		auth = "NO TOKEN — auth disabled"
-	}
-	fmt.Printf("hs %s serving on %s (%s)\n", version, *addr, auth)
+	fmt.Printf("hs %s serving on %s (token required)\n", version, *addr)
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, "hs serve:", err)
 		return 1
