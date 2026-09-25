@@ -275,3 +275,65 @@ func TestPostfixRefusedWhereEximRuns(t *testing.T) {
 		t.Error("installing postfix would remove exim4")
 	}
 }
+
+func siteBox() (*sys.Fake, Target) {
+	f := box8G()
+	f.Files[hestia.UsersDir+"/renea/web.conf"] = "DOMAIN='renea.fi' IP='1.2.3.4' PROXY='default'\nDOMAIN='copy.renea.fi' IP='1.2.3.4'\n"
+	f.Files["/home/renea/web/renea.fi/public_html/wp-config.php"] = "<?php\ndefine( 'WP_DEBUG', 1 );\ndefine('WP_AUTO_UPDATE_CORE', 'minor');\ndefine('WP_MEMORY_LIMIT', '128M');\n"
+	d := hestia.Domain{User: "renea", Name: "renea.fi"}
+	return f, Target{Domain: &d}
+}
+
+func sitePlan(t *testing.T, id string, f *sys.Fake, tg Target, v Values) ([]Step, error) {
+	t.Helper()
+	o, _ := ByID(id)
+	env := &check.Env{Sys: f}
+	vals := o.Defaults(context.Background(), env, tg)
+	for k, x := range v {
+		vals[k] = x
+	}
+	if err := o.Validate(context.Background(), env, tg, vals); err != nil {
+		return nil, err
+	}
+	return o.Plan(context.Background(), env, tg, vals)
+}
+
+func TestWPConfigWritesOnlyChangesWithTheRightLiteral(t *testing.T) {
+	f, tg := siteBox()
+	st, err := sitePlan(t, "wp-config", f, tg, Values{"WP_DEBUG": "false", "WP_MEMORY_LIMIT": "", "DISALLOW_FILE_EDIT": "true", "WP_AUTO_UPDATE_CORE": "minor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := text(st)
+	for _, want := range []string{
+		"config set WP_DEBUG false --type=constant --raw",
+		"config set DISALLOW_FILE_EDIT true --type=constant --raw",
+		"config delete WP_MEMORY_LIMIT --type=constant",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %q in\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "WP_AUTO_UPDATE_CORE") || len(st) != 3 {
+		t.Errorf("unchanged defines must not be written:\n%s", p)
+	}
+	// A hand-written 1 stays a valid choice: opening and saving changes nothing.
+	if st, err := sitePlan(t, "wp-config", f, tg, nil); err != nil || len(st) != 0 {
+		t.Errorf("untouched form planned %v (%v)", st, err)
+	}
+}
+
+func TestCloneOverwriteIsOptInAndTyped(t *testing.T) {
+	f, tg := siteBox()
+	if _, err := sitePlan(t, "clone", f, tg, Values{"new-domain": "copy.renea.fi"}); err == nil {
+		t.Error("an existing domain was overwritten without asking")
+	}
+	st, err := sitePlan(t, "clone", f, tg, Values{"new-domain": "copy.renea.fi", "overwrite": "yes"})
+	if err != nil || !strings.Contains(text(st), "--force") {
+		t.Errorf("%v\n%s", err, text(st))
+	}
+	o, _ := ByID("clone")
+	if o.RiskFor(Values{"overwrite": "yes"}) != Destructive || o.RiskFor(Values{"overwrite": "no"}) != Change {
+		t.Error("overwrite must require the typed confirmation")
+	}
+}

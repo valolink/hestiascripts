@@ -66,19 +66,6 @@ func siteActions() []Action {
 		{ID: "site.dump", Title: "Dump the site (files + database) for local dev", Site: true, Mode: Stream, Confirm: ConfirmYes,
 			Note:    "Stock v-dump-site: a zip in /backup, removed again after an hour. The last lines name the file.",
 			Command: func(t Target, _ string) []string { return []string{bin + "v-dump-site", t.Domain.User, t.Domain.Name} }},
-		{ID: "site.wp-config", Title: "Edit wp-config constants", Site: true, WPOnly: true, Mode: Interactive, Confirm: ConfirmNone,
-			Note: "Interactive: lists defines, then add or change them.", Recheck: []string{"site.debug", "redis.sites"},
-			Command: siteScript("v-wp-config")},
-		{ID: "site.clone", Title: "Clone this site…", Site: true, WPOnly: true, Mode: Interactive, Confirm: ConfirmNone,
-			Note: "Interactive: asks for the destination user and domain. Creates a new site; the source is untouched.",
-			Command: func(t Target, _ string) []string {
-				return []string{bin + "v-wp-clone-site", "--src-user=" + t.Domain.User, "--src-domain=" + t.Domain.Name}
-			}},
-		{ID: "site.staging", Title: "Create staging copy…", Site: true, WPOnly: true, Mode: Interactive, Confirm: ConfirmNone,
-			Note: "Interactive: asks for the staging user and domain. Isolated build; live is only cache-flushed.",
-			Command: func(t Target, _ string) []string {
-				return []string{bin + "v-wp-staging-create", "--src-user=" + t.Domain.User, "--src-domain=" + t.Domain.Name}
-			}},
 		{ID: "site.restore", Title: "Restore from backup…", Site: true, Mode: Interactive, Confirm: ConfirmNone,
 			Note:    "Guided restic restore: pick scope and snapshot, safety copies first, typed confirmation inside. Rehearse with the dry-run.",
 			Recheck: []string{"site.http", "site.core"}, NeedsRepo: false,
@@ -103,9 +90,6 @@ func boxActions() []Action {
 			Note: "Guided restic restore (user, site, files, database). Typed confirmation inside.", Command: vscript("v-restore-restic")},
 		{ID: "backups.restore-rehearse", Title: "Rehearse a restore (dry-run)…", Section: "backups", Mode: Interactive, Confirm: ConfirmNone,
 			Note: "The whole dialogue with real snapshots; prints commands instead of running them.", Command: vscript("v-restore-restic", "--dry-run")},
-		{ID: "backups.setup", Title: "Set up restic to a Storage Box…", Section: "backups", Mode: Interactive, Confirm: ConfirmNone, NeedsRepo: true,
-			Note:    "Onboarding: host key, rclone remote, repo, per-user incremental, schedule. Asks for the Storage Box details.",
-			Recheck: []string{"backups.setup", "backups.nightly"}, Command: repoScript("setup-restic-backup.sh")},
 		{ID: "backups.dr-check", Title: "Disaster-recovery script — check repos", Section: "backups", Mode: Stream, Confirm: ConfirmNone, NeedsRepo: true,
 			DescribeFrom: "make-restore-script.sh",
 			Note:         "Generates the DR script to a root-only temp file and runs its --check: opens every repo with its key. Changes nothing remote.",
@@ -186,7 +170,6 @@ func ByID(id string) (Action, bool) {
 // "enter to fix". Only where one action is the obvious fix.
 var ForCheck = map[string]string{
 	"site.updates":      "site.update-preview",
-	"site.debug":        "site.wp-config",
 	"hestia.version":    "security.hestia-update",
 	"backups.setup":     "backups.guard-preview",
 	"web.cache-headers": "web.cache-headers",
