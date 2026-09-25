@@ -49,6 +49,19 @@ func Preview(steps []Step) []string {
 // `systemctl status` exits 3 for any stopped unit. Anything else stops at the
 // first failing step. Returns the exit code for the whole plan.
 func Execute(ctx context.Context, w io.Writer, title string, steps []Step, readOnly, dry bool) int {
+	return Run(ctx, w, title, steps, Opts{ReadOnly: readOnly, Dry: dry})
+}
+
+// Opts for Run. Stdin, when set, is handed to every step (interactive
+// operations: ncdu, a pager); otherwise steps read nothing.
+type Opts struct {
+	ReadOnly, Dry bool
+	Stdin         io.Reader
+}
+
+// Run is Execute with options.
+func Run(ctx context.Context, w io.Writer, title string, steps []Step, o Opts) int {
+	readOnly, dry := o.ReadOnly, o.Dry
 	fmt.Fprintf(w, "# %s\n", title)
 	if len(steps) == 0 {
 		fmt.Fprintln(w, "# nothing to do: the box is already in the state this would produce")
@@ -71,6 +84,9 @@ func Execute(ctx context.Context, w io.Writer, title string, steps []Step, readO
 		}
 		cmd := exec.CommandContext(ctx, st.Argv[0], st.Argv[1:]...)
 		cmd.Stdout, cmd.Stderr = w, w
+		if o.Stdin != nil {
+			cmd.Stdin = o.Stdin
+		}
 		if err := cmd.Run(); err != nil {
 			if readOnly {
 				fmt.Fprintf(w, "# (%v)\n", err)

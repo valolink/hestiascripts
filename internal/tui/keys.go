@@ -302,7 +302,7 @@ func (m *model) enter() tea.Cmd {
 				return m.openLog(src)
 			}
 		}
-		id, ok := action.ForCheck[r.Check]
+		_, open, ok := m.forCheck(r)
 		if !ok {
 			// A site result opens its site; others have no single fix.
 			if _, isSite := m.domain(r.Subject); isSite && m.scr != scrSite {
@@ -310,19 +310,7 @@ func (m *model) enter() tea.Cmd {
 			}
 			return nil
 		}
-		a, _ := action.ByID(id)
-		t := action.Target{Host: m.host}
-		if a.Site {
-			d, ok := m.domain(r.Subject)
-			if !ok {
-				d, ok = m.domain(m.siteName)
-			}
-			if !ok {
-				return nil
-			}
-			t.Domain = &d
-		}
-		m.ask(a, t)
+		open()
 	}
 	return nil
 }

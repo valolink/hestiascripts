@@ -24,7 +24,16 @@ const (
 	Number
 	Choice
 	Bool
+	// Secret: typed masked, never put in argv, the log or a transcript. It
+	// reaches `hs op` as the environment variable SecretEnv(key); plans refer
+	// to it as "@env:NAME" (hs conf set) or "$NAME" inside sh -c.
+	Secret
 )
+
+// SecretEnv is the environment variable a secret field travels in.
+func SecretEnv(key string) string {
+	return "HS_SECRET_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(key))
+}
 
 // Field is one input on the form.
 type Field struct {
@@ -61,7 +70,13 @@ type Op struct {
 	Title   string
 	Section string // tab it lives in; "sites" for per-site operations
 	Site    bool
+	WPOnly  bool // site operation that needs WordPress
 	Risk    Risk
+	// RiskOf, when set, decides the risk from the values (an overwrite
+	// switch makes a clone destructive).
+	RiskOf func(v Values) Risk
+	// Interactive: the steps get the terminal (ncdu); the TUI hands it over.
+	Interactive bool
 	Note    string
 	How     string
 	Undo    string
@@ -103,10 +118,18 @@ func ForSection(section string) []Op {
 	return out
 }
 
-func ForSite() []Op {
+// RiskFor is the risk of running o with v.
+func (o Op) RiskFor(v Values) Risk {
+	if o.RiskOf != nil {
+		return o.RiskOf(v)
+	}
+	return o.Risk
+}
+
+func ForSite(wp bool) []Op {
 	var out []Op
 	for _, o := range all {
-		if o.Site {
+		if o.Site && (!o.WPOnly || wp) {
 			out = append(out, o)
 		}
 	}
@@ -180,7 +203,20 @@ func (o Op) Defaults(ctx context.Context, env *check.Env, t Target) Values {
 func (v Values) Args(o Op) []string {
 	var out []string
 	for _, f := range o.Fields {
-		out = append(out, f.Key+"="+v[f.Key])
+		if f.Kind != Secret {
+			out = append(out, f.Key+"="+v[f.Key])
+		}
+	}
+	return out
+}
+
+// Env is the environment carrying o's secret fields.
+func (v Values) Env(o Op) []string {
+	var out []string
+	for _, f := range o.Fields {
+		if f.Kind == Secret && v[f.Key] != "" {
+			out = append(out, SecretEnv(f.Key)+"="+v[f.Key])
+		}
 	}
 	return out
 }

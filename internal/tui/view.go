@@ -494,10 +494,8 @@ func (m *model) detail(r check.Result) string {
 		}
 	} else if r.Check == "site.http" && st >= check.Warn {
 		b.WriteString(sAcc.Render("⏎ ") + sBold.Render("Open the site's error log") + "\n")
-	} else if id, ok := action.ForCheck[r.Check]; ok && st != check.OK {
-		if a, ok := action.ByID(id); ok {
-			b.WriteString(sAcc.Render("⏎ ") + sBold.Render(a.Title) + sDim.Render("  (enter shows what it does first)") + "\n")
-		}
+	} else if title, _, ok := m.forCheck(r); ok && st != check.OK {
+		b.WriteString(sAcc.Render("⏎ ") + sBold.Render(title) + sDim.Render("  (enter shows what it does first)") + "\n")
 	} else if r.Fix != "" && st != check.OK {
 		b.WriteString(sAcc.Render("→ ") + r.Fix + "\n")
 	}

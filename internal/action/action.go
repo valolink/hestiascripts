@@ -72,6 +72,9 @@ type Action struct {
 	// DescribeFrom: repo-relative script to describe when the command is a
 	// wrapper around it (e.g. a pipeline).
 	DescribeFrom string
+	// Env: extra environment for the command (an operation's secrets —
+	// kept out of argv, the log and the transcript).
+	Env []string
 	// NeedsRepo: the command lives in the checkout (setup/ functions,
 	// non-v- scripts), so it is unavailable when the repo is not found.
 	NeedsRepo bool

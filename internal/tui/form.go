@@ -11,6 +11,7 @@ import (
 
 	"github.com/valolink/hestiascripts/internal/action"
 	"github.com/valolink/hestiascripts/internal/check"
+	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/op"
 	"github.com/valolink/hestiascripts/internal/plan"
 )
@@ -65,9 +66,13 @@ func (m *model) opAction(o op.Op, t op.Target, v op.Values) (action.Action, acti
 	}
 	argv = append(argv, v.Args(o)...)
 	env := m.env
+	mode := action.Stream
+	if o.Interactive {
+		mode = action.Interactive
+	}
 	a := action.Action{
-		ID: "op." + o.ID, Title: o.Title, Site: o.Site, Mode: action.Stream,
-		Confirm: map[op.Risk]action.Confirm{op.ReadOnly: action.ConfirmNone, op.Change: action.ConfirmYes, op.Destructive: action.ConfirmTyped}[o.Risk],
+		ID: "op." + o.ID, Title: o.Title, Site: o.Site, Mode: mode,
+		Confirm: confirmFor(o.RiskFor(v)), Env: v.Env(o),
 		Note:    o.Note, How: o.How, Undo: o.Undo, Recheck: o.Recheck,
 		Command: func(action.Target, string) []string { return argv },
 		Preview: func() ([]string, error) {
@@ -84,6 +89,10 @@ func (m *model) opAction(o op.Op, t op.Target, v op.Values) (action.Action, acti
 		},
 	}
 	return a, at
+}
+
+func confirmFor(r op.Risk) action.Confirm {
+	return map[op.Risk]action.Confirm{op.ReadOnly: action.ConfirmNone, op.Change: action.ConfirmYes, op.Destructive: action.ConfirmTyped}[r]
 }
 
 func (m *model) submitForm(f *formState) {
@@ -201,6 +210,8 @@ func (m *model) formView() string {
 			val = "‹ " + label + " ›"
 		case op.Bool:
 			val = "[" + map[string]string{"yes": "x", "no": " "}[val] + "] " + val
+		case op.Secret:
+			val = strings.Repeat("•", len([]rune(val)))
 		}
 		line := fmt.Sprintf("%-26s %s", fl.Label, val)
 		if i == f.cursor && fl.Kind != op.Choice && fl.Kind != op.Bool {
@@ -233,16 +244,63 @@ func (m *model) opsHere() []action.Action {
 	case scrSection:
 		ops = op.ForSection(m.sectionID)
 	case scrSite:
-		ops = op.ForSite()
+		if d, ok := m.domain(m.siteName); ok {
+			ops = op.ForSite(isWP(m.env, d))
+		}
 	}
 	var out []action.Action
 	for _, o := range ops {
 		out = append(out, action.Action{
-			ID: "op." + o.ID, Title: o.Title, Site: o.Site, Mode: action.Stream, Note: o.Note, How: o.How, Undo: o.Undo,
-			Confirm: map[op.Risk]action.Confirm{op.ReadOnly: action.ConfirmNone, op.Change: action.ConfirmYes, op.Destructive: action.ConfirmTyped}[o.Risk],
+			ID: "op." + o.ID, Title: o.Title + "…", Site: o.Site, Mode: action.Stream, Note: o.Note, How: o.How, Undo: o.Undo,
+			Confirm: confirmFor(o.Risk),
 			Command: func(action.Target, string) []string { return []string{"hs", "op", o.ID} },
 			Preview: func() ([]string, error) { return []string{"fill in the form first"}, nil },
 		})
 	}
 	return out
+}
+
+// forCheck: the routine action or operation for a check that has no specific
+// fix (action.ForCheck; an "op.<id>" value names an operation, whose form
+// opens). Site-scoped ones target the result's site, else the open site.
+func (m *model) forCheck(r check.Result) (string, func(), bool) {
+	id, ok := action.ForCheck[r.Check]
+	if !ok {
+		return "", nil, false
+	}
+	site := func() (*hestia.Domain, bool) {
+		d, ok := m.domain(r.Subject)
+		if !ok {
+			d, ok = m.domain(m.siteName)
+		}
+		return &d, ok
+	}
+	if oid, isOp := strings.CutPrefix(id, "op."); isOp {
+		o, ok := op.ByID(oid)
+		if !ok {
+			return "", nil, false
+		}
+		var t op.Target
+		if o.Site {
+			d, ok := site()
+			if !ok {
+				return "", nil, false
+			}
+			t.Domain = d
+		}
+		return o.Title + "…", func() { m.openForm(o, t) }, true
+	}
+	a, ok := action.ByID(id)
+	if !ok {
+		return "", nil, false
+	}
+	t := action.Target{Host: m.host}
+	if a.Site {
+		d, ok := site()
+		if !ok {
+			return "", nil, false
+		}
+		t.Domain = d
+	}
+	return a.Title, func() { m.ask(a, t) }, true
 }

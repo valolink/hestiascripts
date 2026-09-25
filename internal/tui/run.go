@@ -92,13 +92,13 @@ func (m *model) start(a action.Action, t action.Target) tea.Cmd {
 		} else {
 			cmd = exec.Command(argv[0], argv[1:]...)
 		}
-		cmd.Env = append(os.Environ(), "SCRIPT_DIR="+repo)
+		cmd.Env = append(append(os.Environ(), "SCRIPT_DIR="+repo), a.Env...)
 		m.setStatus("running " + a.Title + " …")
 		return tea.ExecProcess(cmd, func(err error) tea.Msg { return execDoneMsg{a, t, ev, err} })
 	}
 
 	cmd := a.Cmd(t, repo)
-	cmd.Env = append(os.Environ(), "SCRIPT_DIR="+repo, "TERM=dumb", "NO_COLOR=1")
+	cmd.Env = append(append(os.Environ(), "SCRIPT_DIR="+repo, "TERM=dumb", "NO_COLOR=1"), a.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // stop = the whole group
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw

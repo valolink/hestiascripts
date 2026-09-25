@@ -52,6 +52,7 @@ Usage:
   hs op --list             every operation and its fields
   hs logcap add KEY PATH OWNER SIZE | remove KEY | list
                            hourly size cap for chosen logs (/etc/hs/logcap.conf)
+  hs conf set|install|get  edit a config file, printing before → after, backup kept (hs conf)
   hs version
 
 Sections: ` + "security, backups, sites, system, performance, web, mail, monitoring" + `
@@ -90,6 +91,8 @@ func main() {
 		os.Exit(cmdOp(ctx, env, os.Args[2:]))
 	case "logcap":
 		os.Exit(cmdLogcap(os.Args[2:]))
+	case "conf":
+		os.Exit(cmdConf(os.Args[2:]))
 	case "site-php":
 		os.Exit(cmdSitePHP(ctx, env, os.Args[2:]))
 	case "version", "--version":
@@ -452,6 +455,11 @@ func cmdOp(ctx context.Context, env *check.Env, args []string) int {
 	}
 	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
+	for _, f := range o.Fields {
+		if _, set := vals[f.Key]; !set && f.Kind == op.Secret {
+			vals[f.Key] = os.Getenv(op.SecretEnv(f.Key))
+		}
+	}
 	for k, v := range o.Defaults(pctx, env, t) {
 		if _, set := vals[k]; !set {
 			vals[k] = v
@@ -470,5 +478,9 @@ func cmdOp(ctx context.Context, env *check.Env, args []string) int {
 	if t.Domain != nil {
 		title += " — " + t.Domain.Name
 	}
-	return plan.Execute(ctx, os.Stdout, title, steps, o.Risk == op.ReadOnly, dry)
+	opts := plan.Opts{ReadOnly: o.RiskFor(vals) == op.ReadOnly, Dry: dry}
+	if o.Interactive {
+		opts.Stdin = os.Stdin
+	}
+	return plan.Run(ctx, os.Stdout, title, steps, opts)
 }
