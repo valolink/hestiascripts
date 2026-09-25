@@ -4,6 +4,7 @@ package op
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/check/box"
 	"github.com/valolink/hestiascripts/internal/conf"
+	"github.com/valolink/hestiascripts/internal/ioc"
 )
 
 const (
@@ -356,6 +358,30 @@ func init() {
 		Recheck: []string{"ssh.private-keys"},
 		Plan: func(_ context.Context, _ *check.Env, _ Target, v Values) ([]Step, error) {
 			return []Step{{Why: "allow " + v["path"], Argv: []string{"sh", "-c", `install -d -m 700 /etc/hs && echo "$1" >> ` + box.AllowedPrivate + ` && cat ` + box.AllowedPrivate, "sh", v["path"]}}}, nil
+		},
+	})
+	register(Op{
+		ID: "maldet-signatures", Title: "Teach maldet the known webshell", Section: "security", Risk: Change,
+		Note:     "maldet scanned the compromised boxes daily from June and found nothing: its signatures did not know the webshell. This adds each webshell marker from the indicator list as a custom signature.",
+		How:      "Appends `<hex of the marker>:{HEX}php.webshell.<n>` lines to /usr/local/maldetect/sigs/custom.hex.dat (maldet's own custom-signature file, kept across its signature updates) for each marker not already there. The next scan (or monitor mode) uses them.",
+		Undo:     "Remove the lines from /usr/local/maldetect/sigs/custom.hex.dat.",
+		Plan: func(_ context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
+			const f = "/usr/local/maldetect/sigs/custom.hex.dat"
+			if !exists(env, "/usr/local/maldetect/maldet") {
+				return nil, fmt.Errorf("maldet is not installed")
+			}
+			cur := readFile(env, f)
+			var lines []string
+			for i, m := range ioc.Load(readFile(env, ioc.LocalPath)).Of("marker") {
+				h := hex.EncodeToString([]byte(m.Value))
+				if !strings.Contains(cur, h) {
+					lines = append(lines, fmt.Sprintf("%s:{HEX}php.webshell.valolink.%d", h, i+1))
+				}
+			}
+			if len(lines) == 0 {
+				return nil, nil
+			}
+			return []Step{{Why: "custom signatures for the webshell markers", Argv: append([]string{"sh", "-c", `printf '%s\n' "$@" >> ` + f + ` && tail -n ` + fmt.Sprint(len(lines)) + ` ` + f, "sh"}, lines...)}}, nil
 		},
 	})
 }

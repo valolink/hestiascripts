@@ -1,8 +1,0 @@
-# Hosts every box drops outbound (hs firewall: HS_OUT), one address or CIDR per
-# line. From the May 2026 compromise (docs/security-hardening.md): the Realm C2
-# callback and the hosts the implants and tooling reached.
-195.72.61.165
-161.97.132.209
-74.48.66.73
-# web-terminal attacker reported on forum.hestiacp.com/t/web-terminal-hack/21785 (2026-05-22)
-45.86.230.242

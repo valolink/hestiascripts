@@ -157,7 +157,7 @@ func checkEgress(ctx context.Context, env *Env) []Result {
 	var rs []Result
 	if !strings.Contains(out, "-j DROP") {
 		rs = append(rs, New(Warn, "known C2 hosts are not blocked outbound").For("block list").
-			Because("The block list (templates/ioc/block-hosts) is the only thing stopping a leftover implant from calling home.").
+			Because("The block list (internal/ioc/indicators.txt hosts) is the only thing stopping a leftover implant from calling home.").
 			Fixed("hs op egress   # applies the block list in any mode"))
 	}
 	switch c.Egress {

@@ -5,31 +5,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/valolink/hestiascripts/internal/conf"
 	"github.com/valolink/hestiascripts/internal/fwgen"
+	"github.com/valolink/hestiascripts/internal/ioc"
 )
 
-// blockHosts: the repo's IOC host list plus any from firewall.conf.
-func blockHosts(repo string, c fwgen.Config) []string {
+// blockHosts: the indicator list's hosts (built in + /etc/hs/indicators.local)
+// plus any in firewall.conf.
+func blockHosts(c fwgen.Config) []string {
+	local, _ := os.ReadFile(ioc.LocalPath)
 	seen := map[string]bool{}
 	var out []string
-	add := func(h string) {
-		if h != "" && !seen[h] {
+	for _, h := range append(ioc.Load(string(local)).Values("host"), c.BlockHosts...) {
+		if !seen[h] {
 			seen[h] = true
 			out = append(out, h)
 		}
-	}
-	if b, err := os.ReadFile(filepath.Join(repo, "templates/ioc/block-hosts")); err == nil {
-		for _, l := range strings.Split(string(b), "\n") {
-			if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
-				add(l)
-			}
-		}
-	}
-	for _, h := range c.BlockHosts {
-		add(h)
 	}
 	return out
 }
@@ -38,7 +30,7 @@ func firewallScript(repo string) string {
 	cb, _ := os.ReadFile(fwgen.ConfPath)
 	rb, _ := os.ReadFile(fwgen.RulesConf)
 	c := fwgen.ParseConfig(string(cb))
-	c.BlockHosts = blockHosts(repo, c)
+	c.BlockHosts = blockHosts(c)
 	return fwgen.Script(c, fwgen.ParseRules(string(rb)))
 }
 

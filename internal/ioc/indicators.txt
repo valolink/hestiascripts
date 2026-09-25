@@ -1,0 +1,41 @@
+# Indicators of compromise hs looks for (hs check persist.iocs, web.webshell,
+# the firewall block list). One per line: TYPE VALUE [NOTE]. Types:
+#   host    an address or CIDR: dropped in and out, connections to it are critical
+#   path    a file or directory that must not exist (glob allowed)
+#   process a process name (comm) that must not run
+#   sha256  a file hash (checked on unpackaged binaries and web-root PHP)
+#   marker  a string whose presence in a web-root PHP file is a webshell
+# Box-local additions: /etc/hs/indicators.local, same format.
+#
+# From the May 2026 compromise of hzdemolink, alavus and hzweb1
+# (docs/security-hardening.md). A path a Debian package owns is not reported.
+host    195.72.61.165   Realm C2 callback (:8000)
+host    161.97.132.209  implant infrastructure
+host    74.48.66.73     implant infrastructure
+# web-terminal attacker reported at forum.hestiacp.com/t/web-terminal-hack/21785 (2026-05-22)
+host    45.86.230.242   web-terminal attacker (community report)
+path    /usr/lib/systemd/systemd-ulibd                  Realm agent
+path    /usr/lib/systemd/systemd-journal-upload         second agent (reported only when no package owns it)
+path    /usr/lib/systemd/systemd-rfkill-watcher         second agent
+path    /usr/lib/systemd/systemd-resolved-helper        second agent
+path    /usr/lib/__root                                 pivot / rootkit tool
+path    /usr/lib/__hesti                                dropper (same family)
+path    /usr/bin/chrony2*                               XMRig miner
+path    /usr/sbin/chrony2*                              XMRig miner
+path    /var/tmp/system-id                              implant state
+path    /usr/lib/x86_64-linux-gnu/.nss_cache.init       rootkit
+path    /lib/x86_64-linux-gnu/libnss_cache.so.2         LD_PRELOAD rootkit library (community report)
+path    /etc/ld.so.preload                              any preload file: rootkit injection
+process ulibd                                           Realm agent
+process systemd-ulibd                                   Realm agent
+process chrony2                                         XMRig miner
+process __hesti                                         dropper
+process __root                                          pivot tool
+sha256  24cddd5f50e695176762a30e0069709eda51dc1182c092f8683e4ac622850b95  ulibd (Realm imix agent)
+sha256  407df667ea2df5e859b03cdda629016485775b1ac5bb22e851833daa2eb9a131  second agent
+sha256  663a8088faca8e126a11648f5671fcf4eaf96435e10daf63a1d1b17d8385154c  __root (pivot / rootkit tool)
+sha256  82d072ab03d90c0131b06a576eadf2c986a51f0de986d50db4e49be01bf125cb  __hesti
+sha256  4baecd2b1ef9045b62bc212989e44ceabe5c7a88cde2baf8f53e385952ee0e19  chrony2 (XMRig)
+sha256  b0e1ae6d73d656b203514f498b59cbcf29f067edf6fbd3803a3de7d21960848d  chrony2 (XMRig)
+sha256  2658e8fde41f119deaec1977c14343c2fc6472f6a8e6149f70f95c8f3fd3ffb4  PHP webshell (xcbin.php)
+marker  bc764c3a318cf1fae267a7276e7c92ba219a651f337d39274ea6462f08d6a3f7  PHP webshell password gate

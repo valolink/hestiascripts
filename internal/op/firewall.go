@@ -197,7 +197,7 @@ func init() {
 		ID: "egress", Title: "Outbound traffic filter", Section: "security", Risk: Change,
 		Resolves: "egress",
 		Note:     "Known command-and-control hosts are always dropped. The filter allows DNS, NTP, HTTP(S), mail submission (465/587), the Storage Box (23) and SSH/git (22); everything else is logged (log) or rejected (drop). Run log for a week, allow what is legitimate, then drop.",
-		How:      "Sets EGRESS (and EGRESS_EXTRA_PORTS) in /etc/hs/firewall.conf; `hs firewall apply` rebuilds the HS_OUT chain first in OUTPUT for IPv4 and IPv6: the block list from templates/ioc/block-hosts, then loopback and established traffic, ICMP, the allowed ports, a rate-limited LOG with prefix 'hs-egress:' and the sending uid, and in drop mode REJECT (an immediate error for the program, not a hang). The Outbound traffic check summarises the log.",
+		How:      "Sets EGRESS (and EGRESS_EXTRA_PORTS) in /etc/hs/firewall.conf; `hs firewall apply` rebuilds the HS_OUT chain first in OUTPUT for IPv4 and IPv6: the known-bad hosts from the indicator list (internal/ioc/indicators.txt, plus /etc/hs/indicators.local), then loopback and established traffic, ICMP, the allowed ports, a rate-limited LOG with prefix 'hs-egress:' and the sending uid, and in drop mode REJECT (an immediate error for the program, not a hang). The Outbound traffic check summarises the log.",
 		Undo:     "hs op egress mode=off (the block list stays).",
 		Fields: []Field{
 			{Key: "mode", Label: "Filter", Kind: Choice,

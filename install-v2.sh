@@ -10,6 +10,9 @@
 #   bash install-v2.sh --serve     also run the streamer as `hs serve`
 #   bash install-v2.sh --no-serve  put the streamer back on the old binary
 #   bash install-v2.sh --no-cron   remove the refresh cron
+#   bash install-v2.sh --watch     security watch every 15 min, mailing new findings
+#                                  (hs op watch-enable; alerts to tuotanto@valolink.fi
+#                                  unless /etc/hs/watch.conf says otherwise)
 #
 # Every change is printed before it is made.
 set -uo pipefail
@@ -23,14 +26,15 @@ DROPIN_DIR=/etc/systemd/system/$UNIT.service.d
 DROPIN=$DROPIN_DIR/hs-serve.conf
 CRON=/etc/cron.d/hs
 
-CRON_ON=0 CRON_OFF=0 SERVE_ON=0 SERVE_OFF=0
+CRON_ON=0 CRON_OFF=0 SERVE_ON=0 SERVE_OFF=0 WATCH_ON=0
 for a in "$@"; do
   case "$a" in
     --cron) CRON_ON=1 ;;
     --no-cron) CRON_OFF=1 ;;
     --serve) SERVE_ON=1 ;;
     --no-serve) SERVE_OFF=1 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    --watch) WATCH_ON=1 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option $a (see --help)"; exit 2 ;;
   esac
 done
@@ -65,6 +69,11 @@ fi
 if [ $CRON_OFF -eq 1 ] && [ -f "$CRON" ]; then
   step "remove the refresh cron"
   run rm -f "$CRON"
+fi
+
+if [ $WATCH_ON -eq 1 ]; then
+  step "security watch (hs op watch-enable: prints its plan, then runs it)"
+  run /usr/local/bin/hs op watch-enable
 fi
 
 streamer_answers() {
@@ -112,4 +121,5 @@ echo "  hs          dashboard"
 echo "  hs check    report in the terminal (hs help for the rest)"
 [ -f "$DROPIN" ] && echo "  streamer:   hs serve" || echo "  streamer:   $(systemctl show $UNIT -p ExecStart --value 2>/dev/null | grep -o 'path=[^ ;]*' | head -1)"
 [ -f "$CRON" ] && echo "  refresh:    every 15 min ($CRON)"
+[ -f /etc/cron.d/hs-watch ] && echo "  watch:      every 15 min, sweeps hourly (/etc/cron.d/hs-watch) — accept the known state: hs watch --baseline"
 exit 0
