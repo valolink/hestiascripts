@@ -255,6 +255,9 @@ func init() {
 				},
 				Default: func(_ context.Context, env *check.Env, t Target) string { return stagingOf(env, *t.Domain) }},
 			overwriteField("the staging domain"),
+			{Key: "httpauth", Label: "HTTP password", Kind: Bool,
+				Help:    "Scanners and search engines get a 401 instead of a copy of the live site. The credentials are kept in /root/.hestia-staging-auth/<domain> (root only) and survive refreshes — give them to whoever reviews the staging site.",
+				Default: func(context.Context, *check.Env, Target) string { return "yes" }},
 		},
 		Plan: func(_ context.Context, env *check.Env, t Target, v Values) ([]Step, error) {
 			nd := v["new-domain"]
@@ -262,6 +265,9 @@ func init() {
 				return nil, fmt.Errorf("staging needs its own domain")
 			}
 			args := []string{bin + "v-wp-staging-create", "--src-user=" + t.Domain.User, "--src-domain=" + t.Domain.Name, "--dest-user=" + v["dest-user"], "--new-domain=" + nd}
+			if !v.Bool("httpauth") {
+				args = append(args, "--no-httpauth")
+			}
 			why := "new staging site " + nd
 			if domainExists(env, nd) {
 				if !v.Bool("overwrite") {

@@ -19,6 +19,9 @@ const confUsage = `hs conf — edit configuration files the way operations do
       variable (secrets never appear in argv or the log).
   hs conf unset [--section S] [--comment ';'] FILE KEY [KEY ...]
       Comment the keys out.
+  hs conf block FILE AFTER_REGEX MARKER [LINE ...]
+      Keep one "# MARKER begin/end" block of LINEs right after the first line
+      matching AFTER_REGEX (an earlier block is replaced; no LINEs removes it).
   hs conf install [--mode 0644] SRC DST
       Write SRC's content to DST, printing the lines that change.
   hs conf get [--section S] FILE KEY
@@ -111,6 +114,29 @@ func cmdConf(args []string) int {
 			return 1
 		}
 		fmt.Print(conf.Report(rest[0], changes, bak))
+		return 0
+	case "block":
+		if len(rest) < 3 {
+			fmt.Fprint(os.Stderr, confUsage)
+			return 2
+		}
+		removed, added, bak, err := conf.SetBlockFile(rest[0], rest[1], rest[2], rest[3:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "hs conf:", err)
+			return 1
+		}
+		fmt.Printf("%s:\n", rest[0])
+		for _, l := range removed {
+			fmt.Println("  - " + l)
+		}
+		for _, l := range added {
+			fmt.Println("  + " + l)
+		}
+		if bak != "" {
+			fmt.Printf("  previous file kept: %s\n  undo: cp -p %s %s\n", bak, bak, rest[0])
+		} else {
+			fmt.Println("  unchanged — nothing written")
+		}
 		return 0
 	case "install":
 		if len(rest) != 2 {

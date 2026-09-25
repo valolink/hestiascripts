@@ -169,10 +169,15 @@ func TestRemoveServiceClearsOnlyItsOwnValue(t *testing.T) {
 	f.Files["/etc/exim4/exim4.conf.template"] = "av_scanner = clamd:/run/clamav/clamd.ctl\n"
 	o, _ := ByID("remove-service")
 	cs := o.Fields[0].Choices(context.Background(), &check.Env{Sys: f}, Target{})
-	if len(cs) != 1 || cs[0][0] != "ANTIVIRUS_SYSTEM" {
-		t.Fatalf("a proftpd box must not offer the vsftpd cleanup: %v", cs)
+	for _, c := range cs {
+		if c[0] == "vsftpd" {
+			t.Fatalf("a proftpd box must not offer the vsftpd cleanup: %v", cs)
+		}
 	}
-	p := text(planOf(t, "remove-service", f, Values{"service": "ANTIVIRUS_SYSTEM"}))
+	if len(cs) == 0 || cs[0][0] != "clamav-daemon" {
+		t.Fatalf("choices %v", cs)
+	}
+	p := text(planOf(t, "remove-service", f, Values{"service": "clamav-daemon"}))
 	for _, want := range []string{"v-change-sys-config-value ANTIVIRUS_SYSTEM ''", "exim4 -bV", "sed -i.hs-clamav-daemon"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("missing %q in\n%s", want, p)

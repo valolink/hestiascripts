@@ -285,7 +285,7 @@ func checkIdleServices(ctx context.Context, env *Env) []Result {
 	if !pkgInstalled(ctx, s, "exim4", "dovecot-core") && active(ctx, s, "clamav-daemon") {
 		rs = append(rs, New(Warn, "clamd is running with no mail stack to serve").For("clamav").
 			Because("ClamAV under Hestia only scans inbound mail; with exim4 and dovecot gone it scans nothing and holds ~1 GB.").
-			Fixed("hs op remove-service service=ANTIVIRUS_SYSTEM"))
+			Fixed("hs op remove-service service=clamav-daemon"))
 	}
 	var eol []string
 	for _, v := range PHPVersions(s) {

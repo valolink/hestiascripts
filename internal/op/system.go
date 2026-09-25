@@ -138,6 +138,39 @@ var services = []service{
 	{"vsftpd (plain FTP)", "FTP_SYSTEM", []string{"vsftpd"}, []string{"vsftpd"},
 		[]string{"vsftpd"}, []string{"vsftpd"},
 		"Clients using plain FTP lose access; SFTP (over SSH) keeps working.", nil},
+	{"ProFTPD (plain FTP)", "FTP_SYSTEM", []string{"proftpd-core", "proftpd-basic"}, []string{"proftpd"},
+		[]string{"proftpd-core", "proftpd-basic", "proftpd-mod-crypto"}, []string{"proftpd"},
+		"Plain FTP stops; SFTP (over SSH) keeps working. Offered only when no domain has an FTP user.", nil},
+	{"BIND (DNS server)", "DNS_SYSTEM", []string{"bind9"}, []string{"bind9", "named"},
+		[]string{"bind9"}, []string{"named"},
+		"The box stops answering DNS. Offered only when it hosts no DNS zones (DNS lives at the registrar or elsewhere).", nil},
+}
+
+// serviceInUse: why a service must stay ("" = unused). Hardening plan §14:
+// turn off only what a box does not serve.
+var serviceInUse = map[string]func(env *check.Env) string{
+	"ProFTPD (plain FTP)": func(env *check.Env) string {
+		files, _ := env.Sys.Glob(hestia.UsersDir + "/*/web.conf")
+		for _, f := range files {
+			for _, l := range strings.Split(readFile(env, f), "\n") {
+				if kv := hestia.ParseKV(l); kv["FTP_USER"] != "" {
+					return kv["DOMAIN"] + " has FTP user " + kv["FTP_USER"]
+				}
+			}
+		}
+		return ""
+	},
+	"BIND (DNS server)": func(env *check.Env) string {
+		files, _ := env.Sys.Glob(hestia.UsersDir + "/*/dns.conf")
+		for _, f := range files {
+			for _, l := range strings.Split(readFile(env, f), "\n") {
+				if kv := hestia.ParseKV(l); kv["DOMAIN"] != "" {
+					return "hosts the DNS zone " + kv["DOMAIN"]
+				}
+			}
+		}
+		return ""
+	},
 }
 
 func init() {
@@ -333,11 +366,14 @@ func init() {
 				conf := hestia.Conf(env.Sys)
 				var out [][2]string
 				for _, s := range services {
+					if f := serviceInUse[s.Label]; f != nil && f(env) != "" {
+						continue
+					}
 					switch {
 					case box.PkgInstalled(ctx, env.Sys, s.Pkgs...):
-						out = append(out, [2]string{s.Key, s.Label + " — installed"})
+						out = append(out, [2]string{s.Units[0], s.Label + " — installed"})
 					case contains(s.Values, conf[s.Key]):
-						out = append(out, [2]string{s.Key, s.Label + " — gone, but " + s.Key + "='" + conf[s.Key] + "' (config only)"})
+						out = append(out, [2]string{s.Units[0], s.Label + " — gone, but " + s.Key + "='" + conf[s.Key] + "' (config only)"})
 					}
 				}
 				return out
@@ -346,12 +382,17 @@ func init() {
 		Plan: func(ctx context.Context, env *check.Env, _ Target, v Values) ([]Step, error) {
 			var s service
 			for _, x := range services {
-				if x.Key == v["service"] {
+				if x.Units[0] == v["service"] {
 					s = x
 				}
 			}
 			if s.Key == "" {
 				return nil, fmt.Errorf("nothing to remove")
+			}
+			if f := serviceInUse[s.Label]; f != nil {
+				if why := f(env); why != "" {
+					return nil, fmt.Errorf("%s is in use: %s", s.Label, why)
+				}
 			}
 			var steps []Step
 			if box.PkgInstalled(ctx, env.Sys, s.Pkgs...) {

@@ -20,6 +20,7 @@ func All() []check.Check {
 	cs = append(cs, securityChecks()...)
 	cs = append(cs, firewallChecks()...)
 	cs = append(cs, persistChecks()...)
+	cs = append(cs, hardeningChecks()...)
 	cs = append(cs, backupChecks()...)
 	cs = append(cs, systemChecks()...)
 	cs = append(cs, performanceChecks()...)

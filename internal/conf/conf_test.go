@@ -115,3 +115,22 @@ func TestBackupsWithinOneSecondAreAllKept(t *testing.T) {
 		t.Errorf("first backup holds %q", b)
 	}
 }
+
+func TestSetBlockReplacesItsOwnBlock(t *testing.T) {
+	in := "location /phpmyadmin {\n\talias /usr/share/phpmyadmin/;\n}\n"
+	once, err := SetBlock(in, `^location /phpmyadmin \{`, "hs:pma", []string{"allow 10.0.0.0/8;", "deny all;"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "location /phpmyadmin {\n\t# hs:pma begin\n\tallow 10.0.0.0/8;\n\tdeny all;\n\t# hs:pma end\n\talias /usr/share/phpmyadmin/;\n}\n"
+	if once != want {
+		t.Fatalf("got\n%s", once)
+	}
+	twice, _ := SetBlock(once, `^location /phpmyadmin \{`, "hs:pma", []string{"allow 192.168.0.0/16;", "deny all;"})
+	if strings.Count(twice, "hs:pma begin") != 1 || strings.Contains(twice, "10.0.0.0/8") {
+		t.Errorf("not replaced:\n%s", twice)
+	}
+	if _, err := SetBlock("nothing here", `^location /phpmyadmin`, "hs:pma", []string{"deny all;"}); err == nil {
+		t.Error("missing anchor must fail")
+	}
+}

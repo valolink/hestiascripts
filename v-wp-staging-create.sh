@@ -25,6 +25,35 @@ staging_url_store() {
   echo "/root/.hestia-staging-urls/${1}_${2}"
 }
 
+# HTTP basic auth on staging (docs/security-hardening.md §7): scanners get a
+# 401 instead of a copy of a live site. The credentials live root-only in
+# /root/.hestia-staging-auth/<domain> ("user password") and are reused on
+# every refresh, so whoever already has them keeps access. Never printed.
+staging_auth_store() {
+  echo "/root/.hestia-staging-auth/${1}"
+}
+
+ensure_staging_httpauth() { # DEST_USER DOMAIN
+  local user="$1" domain="$2" store auth_user pass
+  store=$(staging_auth_store "$domain")
+  mkdir -p "$(dirname "$store")" && chmod 700 "$(dirname "$store")"
+  if [ -s "$store" ]; then
+    read -r auth_user pass < "$store"
+  else
+    auth_user="staging"
+    pass=$(openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | head -c 20)
+    (umask 077 && echo "$auth_user $pass" > "$store")
+  fi
+  chmod 600 "$store"
+  # Hestia keeps the domain's auth users in web.conf (AUTH_USER='a:b').
+  if grep "DOMAIN='$domain'" "/usr/local/hestia/data/users/$user/web.conf" 2>/dev/null \
+      | grep -oP "AUTH_USER='\K[^']*" | tr ':' '\n' | grep -qx "$auth_user"; then
+    v-change-web-domain-httpauth "$user" "$domain" "$auth_user" "$pass" > /dev/null 2>&1
+  else
+    v-add-web-domain-httpauth "$user" "$domain" "$auth_user" "$pass"
+  fi
+}
+
 # Reload every installed PHP-FPM service so workers drop their cached wp-config.php
 # and pick up the new WP_REDIS_PREFIX / DB creds. Reload is graceful.
 reload_php_fpm() {
@@ -207,6 +236,8 @@ OPTIONS:
   --new-domain=DOMAIN  Staging domain (e.g. customer.demolink.fi); remembered
                        for re-runs via /root/.hestia-staging-urls/
   --force              Skip overwrite confirmation
+  --no-httpauth        Leave the staging site open to everyone (default: HTTP
+                       basic auth; credentials in /root/.hestia-staging-auth/)
   --teardown           Remove the staging site: unmounts uploads, deletes
                        the domain and database; pass --src-user/--src-domain
                        too to also forget the saved staging URL
@@ -232,6 +263,7 @@ DEST_USER=""
 NEW_DOMAIN=""
 FORCE=false
 TEARDOWN=false
+HTTPAUTH=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -241,6 +273,7 @@ while [[ $# -gt 0 ]]; do
     --new-domain=*) NEW_DOMAIN="${1#*=}" ;;
     --force)        FORCE=true ;;
     --teardown)     TEARDOWN=true ;;
+    --no-httpauth)  HTTPAUTH=false ;;
     -h|--help)      show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
@@ -357,6 +390,8 @@ if [ "$TEARDOWN" = true ]; then
       reload_php_fpm
     fi
   fi
+
+  rm -f "$(staging_auth_store "$NEW_DOMAIN")"
 
   echo ""
   echo "✅ Staging site $NEW_DOMAIN removed."
@@ -778,6 +813,11 @@ echo "       ✓ All checks passed."
 # Uploads are NOT mounted yet — staging is briefly imageless after publish,
 # until step [10] mounts them. That window is fully under our control because
 # we control PHP-FPM reload + cache flush below.
+if [ "$HTTPAUTH" = true ]; then
+  echo "       HTTP basic auth on $NEW_WEB_DOMAIN (credentials: $(staging_auth_store "$NEW_WEB_DOMAIN"), root only)"
+  ensure_staging_httpauth "$DEST_USER" "$NEW_WEB_DOMAIN"
+  check_status "Failed to set HTTP auth on $NEW_WEB_DOMAIN."
+fi
 echo "[9/11] Publishing: swap $SETUP_DIR → $NEW_DIR ..."
 rm -rf "$NEW_DIR"
 mv "$SETUP_DIR" "$NEW_DIR"
@@ -834,6 +874,11 @@ echo "   Staging site: $NEW_WEB_DOMAIN (user: $DEST_USER)"
 echo "   Database:     $NEW_DB_NAME"
 echo "   Redis prefix: $REDIS_SAFE_PREFIX"
 echo "   Uploads:      RO bind-mount from live (write-probed)"
+if [ "$HTTPAUTH" = true ]; then
+  echo "   Access:       HTTP basic auth — $(staging_auth_store "$NEW_WEB_DOMAIN") (root only)"
+else
+  echo "   Access:       open to everyone (--no-httpauth)"
+fi
 echo "   Stored URL:   $URL_STORE"
 echo ""
 echo "   To tear down:"

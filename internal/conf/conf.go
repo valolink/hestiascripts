@@ -378,3 +378,62 @@ func Report(path string, changes []Change, bak string) string {
 	}
 	return b.String()
 }
+
+// SetBlock keeps one hs-marked block of lines right after the first line
+// matching after: an earlier block with the same marker is removed first, so
+// re-running replaces it. Lines are written as given (with their indent);
+// the markers are "# <marker> begin" / "# <marker> end" lines.
+func SetBlock(content, after, marker string, block []string) (string, error) {
+	re, err := regexp.Compile(after)
+	if err != nil {
+		return "", err
+	}
+	begin, end := "# "+marker+" begin", "# "+marker+" end"
+	var lines []string
+	skip := false
+	for _, l := range strings.Split(content, "\n") {
+		t := strings.TrimSpace(l)
+		switch {
+		case t == begin:
+			skip = true
+		case t == end:
+			skip = false
+		case !skip:
+			lines = append(lines, l)
+		}
+	}
+	if len(block) == 0 {
+		return strings.Join(lines, "\n"), nil
+	}
+	for i, l := range lines {
+		if re.MatchString(l) {
+			indent := l[:len(l)-len(strings.TrimLeft(l, " \t"))] + "\t"
+			ins := []string{indent + begin}
+			for _, b := range block {
+				ins = append(ins, indent+b)
+			}
+			ins = append(ins, indent+end)
+			out := append(append(append([]string{}, lines[:i+1]...), ins...), lines[i+1:]...)
+			return strings.Join(out, "\n"), nil
+		}
+	}
+	return "", fmt.Errorf("no line matching %q", after)
+}
+
+// SetBlockFile applies SetBlock to a file (backup kept, before → after printed by the caller).
+func SetBlockFile(path, after, marker string, block []string) (removed, added []string, bak string, err error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	out, err := SetBlock(string(b), after, marker, block)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if out == string(b) {
+		return nil, nil, "", nil
+	}
+	removed, added = LineDiff(string(b), out)
+	bak, err = write(path, out, 0o644)
+	return removed, added, bak, err
+}

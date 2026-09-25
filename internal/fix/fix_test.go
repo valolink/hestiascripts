@@ -38,7 +38,7 @@ func TestDumpsPlanMovesEachFileIntoPrivate(t *testing.T) {
 	f.Cmds["find "+root+" -maxdepth 2 "+strings.Join(wpfiles.DumpPatterns, " ")] =
 		sys.FakeCmd{Out: root + "/renea.sql\n" + root + "/old/test.sql\n"}
 	st := steps(t, "dumps", "renea.demolink.fi", f)
-	if len(st) != 3 {
+	if len(st) != 4 || !strings.Contains(Quote(st[3].Argv), "MANIFEST.tsv") {
 		t.Fatalf("mkdir + 2 moves, got %d: %+v", len(st), st)
 	}
 	dest := "/home/renea/web/renea.demolink.fi/private/hs-moved-" + today()

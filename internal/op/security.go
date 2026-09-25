@@ -362,9 +362,9 @@ func init() {
 	})
 	register(Op{
 		ID: "maldet-signatures", Title: "Teach maldet the known webshell", Section: "security", Risk: Change,
-		Note:     "maldet scanned the compromised boxes daily from June and found nothing: its signatures did not know the webshell. This adds each webshell marker from the indicator list as a custom signature.",
-		How:      "Appends `<hex of the marker>:{HEX}php.webshell.<n>` lines to /usr/local/maldetect/sigs/custom.hex.dat (maldet's own custom-signature file, kept across its signature updates) for each marker not already there. The next scan (or monitor mode) uses them.",
-		Undo:     "Remove the lines from /usr/local/maldetect/sigs/custom.hex.dat.",
+		Note: "maldet scanned the compromised boxes daily from June and found nothing: its signatures did not know the webshell. This adds each webshell marker from the indicator list as a custom signature.",
+		How:  "Appends `<hex of the marker>:{HEX}php.webshell.<n>` lines to /usr/local/maldetect/sigs/custom.hex.dat (maldet's own custom-signature file, kept across its signature updates) for each marker not already there. The next scan (or monitor mode) uses them.",
+		Undo: "Remove the lines from /usr/local/maldetect/sigs/custom.hex.dat.",
 		Plan: func(_ context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
 			const f = "/usr/local/maldetect/sigs/custom.hex.dat"
 			if !exists(env, "/usr/local/maldetect/maldet") {

@@ -132,11 +132,16 @@ func moveSteps(files []string, root, dest, owner string) []Step {
 		mk = []string{"install", "-d", "-o", owner, "-g", owner, "-m", "750", dest}
 	}
 	steps := []Step{{Why: "destination outside the web root", Argv: mk}}
+	manifest := []string{"sh", "-c", `m="$1/MANIFEST.tsv"; shift; [ -e "$m" ] || printf 'moved_at\toriginal\tnow\n' > "$m"; for p in "$@"; do printf '%s\t%s\n' "$(date -Is)" "$p" >> "$m"; done; chmod 600 "$m"`, "sh", dest}
 	for _, f := range files {
 		rel := strings.TrimPrefix(f, root+"/")
-		steps = append(steps, Step{Why: "move " + rel, Argv: []string{"mv", "-n", "-v", "--", f, filepath.Join(dest, flat(rel))}})
+		to := filepath.Join(dest, flat(rel))
+		steps = append(steps, Step{Why: "move " + rel, Argv: []string{"mv", "-n", "-v", "--", f, to}})
+		manifest = append(manifest, f+"\t"+to)
 	}
-	return steps
+	// What was moved where, next to the files (hardening plan §7): the answer
+	// to "where did db.sql go" months later.
+	return append(steps, Step{Why: "record it in MANIFEST.tsv beside the files", Argv: manifest})
 }
 
 // quarantineSteps keeps the original path under /root/hs-quarantine.
@@ -182,7 +187,7 @@ func init() {
 	register(Fix{
 		ID: "dumps", Title: "Move database dumps out of the web root", Check: "web.exposure", Scope: "site", Risk: Change,
 		Note:    "Moves *.sql, *.sql.gz and wp-config backups (docroot, two levels deep) to the site's private/ — not web-served, still in the account. Nothing is deleted.",
-		How:     "How: `find` lists *.sql, *.sql.gz and wp-config backups in public_html and one directory below. Each is moved with `mv -n` (never overwrites) into private/hs-moved-<date>/, a directory Hestia never serves; subdirectory paths become a__b__file.sql so names cannot collide. Owner and dates are kept.",
+		How:     "How: `find` lists *.sql, *.sql.gz and wp-config backups in public_html and one directory below. Each is moved with `mv -n` (never overwrites) into private/hs-moved-<date>/, a directory Hestia never serves; subdirectory paths become a__b__file.sql so names cannot collide. Owner and dates are kept; MANIFEST.tsv beside them records original → new path. nginx may keep answering a moved URL from its open-file cache for up to a minute — recheck after that.",
 		Undo:    "Undo: mv the files back from /home/<user>/web/<domain>/private/hs-moved-<date>/ to public_html. Delete them there once you are sure nothing needs them.",
 		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "dump") },
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {

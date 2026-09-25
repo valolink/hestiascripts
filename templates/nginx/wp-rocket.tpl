@@ -64,6 +64,29 @@ server {
         log_not_found off;
     }
 
+    # --- Valolink security rules: archives and backup folders (from wp-secure-snippet) ---
+    # Archives and backups (hardening plan §7, 2026-09): scanners fetched a
+    # site database and backup zips from web roots. Archives are denied at the
+    # web root and directly under wp-content/ — uploads/ stays downloadable for
+    # shops that sell files — and backup plugins' folders are denied whole:
+    # nginx serves them straight from disk, so the plugins' own .htaccess
+    # protection never runs.
+    location ~* ^/(?:[^/]+|wp-content/[^/]+)\.(?:zip|gz|tgz|tar|bz2|xz|7z|rar|wpress|dump)$ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+    location ~* ^/wp-content/(?:ai1wm-backups|updraft|backups-dup-lite|backups-dup-pro|backup-db|wpvividbackups|backupwordpress[^/]*|uploads/backwpup[^/]*)/ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+    location ~* \.wpress$ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
     # --- Valolink security rules: xmlrpc deny (from wp-secure-snippet) ---
     # Blocks brute-force / pingback abuse before it reaches PHP.
     # If a site genuinely needs xmlrpc, switch its proxy template off wp-rocket.
