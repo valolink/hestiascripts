@@ -22,6 +22,8 @@ import (
 	"github.com/valolink/hestiascripts/internal/fix"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/logcap"
+	"github.com/valolink/hestiascripts/internal/op"
+	"github.com/valolink/hestiascripts/internal/plan"
 	"github.com/valolink/hestiascripts/internal/serve"
 	"github.com/valolink/hestiascripts/internal/state"
 	"github.com/valolink/hestiascripts/internal/sys"
@@ -45,6 +47,9 @@ Usage:
   hs fix ID [SUBJECT] [--dry-run]
                            plan a fix from the live box, print each command, run it
   hs fix --list            every fix and the check it resolves
+  hs op ID [--site DOMAIN] [key=value ...] [--dry-run]
+                           run an operation (what run.sh's menus did) with explicit values
+  hs op --list             every operation and its fields
   hs logcap add KEY PATH OWNER SIZE | remove KEY | list
                            hourly size cap for chosen logs (/etc/hs/logcap.conf)
   hs version
@@ -81,6 +86,8 @@ func main() {
 		os.Exit(cmdServe(os.Args[2:]))
 	case "fix":
 		os.Exit(cmdFix(ctx, env, os.Args[2:]))
+	case "op":
+		os.Exit(cmdOp(ctx, env, os.Args[2:]))
 	case "logcap":
 		os.Exit(cmdLogcap(os.Args[2:]))
 	case "site-php":
@@ -294,52 +301,11 @@ func cmdFix(ctx context.Context, env *check.Env, args []string) int {
 		fmt.Fprintln(os.Stderr, "hs fix:", err)
 		return 1
 	}
-	fmt.Printf("# %s%s\n", f.Title, map[bool]string{true: " — " + subject, false: ""}[subject != ""])
-	if len(steps) == 0 {
-		fmt.Println("# nothing to do: the box no longer has what this fix resolves")
-		return 0
+	title := f.Title
+	if subject != "" {
+		title += " — " + subject
 	}
-	failed := 0
-	for i, st := range steps {
-		if st.Why != "" {
-			for j, l := range strings.Split(st.Why, "\n") {
-				if j == 0 {
-					fmt.Printf("\n# %d/%d %s\n", i+1, len(steps), l)
-				} else {
-					fmt.Printf("#     %s\n", l)
-				}
-			}
-		}
-		fmt.Println("$ " + fix.Quote(st.Argv))
-		if dry {
-			continue
-		}
-		cmd := exec.CommandContext(ctx, st.Argv[0], st.Argv[1:]...)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stdout
-		if err := cmd.Run(); err != nil {
-			if f.Risk == fix.ReadOnly {
-				// Diagnoses look at broken things: `systemctl status` exits 3
-				// for any unit that is not running. Information, not failure.
-				fmt.Printf("# (%v)\n", err)
-				continue
-			}
-			fmt.Printf("! %v\n", err)
-			failed++
-			if f.Risk != fix.ReadOnly {
-				fmt.Printf("\n# stopped after step %d of %d; nothing after it ran\n", i+1, len(steps))
-				return 1
-			}
-		}
-	}
-	if dry {
-		fmt.Printf("\n# dry run: %d step(s), nothing ran\n", len(steps))
-		return 0
-	}
-	if failed > 0 {
-		return 1
-	}
-	fmt.Printf("\n# done: %d step(s)\n", len(steps))
-	return 0
+	return plan.Execute(ctx, os.Stdout, title, steps, f.Risk == fix.ReadOnly, dry)
 }
 
 // cmdSitePHP lists backend (PHP-FPM pool) templates, marks the current one,
@@ -430,4 +396,79 @@ func cmdLogcap(args []string) int {
 		return 2
 	}
 	return 0
+}
+
+// cmdOp runs an operation with explicit key=value inputs — the TUI's form
+// submits exactly this, so a form run and a shell run are the same thing.
+func cmdOp(ctx context.Context, env *check.Env, args []string) int {
+	dry, site := false, ""
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--dry-run" || a == "-n":
+			dry = true
+		case a == "--list":
+			for _, o := range op.All() {
+				var keys []string
+				for _, f := range o.Fields {
+					keys = append(keys, f.Key)
+				}
+				fmt.Printf("%-24s %-12s %s  [%s]\n", o.ID, o.Section, o.Title, strings.Join(keys, " "))
+			}
+			return 0
+		case a == "--site" && i+1 < len(args):
+			site = args[i+1]
+			i++
+		default:
+			rest = append(rest, a)
+		}
+	}
+	if len(rest) == 0 {
+		fmt.Fprintln(os.Stderr, "hs op: which operation? (hs op --list)")
+		return 2
+	}
+	o, ok := op.ByID(rest[0])
+	if !ok {
+		fmt.Fprintf(os.Stderr, "hs op: no operation %q (hs op --list)\n", rest[0])
+		return 2
+	}
+	var t op.Target
+	if o.Site {
+		for _, d := range hestia.WebDomains(env.Sys) {
+			if d.Name == site {
+				d := d
+				t.Domain = &d
+			}
+		}
+		if t.Domain == nil {
+			fmt.Fprintln(os.Stderr, "hs op: "+o.ID+" needs --site DOMAIN (a web domain on this box)")
+			return 2
+		}
+	}
+	vals, err := op.ParseArgs(rest[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hs op:", err)
+		return 2
+	}
+	pctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	for k, v := range o.Defaults(pctx, env, t) {
+		if _, set := vals[k]; !set {
+			vals[k] = v
+		}
+	}
+	if err := o.Validate(pctx, env, t, vals); err != nil {
+		fmt.Fprintln(os.Stderr, "hs op:", err)
+		return 2
+	}
+	steps, err := o.Plan(pctx, env, t, vals)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "hs op:", err)
+		return 1
+	}
+	title := o.Title
+	if t.Domain != nil {
+		title += " — " + t.Domain.Name
+	}
+	return plan.Execute(ctx, os.Stdout, title, steps, o.Risk == op.ReadOnly, dry)
 }

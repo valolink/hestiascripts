@@ -28,6 +28,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/logcap"
+	"github.com/valolink/hestiascripts/internal/plan"
 	"github.com/valolink/hestiascripts/internal/redisinfo"
 	"github.com/valolink/hestiascripts/internal/sys"
 	"github.com/valolink/hestiascripts/internal/wpfiles"
@@ -41,11 +42,8 @@ const (
 	Destructive             // hard to undo: type the name
 )
 
-// Step is one command and why it is in the plan.
-type Step struct {
-	Why  string
-	Argv []string
-}
+// Step is one command and why it is in the plan (shared with operations).
+type Step = plan.Step
 
 type Fix struct {
 	ID    string
@@ -502,17 +500,7 @@ func rcloneHost(s sys.Sys) (host, port string) {
 }
 
 // Quote renders argv as a copy-pasteable shell line.
-func Quote(argv []string) string {
-	var parts []string
-	for _, a := range argv {
-		if a != "" && !strings.ContainsAny(a, " \t\n'\"$`\\;&|<>*?()[]{}!#~") {
-			parts = append(parts, a)
-		} else {
-			parts = append(parts, "'"+strings.ReplaceAll(a, "'", `'\''`)+"'")
-		}
-	}
-	return strings.Join(parts, " ")
-}
+func Quote(argv []string) string { return plan.Quote(argv) }
 
 func debugKeepSteps(env *check.Env, subject string) ([]Step, error) {
 	d, err := domainByName(env.Sys, subject)

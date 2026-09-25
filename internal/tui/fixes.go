@@ -10,6 +10,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/fix"
 	"github.com/valolink/hestiascripts/internal/logsrc"
+	"github.com/valolink/hestiascripts/internal/plan"
 )
 
 // recheckFor: the checks a fix can change, beyond the one it resolves.
@@ -81,16 +82,7 @@ func (m *model) fixAction(f fix.Fix, subject string) (action.Action, action.Targ
 			if len(steps) == 0 {
 				return []string{"Nothing to do: the box no longer has what this fix resolves."}, nil
 			}
-			var out []string
-			for _, s := range steps {
-				for _, w := range strings.Split(s.Why, "\n") {
-					if w != "" {
-						out = append(out, "# "+w)
-					}
-				}
-				out = append(out, "$ "+fix.Quote(s.Argv))
-			}
-			return out, nil
+			return plan.Preview(steps), nil
 		},
 	}
 	if f.Scope == "all" {

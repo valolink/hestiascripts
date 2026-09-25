@@ -106,12 +106,12 @@ func TestSpecificFixBeforeDiagnosis(t *testing.T) {
 func redisBox() *sys.Fake {
 	dropin := " * Plugin Name: Redis Object Cache Drop-In\n * Version: 2.8.0"
 	f := &sys.Fake{Clock: time.Now(), Files: map[string]string{
-		hestia.UsersDir + "/w/web.conf": "DOMAIN='valolink.fi'\nDOMAIN='kluuvi.fi'\nDOMAIN='solo.fi'\n",
-		"/home/w/web/valolink.fi/public_html/wp-config.php":            "define( 'WP_REDIS_PREFIX', 'valolink_fi_1830bfa8' );",
+		hestia.UsersDir + "/w/web.conf":                                   "DOMAIN='valolink.fi'\nDOMAIN='kluuvi.fi'\nDOMAIN='solo.fi'\n",
+		"/home/w/web/valolink.fi/public_html/wp-config.php":               "define( 'WP_REDIS_PREFIX', 'valolink_fi_1830bfa8' );",
 		"/home/w/web/valolink.fi/public_html/wp-content/object-cache.php": dropin,
-		"/home/w/web/kluuvi.fi/public_html/wp-config.php":              "define( 'WP_REDIS_PREFIX', 'kluuvi_fi_794c6b23' );",
+		"/home/w/web/kluuvi.fi/public_html/wp-config.php":                 "define( 'WP_REDIS_PREFIX', 'kluuvi_fi_794c6b23' );",
 		"/home/w/web/kluuvi.fi/public_html/wp-content/object-cache.php":   dropin,
-		"/home/w/web/solo.fi/public_html/wp-config.php":                "define('WP_REDIS_PREFIX','solo_1'); define('WP_REDIS_DATABASE', 1);",
+		"/home/w/web/solo.fi/public_html/wp-config.php":                   "define('WP_REDIS_PREFIX','solo_1'); define('WP_REDIS_DATABASE', 1);",
 		"/home/w/web/solo.fi/public_html/wp-content/object-cache.php":     dropin,
 	}, Cmds: map[string]sys.FakeCmd{
 		"redis-cli config get databases": {Out: "databases\n16\n"},

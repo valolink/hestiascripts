@@ -9,6 +9,7 @@ import (
 	"github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/check/box"
 	"github.com/valolink/hestiascripts/internal/check/site"
+	"github.com/valolink/hestiascripts/internal/op"
 )
 
 func (m *model) key(k tea.KeyMsg) tea.Cmd {
@@ -27,6 +28,8 @@ func (m *model) key(k tea.KeyMsg) tea.Cmd {
 	switch {
 	case m.palette != nil:
 		return m.paletteKey(k)
+	case m.form != nil:
+		return m.formKey(k)
 	case m.confirming != nil:
 		return m.confirmKey(k)
 	case m.filtering:
@@ -270,7 +273,15 @@ func (m *model) enter() tea.Cmd {
 	case m.pane == paneActions:
 		if acts := m.actionRows(); l.cursor < len(acts) {
 			a := acts[l.cursor]
-			if strings.HasPrefix(a.ID, "fix.") {
+			if o, ok := op.ByID(strings.TrimPrefix(a.ID, "op.")); ok && strings.HasPrefix(a.ID, "op.") {
+				t := op.Target{}
+				if o.Site {
+					if d, ok := m.domain(m.siteName); ok {
+						t.Domain = &d
+					}
+				}
+				m.openForm(o, t)
+			} else if strings.HasPrefix(a.ID, "fix.") {
 				m.ask(a, m.fixTarget(a))
 			} else {
 				m.ask(a, m.targetForScreen())

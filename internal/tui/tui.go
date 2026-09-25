@@ -145,6 +145,7 @@ type model struct {
 	pendingG   bool // first g of gg
 	detailOff  int  // ctrl+e / ctrl+y
 	confirming *pendingAction
+	form       *formState
 	palette    *palette
 	run        *run
 	confirmOff int // scroll in the confirmation box
@@ -462,7 +463,7 @@ func (m *model) actionRows() []action.Action {
 			acts = action.ForSite(isWP(m.env, d))
 		}
 	}
-	acts = append(m.fixesHere(), acts...)
+	acts = append(append(m.fixesHere(), m.opsHere()...), acts...)
 	l := m.lists[m.listKey()]
 	if l == nil || l.filter == "" {
 		return acts

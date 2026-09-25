@@ -72,6 +72,8 @@ func (m *model) View() string {
 	switch {
 	case m.palette != nil:
 		out = m.overlay(out, m.paletteView())
+	case m.form != nil:
+		out = m.overlay(out, m.formView())
 	case m.confirming != nil:
 		out = m.overlay(out, m.confirmView())
 	}
@@ -405,6 +407,9 @@ func (m *model) runDetail(r actlog.Run) string {
 }
 
 func actionMark(a action.Action) string {
+	if strings.HasPrefix(a.ID, "op.") {
+		return sAcc.Render("≡")
+	}
 	if strings.HasPrefix(a.ID, "fix.") {
 		return stateStyle(check.Warn).Render("⚑")
 	}
