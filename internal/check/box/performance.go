@@ -81,7 +81,7 @@ func checkRedis(ctx context.Context, env *Env) []Result {
 		}
 		return []Result{New(Warn, "not installed").
 			Because("WordPress sites run without an object cache, so every page rebuilds from MariaDB.").
-			Fixed("run.sh → 3 (Redis) → 1")}
+			Fixed("hs op redis-install")}
 	case !st.Running:
 		return []Result{New(Fail, "installed but not running").
 			Because("Sites with the object-cache drop-in fall back to MariaDB for every lookup, or error.").
@@ -93,7 +93,7 @@ func checkRedis(ctx context.Context, env *Env) []Result {
 	var rs []Result
 	if st.MaxMemory == 0 {
 		rs = append(rs, New(Warn, "maxmemory is not set").
-			Because("Redis grows until the OOM killer picks something.").Fixed("run.sh → 3 (Redis) → 2"))
+			Because("Redis grows until the OOM killer picks something.").Fixed("hs op redis-memory"))
 	}
 	server, _ := redisCLI(ctx, env, "info", "server")
 	stats, _ := redisCLI(ctx, env, "info", "commandstats")
@@ -249,7 +249,7 @@ func checkRedisSites(ctx context.Context, env *Env) []Result {
 		if !PHPHasRedis(ctx, env, v) {
 			rs = append(rs, New(Warn, "PHP "+v+" has no redis extension").For("php"+v).
 				Because("Sites on this version cannot use the object cache.").
-				Fixed("run.sh → 3 (Redis) → 3"))
+				Fixed("hs op redis-php-ext"))
 		}
 	}
 	if len(rs) == 0 {
@@ -292,7 +292,7 @@ func checkOpcache(ctx context.Context, env *Env) []Result {
 		}
 		if !ok {
 			rs = append(rs, New(Warn, "PHP "+v+": OpCache off or under 256 MB").For("php"+v).
-				Because("WordPress recompiles every PHP file on every request.").Fixed("run.sh → 10 (OpCache)"))
+				Because("WordPress recompiles every PHP file on every request.").Fixed("hs op opcache"))
 		} else {
 			good = append(good, v)
 		}
@@ -333,7 +333,7 @@ func checkFPMProfiles(ctx context.Context, env *Env) []Result {
 	case miss > 0:
 		return []Result{New(Warn, fmt.Sprintf("%d profile templates installed, %d missing", inst, miss)).
 			Because("A domain cannot be moved to a sized pool profile on the versions that lack it.").
-			Fixed("run.sh → 9 (PHP-FPM) → 1")}
+			Fixed("hs op fpm-profile")}
 	}
 	return []Result{New(Configured, fmt.Sprintf("%d profile templates installed", inst))}
 }
@@ -380,7 +380,7 @@ func checkMariaDB(ctx context.Context, env *Env) []Result {
 	if hit < 99 {
 		return []Result{New(Warn, fmt.Sprintf("buffer pool hit rate %.2f%%", hit)).Ev(ev).
 			Because("Below 99% the pool is too small for the working set, so reads go to disk.").
-			Fixed("run.sh → 11 (MariaDB)")}
+			Fixed("hs op mariadb-buffer")}
 	}
 	return []Result{New(OK, fmt.Sprintf("buffer pool hit rate %.2f%%", hit)).Ev(ev)}
 }

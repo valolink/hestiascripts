@@ -87,7 +87,9 @@ func init() {
 	})
 	register(Op{
 		ID: "f2b-restart", Title: "Repair and restart Fail2ban", Section: "security", Risk: Change,
-		Resolves: "fail2ban", Applies: summaryHas("unresponsive"),
+		Resolves: "fail2ban", Applies: func(r check.Result) bool {
+			return strings.Contains(r.Summary, "unresponsive") || strings.Contains(r.Summary, "own addresses")
+		},
 		Note:    "Applies the repairs, then restarts. In-memory bans are lost; jails refill from the logs.",
 		How:     "`hs f2b repair`: self-ban guard in the WordPress jail, Hestia's per-ban mails off (ban-only action — the bans are the same), the xmlrpc line in an old filter, jails whose logs are missing disabled (jail.local sections in place, others by a jail.d/zzz-disable-<jail>.conf override); every change printed with its backup. `hs f2b restart`: systemctl restart, and if that does not return in 3 s the daemon's queue is stuck (a mail action blocked on SMTP) — it is killed and started again.",
 		Undo:    "Restore the files listed as “previous file kept”.",

@@ -171,10 +171,10 @@ func checkDisk(ctx context.Context, env *Env) []Result {
 		switch {
 		case pct >= 90:
 			rs = append(rs, New(Fail, fmt.Sprintf("%s is %d%% full", mount, pct)).For(mount).
-				Because("At 100% MariaDB stops writing and sites start erroring.").Fixed("run.sh → 14 (Disk)"))
+				Because("At 100% MariaDB stops writing and sites start erroring.").Fixed("hs op ncdu; cleanups: hs op disk-apt / disk-journal / log-trim / logs-rotated"))
 		case pct >= 80:
 			rs = append(rs, New(Warn, fmt.Sprintf("%s is %d%% full", mount, pct)).For(mount).
-				Because("Headroom is getting thin.").Fixed("run.sh → 14 (Disk)"))
+				Because("Headroom is getting thin.").Fixed("hs op ncdu; cleanups: hs op disk-apt / disk-journal / log-trim / logs-rotated"))
 		}
 		if ipct >= 85 {
 			rs = append(rs, New(Warn, fmt.Sprintf("%s has used %d%% of its inodes", mount, ipct)).For(mount+" inodes").
@@ -257,7 +257,7 @@ func checkFPMCeiling(ctx context.Context, env *Env) []Result {
 	if worstMB > ramMB {
 		return []Result{New(Warn, fmt.Sprintf("PHP-FPM can request %d MB on a %d MB box", worstMB, ramMB)).Ev(ev).
 			Because("A traffic spike OOM-kills MariaDB before PHP notices.").
-			Fixed("run.sh → 9 (PHP-FPM): pick a profile that fits, or lower pm.max_children")}
+			Fixed("move the busiest sites to a smaller pool profile (hs op fpm-profile, then Sites → Switch PHP version / pool template)")}
 	}
 	return []Result{New(OK, fmt.Sprintf("worst case %d MB of %d MB RAM", worstMB, ramMB)).Ev(ev)}
 }
@@ -270,7 +270,7 @@ func checkSwap(ctx context.Context, env *Env) []Result {
 	case total == 0:
 		return []Result{New(Warn, "no swap configured").
 			Because("Without swap the kernel OOM-kills immediately instead of degrading.").
-			Fixed("run.sh → 7 (Security) → 2")}
+			Fixed("hs op swap")}
 	case used > total/2:
 		return []Result{New(Warn, fmt.Sprintf("%d of %d MB swap in use", used, total)).
 			Because("The box is under real memory pressure, not merely parked.").Fixed("v-server-memory")}
@@ -285,7 +285,7 @@ func checkIdleServices(ctx context.Context, env *Env) []Result {
 	if !pkgInstalled(ctx, s, "exim4", "dovecot-core") && active(ctx, s, "clamav-daemon") {
 		rs = append(rs, New(Warn, "clamd is running with no mail stack to serve").For("clamav").
 			Because("ClamAV under Hestia only scans inbound mail; with exim4 and dovecot gone it scans nothing and holds ~1 GB.").
-			Fixed("run.sh → 13 → 6 → 2 (Remove ClamAV)"))
+			Fixed("hs op remove-service service=ANTIVIRUS_SYSTEM"))
 	}
 	var eol []string
 	for _, v := range PHPVersions(s) {

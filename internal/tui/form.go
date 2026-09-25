@@ -22,6 +22,7 @@ type formState struct {
 	op      op.Op
 	target  op.Target
 	values  op.Values
+	initial op.Values // as opened: a field that differs is marked changed
 	current map[string]string
 	choices map[string][][2]string
 	cursor  int
@@ -45,6 +46,10 @@ func (m *model) openForm(o op.Op, t op.Target) {
 		if fl.Kind == op.Bool && f.values[fl.Key] == "" {
 			f.values[fl.Key] = "no"
 		}
+	}
+	f.initial = op.Values{}
+	for k, v := range f.values {
+		f.initial[k] = v
 	}
 	if len(o.Fields) == 0 {
 		m.submitForm(f)
@@ -184,6 +189,28 @@ func (m *model) formKey(k tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (f *formState) shown(fl op.Field, val string) string {
+	switch fl.Kind {
+	case op.Choice:
+		label := val
+		for _, c := range f.choices[fl.Key] {
+			switch {
+			case c[0] != val:
+			case c[0] == "":
+				label = c[1]
+			case c[1] != "":
+				label = c[0] + " — " + c[1]
+			}
+		}
+		return "‹ " + label + " ›"
+	case op.Bool:
+		return "[" + map[string]string{"yes": "x", "no": " "}[val] + "] " + val
+	case op.Secret:
+		return strings.Repeat("•", len([]rune(val)))
+	}
+	return val
+}
+
 func (m *model) formView() string {
 	f := m.form
 	w := min(m.width-4, 110)
@@ -197,42 +224,50 @@ func (m *model) formView() string {
 		b.WriteString(wrap(f.op.Note, w-4) + "\n")
 	}
 	b.WriteString("\n")
-	for i, fl := range f.op.Fields {
-		val := f.values[fl.Key]
-		switch fl.Kind {
-		case op.Choice:
-			label := val
-			for _, c := range f.choices[fl.Key] {
-				if c[0] == val && c[1] != "" {
-					label = c[0] + " — " + c[1]
-				}
-			}
-			val = "‹ " + label + " ›"
-		case op.Bool:
-			val = "[" + map[string]string{"yes": "x", "no": " "}[val] + "] " + val
-		case op.Secret:
-			val = strings.Repeat("•", len([]rune(val)))
+	// Long forms (wp-config) scroll around the focused field.
+	fields := f.op.Fields
+	room := max(m.height-18, 5)
+	start, end := 0, len(fields)
+	if len(fields) > room {
+		start = min(max(f.cursor-room/2, 0), len(fields)-room)
+		end = start + room
+		if start > 0 {
+			b.WriteString(sDim.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n")
 		}
-		line := fmt.Sprintf("%-26s %s", fl.Label, val)
+	}
+	for i := start; i < end; i++ {
+		fl := fields[i]
+		val := f.values[fl.Key]
+		line := fmt.Sprintf("%-26s %s", fl.Label, f.shown(fl, val))
 		if i == f.cursor && fl.Kind != op.Choice && fl.Kind != op.Bool {
 			line += "▏"
 		}
-		if cur := f.current[fl.Key]; cur != "" {
-			line += sDim.Render("   now: " + cur)
-		}
+		changed := val != f.initial[fl.Key]
 		if i == f.cursor {
-			b.WriteString(sAcc.Render("▸ ") + sBold.Render(line) + "\n")
+			b.WriteString(sAcc.Render("▸ ") + sBold.Render(truncate(line, w-6)) + "\n")
+			if cur := f.current[fl.Key]; cur != "" {
+				b.WriteString(sDim.Render("    now: "+truncate(cur, w-14)) + "\n")
+			}
 			if fl.Help != "" {
 				b.WriteString(sDim.Render("    "+wrap(fl.Help, w-8)) + "\n")
 			}
 		} else {
-			b.WriteString("  " + line + "\n")
+			if changed {
+				line += "   " + sAcc.Render("changed")
+				if was := f.initial[fl.Key]; was != "" && fl.Kind != op.Secret {
+					line += sDim.Render(" (was " + was + ")")
+				}
+			}
+			b.WriteString("  " + truncate(line, w-4) + "\n")
 		}
+	}
+	if end < len(fields) {
+		b.WriteString(sDim.Render(fmt.Sprintf("  ↓ %d more", len(fields)-end)) + "\n")
 	}
 	if f.err != "" {
 		b.WriteString("\n" + stateStyle(check.Fail).Render(f.err) + "\n")
 	}
-	b.WriteString("\n" + sDim.Render("tab/↑↓ field · type to edit (ctrl+u clears) · h/l or space: choose/toggle · enter next → plan · esc cancel"))
+	b.WriteString("\n" + sDim.Render("tab/↑↓ field · type to edit (ctrl+u clears) · h/l or space: choose/toggle · enter next · ctrl+s → plan · esc cancel"))
 	return sBox.Width(w).Render(b.String())
 }
 

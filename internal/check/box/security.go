@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -69,7 +70,7 @@ func checkFail2ban(ctx context.Context, env *Env) []Result {
 	if !s.Have("fail2ban-client") {
 		return []Result{New(Warn, "not installed").
 			Because("Brute-force attempts against SSH and WordPress logins go unthrottled.").
-			Fixed("run.sh → 4 (Fail2ban)")}
+			Fixed("apt-get install fail2ban, then hs op f2b-wp-jail")}
 	}
 	if !active(ctx, s, "fail2ban") {
 		return []Result{New(Fail, "installed but not running").
@@ -90,7 +91,15 @@ func checkFail2ban(ctx context.Context, env *Env) []Result {
 	case jerr != nil:
 		rs = append(rs, New(Warn, "no WordPress jail").
 			Because("wp-login.php and xmlrpc.php brute force is not throttled.").
-			Fixed("run.sh → 4 (Fail2ban) → 1"))
+			Fixed("hs op f2b-wp-jail"))
+	}
+	// The self-ban guard: the nginx→apache hop is logged with the box's own
+	// address, so a wp-login flood without ignoreip bans the server itself
+	// and every site 502s (2026-07-05). hzdemolink's jail lacked it.
+	if jail := readString(s, "/etc/fail2ban/jail.d/wordpress.conf"); jail != "" && !regexp.MustCompile(`(?m)^\s*ignoreip\s*=`).MatchString(jail) {
+		rs = append(rs, New(Warn, "WordPress jail can ban this box's own addresses").For("wordpress jail").
+			Because("Proxied requests are logged with the server's own IP; a login flood bans it and every site on the box answers 502 (2026-07-05).").
+			Fixed("hs op f2b-restart (adds ignoreip for this box's addresses)"))
 	}
 
 	since := activeSince(ctx, s, "fail2ban")
@@ -148,7 +157,7 @@ func checkSSH(ctx context.Context, env *Env) []Result {
 			return []Result{New(Warn, "accepts password authentication").
 				Ev("sshd -T: passwordauthentication " + f[1]).
 				Because("Every exposed box gets continuous SSH brute force; keys remove the attack entirely.").
-				Fixed("run.sh → 7 (Security) → 3   # confirm your key works BEFORE disabling passwords")}
+				Fixed("hs op ssh-keys-only   # refuses unless a key login is proven")}
 		}
 	}
 	return []Result{New(Unknown, "passwordauthentication not in sshd -T output")}
@@ -177,14 +186,14 @@ func checkUnattended(ctx context.Context, env *Env) []Result {
 	switch UnattendedScope(ctx, env) {
 	case "missing":
 		return []Result{New(Warn, "not installed").
-			Because("Security patches wait for someone to remember.").Fixed("run.sh → 7 (Security) → 1")}
+			Because("Security patches wait for someone to remember.").Fixed("hs op unattended")}
 	case "unknown":
 		return []Result{New(Warn, "installed but has no config file").
-			Because("The package is installed but applies nothing.").Fixed("run.sh → 7 (Security) → 1")}
+			Because("The package is installed but applies nothing.").Fixed("hs op unattended")}
 	case "all":
 		return []Result{New(Fail, "applies all Debian updates, not only security").
 			Because("Unattended non-security upgrades can restart or break Hestia's stack without anyone watching.").
-			Fixed("run.sh → 7 (Security) → 1 → 2 (security updates only)")}
+			Fixed("hs op unattended scope=security")}
 	}
 	// Proof it runs: its log shows a completed run in the last 2 days.
 	last := lastUnattendedRun(env)
@@ -339,7 +348,7 @@ func ServiceDriftResults(ctx context.Context, env *Env) []Result {
 		rs = append(rs, New(Warn, fmt.Sprintf("hestia.conf %s='%s' but %s is not installed", d.Key, d.Value, d.Package)).
 			For(d.Key).
 			Because("Hestia keeps trying to restart a service that no longer exists and emails root every time.").
-			Fixed(fmt.Sprintf(`v-change-sys-config-value %s ""   # or run.sh → 13 → 6`, d.Key)))
+			Fixed(fmt.Sprintf(`v-change-sys-config-value %s ""   # or hs op remove-service`, d.Key)))
 	}
 	return rs
 }
@@ -366,7 +375,7 @@ func checkMaldet(ctx context.Context, env *Env) []Result {
 	s := env.Sys
 	if !exists(s, "/usr/local/maldetect/maldet") {
 		return []Result{New(Warn, "not installed").
-			Because("Nothing scans customer sites for injected shells.").Fixed("run.sh → 5 (Maldet) → 1")}
+			Because("Nothing scans customer sites for injected shells.").Fixed("hs op maldet-install")}
 	}
 	var rs []Result
 	if !active(ctx, s, "maldet") {
@@ -386,7 +395,7 @@ func checkMaldet(ctx context.Context, env *Env) []Result {
 	if stamp == "" {
 		return append(rs, New(Warn, "has never completed a scan").
 			Because("Installed but unproven — no baseline and no idea of its false-positive rate here.").
-			Fixed("run.sh → 5 (Maldet) → 3"))
+			Fixed("hs op maldet-scan"))
 	}
 	if ts.IsZero() {
 		return append(rs, New(Configured, "last scan "+stamp+" (time not parseable)"))

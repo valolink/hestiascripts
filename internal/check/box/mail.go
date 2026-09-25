@@ -54,7 +54,7 @@ func checkMailQueue(ctx context.Context, env *Env) []Result {
 	case n > 50:
 		return []Result{New(Warn, fmt.Sprintf("%d messages stuck", n)).
 			Because("Alerts from cron, maldet, fail2ban and WordPress are not reaching anyone.").
-			Fixed("mailq | tail ; run.sh → 8 (SMTP)")}
+			Fixed("mailq | tail ; hs op smtp-relay")}
 	}
 	return []Result{New(OK, fmt.Sprintf("%d queued", n))}
 }
@@ -102,7 +102,7 @@ func checkMailDelivery(ctx context.Context, env *Env) []Result {
 	var rs []Result
 	if relay == "" {
 		rs = append(rs, New(Warn, "no SMTP relay configured").
-			Because("Mail sent straight from the box lands in spam or is dropped.").Fixed("run.sh → 8 (SMTP)"))
+			Because("Mail sent straight from the box lands in spam or is dropped.").Fixed("hs op smtp-relay"))
 	}
 	lastSent, lastFail, failReason := lastDelivery(ctx, env)
 	now := env.Sys.Now()
@@ -111,11 +111,11 @@ func checkMailDelivery(ctx context.Context, env *Env) []Result {
 		rs = append(rs, New(Fail, "the most recent delivery attempt failed").
 			Ev(failReason, "last success: "+stampOrNever(lastSent)).
 			Because("Notifications and WordPress mail (orders, password resets) are not arriving.").
-			Fixed("tail -50 /var/log/mail.log ; run.sh → 8 (SMTP) → 4 (test)"))
+			Fixed("tail -50 /var/log/mail.log ; hs op smtp-test"))
 	case lastSent.IsZero():
 		if relay != "" {
 			rs = append(rs, New(Configured, "relay "+relay+", no delivery seen in the last 7 days").
-				Fixed("run.sh → 8 (SMTP) → 4 (send a test)"))
+				Fixed("hs op smtp-test"))
 		}
 	case len(rs) == 0:
 		age := now.Sub(lastSent)

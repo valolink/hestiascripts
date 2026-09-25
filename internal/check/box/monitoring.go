@@ -27,7 +27,7 @@ func checkNetdata(ctx context.Context, env *Env) []Result {
 	if !s.Have("netdata") {
 		return []Result{New(Warn, "not installed").
 			Because("EngineLink's server alarms and charts read Netdata through the streamer; without it the box is unmonitored.").
-			Fixed("run.sh → 6 (Netdata) → 1")}
+			Fixed("hs op netdata-install")}
 	}
 	if !active(ctx, s, "netdata") {
 		return []Result{New(Fail, "installed but not running").Fixed("systemctl start netdata")}
@@ -36,7 +36,7 @@ func checkNetdata(ctx context.Context, env *Env) []Result {
 	if !NetdataTuned(env) {
 		rs = append(rs, New(Warn, "running on the stock profile").
 			Because("Stock Netdata's memory footprint triggered the web1 OOM on 2026-07-06.").
-			Fixed("run.sh → 6 (Netdata) → 3"))
+			Fixed("hs op netdata-tune"))
 	}
 	// :19999 should only ever answer on localhost — EngineLink reaches it
 	// through the streamer's token-gated /netdata proxy.
@@ -151,12 +151,12 @@ func WPCLIVersion(ctx context.Context, env *Env) string {
 func checkWPCLI(ctx context.Context, env *Env) []Result {
 	if !env.Sys.Have("wp") {
 		return []Result{New(Fail, "not installed").
-			Because("Every v-wp-* script and EngineLink's site actions depend on it.").Fixed("run.sh → 2 (WP-CLI) → 1")}
+			Because("Every v-wp-* script and EngineLink's site actions depend on it.").Fixed("hs op wpcli")}
 	}
 	v := WPCLIVersion(ctx, env)
 	if v == "" {
 		return []Result{New(Fail, "installed but wp --version fails").
-			Because("Usually disabled PHP CLI functions after a PHP update.").Fixed("run.sh → 2 (WP-CLI) → 3")}
+			Because("Usually disabled PHP CLI functions after a PHP update.").Fixed("hs op php-cli-functions")}
 	}
 	return []Result{New(OK, "WP-CLI "+v+" runs")}
 }

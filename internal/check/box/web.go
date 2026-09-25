@@ -97,16 +97,16 @@ func checkTemplates(ctx context.Context, env *Env) []Result {
 			same, ok := sameFile(s, filepath.Join(env.RepoDir, "templates/nginx", f), hestia.NginxTpl+"/"+f)
 			switch {
 			case !ok && !exists(s, hestia.NginxTpl+"/"+f):
-				rs = append(rs, New(Warn, f+" is not installed").For(f).Fixed("run.sh → 12 (Nginx Templates) → 1"))
+				rs = append(rs, New(Warn, f+" is not installed").For(f).Fixed("hs op web-templates"))
 			case ok && !same:
 				rs = append(rs, New(Warn, f+" differs from the repo").For(f).
 					Because("Domains on it run rules nobody reviewed, or miss fixes that shipped since.").
-					Fixed("run.sh → 12 (Nginx Templates) → 1, then v-rebuild-web-domain for its domains"))
+					Fixed("hs op web-templates, then hs op web-rebuild"))
 			}
 		}
 		if exists(s, hestia.NginxTpl+"/wp-rocket.tpl") && !exists(s, hestia.NginxTpl+"/wp-rocket-cartbypass.tpl") {
 			rs = append(rs, New(Warn, "wp-rocket-cartbypass was not generated").For("wp-rocket-cartbypass").
-				Fixed("run.sh → 12 (Nginx Templates) → 1"))
+				Fixed("hs op web-templates"))
 		}
 	}
 	if len(rs) > 0 {
