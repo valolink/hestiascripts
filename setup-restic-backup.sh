@@ -42,7 +42,8 @@
 #
 # Options (defaults in brackets):
 #   --password      use the Storage Box password (prompted, or SB_PASS env)
-#                   instead of an SSH key — REQUIRED for subaccounts
+#                   instead of an SSH key — REQUIRED for subaccounts. Takes NO
+#                   value: never type the password on the command line.
 #   --port N        Storage Box SSH port [23 — Hetzner default]
 #   --key PATH      dedicated key path [/root/.ssh/storagebox]
 #   --remote NAME   rclone remote name [storagebox]
@@ -95,11 +96,27 @@ while [ $# -gt 0 ]; do
     --weekly)    WEEKLY=${2:-};    shift 2 ;;
     --monthly)   MONTHLY=${2:-};   shift 2 ;;
     --yearly)    YEARLY=${2:-};    shift 2 ;;
-    --password)  PASSWORD_AUTH=1;  shift ;;
+    --password)
+      PASSWORD_AUTH=1; shift
+      # --password takes no value. A word typed after it is almost certainly
+      # the password itself (2026-09: a Storage Box password reached a box's
+      # shell history that way) — refuse it, and never echo it back.
+      if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+        die "--password takes no value — the script asks for the password, or reads SB_PASS.
+    The word after --password was not used and is not printed here. If it was the password,
+    it is now in this shell's history: change it in the Hetzner console, then remove the line
+    (history -d <number>, and from ~/.bash_history)."
+      fi ;;
+    --password=*)
+      die "--password takes no value — the script asks for the password, or reads SB_PASS.
+    The value was not used and is not printed here. If it was the password, it is now in this
+    shell's history: change it in the Hetzner console, then remove the line." ;;
     --no-cron)   INSTALL_CRON=0;   shift ;;
     --no-hourly) HOURLY=0;         shift ;;
     -h|--help)   tail -n +2 "$0" | grep '^#' | sed 's/^# \?//'; exit 0 ;;
-    *)           die "unknown argument: $1 (see --help)" ;;
+    # Name unknown options, but never echo a bare word: it may be a secret.
+    -*)          die "unknown option: ${1%%=*} (see --help)" ;;
+    *)           die "unexpected argument (not printed — it may be a secret; see --help)" ;;
   esac
 done
 
