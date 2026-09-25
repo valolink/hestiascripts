@@ -56,9 +56,10 @@ script exists so the fleet is covered now.
   `v-server-health`, so EngineLink can parse the last `data:` frame.
 - Cron: `/etc/cron.d/hestia-ioc-watch` (a drop-in we own, like `hestia-restic`), fast checks every
   15 minutes, the filesystem sweeps hourly (`--sweep`). `flock` against overlapping runs.
-- Alerts: on exit ≥ 1 from cron, mail the new findings (address in `/etc/hestia-ioc-watch.conf`,
-  **destination still to decide: email address and/or an EngineLink notification**). Re-alert on the
-  same finding at most once a day.
+- Alerts: on exit ≥ 1 from cron, mail the new findings to **tuotanto@valolink.fi** (decided
+  2026-09-25; the address is the default in `/etc/hestia-ioc-watch.conf`, overridable per box). Send
+  through the box's configured SMTP relay, and treat a failed send as a finding in the next run's
+  output, so a broken relay does not silence the watch. Re-alert on the same finding at most once a day.
 
 **Checks — critical** (each one was true on at least one box this year)
 
