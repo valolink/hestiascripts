@@ -127,9 +127,6 @@ func boxActions() []Action {
 			Note: "Read-only: where the RAM goes and whether it matters (~5 s).", Command: vscript("v-server-memory")},
 
 		// --- web
-		{ID: "web.templates", Title: "Install / update nginx templates…", Section: "web", Mode: Interactive, NeedsRepo: true,
-			Note:    "wp-secure, wp-rocket, wp-rocket-cartbypass + cache headers. Existing domains keep their template until rebuilt.",
-			Recheck: []string{"web.templates", "web.cache-headers", "web.nginx"}, Command: setupFn("_nginx_install_profiles")},
 		{ID: "web.cache-headers", Title: "Install / update cache-headers drop-in", Section: "web", Mode: Stream, Confirm: ConfirmYes, NeedsRepo: true,
 			Note: "http-level Cache-Control default + versioned asset expiry; nginx reload.", Recheck: []string{"web.cache-headers", "web.nginx"},
 			Command: repoScript("setup/install-cache-headers.sh")},
@@ -192,7 +189,6 @@ var ForCheck = map[string]string{
 	"site.debug":        "site.wp-config",
 	"hestia.version":    "security.hestia-update",
 	"backups.setup":     "backups.guard-preview",
-	"web.templates":     "web.templates",
 	"web.cache-headers": "web.cache-headers",
 	"mail.queue":        "mail.queue",
 	"streamer":          "monitoring.deploy",

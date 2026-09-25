@@ -80,16 +80,8 @@ type Action struct {
 	NeedsRepo bool
 }
 
-// Plan is the command as shown on screen. For run.sh menu functions the
-// sixteen `source` lines are summarised; everything else is the exact,
-// shell-quoted command. The log always records Exact.
-func (a Action) Plan(t Target, repo string) string {
-	argv := a.Command(t, repo)
-	if fn, ok := setupFnName(argv); ok {
-		return "setup/" + setupFile(repo, fn) + " → " + fn + "   (bash, SCRIPT_DIR=" + repo + ", every setup/ module sourced as run.sh does)"
-	}
-	return a.Exact(t, repo)
-}
+// Plan is the command as shown on screen: the exact, shell-quoted command.
+func (a Action) Plan(t Target, repo string) string { return a.Exact(t, repo) }
 
 // Exact is the full command line, shell-quoted — what the log records.
 func (a Action) Exact(t Target, repo string) string {
@@ -135,23 +127,6 @@ func repoScript(name string, args ...string) func(Target, string) []string {
 	}
 }
 
-// setupModules is run.sh's source list: the menu functions depend on each other.
-var setupModules = []string{"common", "status", "wpcli", "redis", "fail2ban", "maldet", "netdata", "security", "smtp",
-	"php-fpm", "opcache", "mariadb", "nginx-templates", "maintenance", "disk", "audit"}
-
-// setupFn runs one run.sh menu function with every module sourced, exactly
-// as run.sh does, then pauses so its output can be read before the TUI returns.
-func setupFn(fn string) func(Target, string) []string {
-	return func(_ Target, repo string) []string {
-		var src []string
-		for _, m := range setupModules {
-			src = append(src, `source "$SCRIPT_DIR/setup/`+m+`.sh"`)
-		}
-		script := `export SCRIPT_DIR=` + quote(repo) + `; ` + strings.Join(src, "; ") + `; ` + fn
-		return []string{"bash", "-c", script}
-	}
-}
-
 // Describe returns what the command itself says it does: the leading comment
 // block of the script, or the comments above a setup/ function. Read from the
 // source, so it cannot drift from what runs. Empty when there is none.
@@ -161,9 +136,6 @@ func Describe(a Action, t Target, repo string) []string {
 	}
 	argv := a.Command(t, repo)
 	switch {
-	case isSetupFn(argv):
-		fn, _ := setupFnName(argv)
-		return describeFunc(repo, fn)
 	case len(argv) >= 2 && argv[0] == "bash" && strings.HasSuffix(argv[1], ".sh"):
 		return describeScript(argv[1])
 	case strings.HasPrefix(argv[0], bin):
@@ -234,43 +206,6 @@ func usageText(src string) []string {
 	return nil
 }
 
-// describeFunc finds `fn() {` in setup/*.sh and returns the comment lines
-// directly above it, or failing that the echo'd menu lines inside it.
-func describeFunc(repo, fn string) []string {
-	files, _ := filepath.Glob(filepath.Join(repo, "setup", "*.sh"))
-	for _, f := range files {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		lines := strings.Split(string(b), "\n")
-		for i, l := range lines {
-			if !strings.HasPrefix(strings.TrimSpace(l), fn+"()") {
-				continue
-			}
-			var com []string
-			for j := i - 1; j >= 0 && strings.HasPrefix(strings.TrimSpace(lines[j]), "#"); j-- {
-				com = append([]string{strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(lines[j]), "#"), " ")}, com...)
-			}
-			if len(com) == 0 {
-				// a menu: list its options
-				for j := i + 1; j < len(lines) && j < i+80 && !strings.HasPrefix(lines[j], "}"); j++ {
-					t := strings.TrimSpace(lines[j])
-					if strings.HasPrefix(t, `echo "  `) && strings.Contains(t, ")") {
-						com = append(com, strings.Trim(strings.TrimPrefix(t, "echo "), `"`))
-					}
-				}
-			}
-			com = append([]string{"setup/" + filepath.Base(f) + " → " + fn}, com...)
-			if len(com) > maxDescribe {
-				com = append(com[:maxDescribe], "…")
-			}
-			return trimBlank(com)
-		}
-	}
-	return nil
-}
-
 func trimBlank(ls []string) []string {
 	for len(ls) > 0 && strings.TrimSpace(ls[len(ls)-1]) == "" {
 		ls = ls[:len(ls)-1]
@@ -282,26 +217,6 @@ func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
-
-func setupFnName(argv []string) (string, bool) {
-	if len(argv) == 3 && argv[0] == "bash" && argv[1] == "-c" && strings.Contains(argv[2], `source "$SCRIPT_DIR/setup/`) {
-		return argv[2][strings.LastIndex(argv[2], "; ")+2:], true
-	}
-	return "", false
-}
-
-// setupFile names the setup/ module that defines fn ("?.sh" if not found).
-func setupFile(repo, fn string) string {
-	files, _ := filepath.Glob(filepath.Join(repo, "setup", "*.sh"))
-	for _, f := range files {
-		if b, err := os.ReadFile(f); err == nil && strings.Contains(string(b), "\n"+fn+"()") {
-			return filepath.Base(f)
-		}
-	}
-	return "?.sh"
-}
-
-func isSetupFn(argv []string) bool { _, ok := setupFnName(argv); return ok }
 
 // selfExe is the running hs binary, for actions implemented as hs subcommands.
 func selfExe() string {
