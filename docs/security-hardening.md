@@ -31,6 +31,87 @@ Ranked by how much each one would have limited this specific incident.
 | Logs kept 12 months, ideally off-box | The first shells (May) and every download could have been reconstructed. |
 | No dumps or archives in web roots | Two customer databases and a site backup not downloadable by scanners. |
 
+## Interim: watch the boxes until they are rebuilt
+
+The rebuilds (see *Later*) wait until they can be tested properly, which may take a while. Until
+then the boxes keep running, so something has to notice a return without anyone remembering to look.
+
+### `v-server-ioc-watch.sh`
+
+A read-only watch that runs from cron on **every box**, stays silent while nothing changes, and
+alerts on anything new. It repeats, automatically, the checks that found this incident by hand on
+2026-09-25. The `v-server-` prefix gets it symlinked by `install-scripts.sh` and allows it through
+the streamer, so EngineLink can also call it. These checks become `hs check` items later (§8); the
+script exists so the fleet is covered now.
+
+**Contract**
+
+- Read-only; every probe bounded with `timeout`; never kills, moves or deletes anything.
+- State in `/var/lib/hestia-ioc-watch/` (root, 700): `baseline.txt` (accepted findings) and
+  `last.txt`. A run compares its findings with the baseline and **reports only what is new**.
+- `--baseline` records the current findings as accepted (run once after reviewing them).
+  `--full` prints everything, including accepted findings. `--quiet` prints only new findings.
+- Exit `0` nothing new · `1` new warning · `2` new critical. The final stdout line is one line of
+  JSON (`{"new":[…],"critical":N,"warn":N,"checkedAt":"…"}`), the same contract as
+  `v-server-health`, so EngineLink can parse the last `data:` frame.
+- Cron: `/etc/cron.d/hestia-ioc-watch` (a drop-in we own, like `hestia-restic`), fast checks every
+  15 minutes, the filesystem sweeps hourly (`--sweep`). `flock` against overlapping runs.
+- Alerts: on exit ≥ 1 from cron, mail the new findings (address in `/etc/hestia-ioc-watch.conf`,
+  **destination still to decide: email address and/or an EngineLink notification**). Re-alert on the
+  same finding at most once a day.
+
+**Checks — critical** (each one was true on at least one box this year)
+
+| Check | How | Incident evidence |
+|---|---|---|
+| Web terminal back on | `WEB_TERMINAL='true'` in `hestia.conf`, or `hestia-web-terminal` active, or anything listening on :8085 | the entry point on all three boxes |
+| C2 block missing | no `DROP` for `195.72.61.165` in `iptables -S OUTPUT`, on a box whose `custom.sh` carries it | the block is the only thing stopping a leftover agent |
+| Connections to known-bad hosts | `ss -tnp` to `195.72.61.165`, `161.97.132.209`, `74.48.66.73` | implant SYN-SENT to :8000 on hzweb1 |
+| Known implant files or names | paths `/usr/lib/systemd/systemd-ulibd`, `/usr/lib/systemd/systemd-{journal-upload,rfkill-watcher,resolved-helper}`, `/usr/lib/__root/`, `/usr/lib/__hesti/`, `/usr/{s,}bin/chrony2*`, `/var/tmp/system-id`, `/usr/lib/x86_64-linux-gnu/.nss_cache.init`; processes with those names | all of them, on 1–3 boxes |
+| Known hashes (sha256) | see the list below the table | — |
+| `/etc/ld.so.preload` exists | file present at all | rootkit preload, 2026-05-29 |
+| Webshell in a web root | the marker string `bc764c3a318cf1fae267a7276e7c92ba219a651f337d39274ea6462f08d6a3f7` in any `.php` under `/home/*/web/*/public_html` and `/var/www` (hourly) | 49 copies incl. `/var/www/html` |
+| New uid-0 account | any account other than root with uid 0 | — |
+
+Known sha256 hashes (not secret; also in the quarantine manifests on each box):
+
+```
+24cddd5f50e695176762a30e0069709eda51dc1182c092f8683e4ac622850b95  ulibd (Realm imix agent)
+407df667ea2df5e859b03cdda629016485775b1ac5bb22e851833daa2eb9a131  second agent (systemd-journal-upload / -rfkill-watcher / -resolved-helper)
+663a8088faca8e126a11648f5671fcf4eaf96435e10daf63a1d1b17d8385154c  __root (pivot / rootkit tool)
+82d072ab03d90c0131b06a576eadf2c986a51f0de986d50db4e49be01bf125cb  __hesti (same family, earlier build)
+4baecd2b1ef9045b62bc212989e44ceabe5c7a88cde2baf8f53e385952ee0e19  chrony2 (XMRig), alavus/hzweb1/hzdemolink /usr/bin
+b0e1ae6d73d656b203514f498b59cbcf29f067edf6fbd3803a3de7d21960848d  chrony2 (XMRig), hzdemolink /usr/sbin
+2658e8fde41f119deaec1977c14343c2fc6472f6a8e6149f70f95c8f3fd3ffb4  PHP webshell (xcbin.php and its disguised copies)
+```
+
+**Checks — warning**
+
+| Check | How | Why |
+|---|---|---|
+| Unpackaged binaries | ELF executables and `.so` files under `/usr /etc /opt /var /root /boot /srv /tmp /var/tmp /dev/shm` that no package owns — merged-/usr aware (try the `/lib`↔`/usr/lib`, `/bin`↔`/usr/bin`, `/sbin`↔`/usr/sbin` aliases before `dpkg -S` says "unowned") — hourly | found `__hesti` and the second miner after name-based checks missed them |
+| Unpackaged systemd units | `.service`/`.timer` under `/etc/systemd/system` and `/usr/lib/systemd/system` that no package owns | the agents installed as fake systemd units |
+| Processes from temp dirs | `/proc/*/exe` pointing into `/tmp`, `/var/tmp`, `/dev/shm`, or unowned; sustained CPU > 50 % from an unowned binary (sample twice, 10 s apart) | `/tmp/a.elf`; the miner |
+| Unusual outbound ports | established or SYN-SENT connections to remote ports outside 22, 23, 25, 53, 80, 123, 443, 465, 587, 993, 995 (plus loopback) | C2 on :8000/:50051, pool on :8444 |
+| New `authorized_keys` lines | fingerprints of every line in `/root/.ssh` and `/home/*/.ssh` `authorized_keys*`, compared with the baseline | persistence the attackers did not use this time, but the obvious next one |
+| Private keys on the box | files under `/root/.ssh` and `/home/*/.ssh` that start with `-----BEGIN … PRIVATE KEY` or `openssh-key-v1`, other than allowlisted automation keys | `id_valolink` on all three compromised boxes |
+| Root-owned PHP in web roots | `find /home/*/web/*/public_html -name '*.php' -user root` (hourly) | every webshell copy was root-owned |
+| New cron entries | files in `/etc/cron.d` and lines in `/var/spool/cron/crontabs/*` not in the baseline, ignoring Hestia's own `v-*` commands | — |
+
+**Known-good, never reported** (starting allowlist, extend per box): `/usr/bin/rclone`, the `hs`
+binary and `/root/hs-v2-test/*`, `hestia-streamer`, `hestia-streamer.service`, the `hs` units and
+`/etc/cron.d/hs-logcap`, `/etc/cron.d/hestia-restic`, Postfix's chroot copies under
+`/var/spool/postfix/lib/`, `/root/.ssh/storagebox`, deleted-binary processes that are only stale
+after an apt upgrade (`agetty`, `dhcpcd` on hzdocker).
+
+**Not in the watch:** the disk-wide API-key grep (too slow for cron; run by hand when needed) and
+WordPress integrity (`wp core verify-checksums` calls out to api.wordpress.org; belongs in `hs check`
+per site, §8).
+
+**Rollout:** build and test on hzdemolink (a clean run after `--baseline` must report nothing; place
+a harmless file named like an IOC, e.g. `/usr/lib/__test/x`, and confirm a critical), then deploy with
+`install-scripts.sh` and run `--full` + `--baseline` on each box after reviewing its findings.
+
 ## Now (this week)
 
 ### 1. Keep the web terminal off, and check it stays off
