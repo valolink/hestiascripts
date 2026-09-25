@@ -15,7 +15,10 @@ fi
 
 # The version is the commit the binary is built from; "-dirty" means it
 # contains uncommitted source — commit first, then build, then commit hs.
-version=$(git describe --always --dirty)
+# The committed hs binary itself does not count: it is always "modified"
+# at the moment it is being rebuilt.
+version=$(git describe --always)
+if [ -n "$(git status --porcelain -- . ':!hs')" ]; then version="$version-dirty"; fi
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
   go build -trimpath -ldflags "-s -w -X main.version=$version" -o hs ./cmd/hs
 echo "built ./hs $version ($(du -h hs | cut -f1))"
