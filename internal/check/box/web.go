@@ -65,15 +65,32 @@ func checkTemplates(ctx context.Context, env *Env) []Result {
 	if !exists(s, hestia.NginxTpl) {
 		return []Result{New(NA, "no nginx templates directory")}
 	}
+	// wp-secure matters only through the sites on it: a site on wp-rocket
+	// carries the same security rules. So an empty or missing wp-secure is a
+	// finding only when a domain uses it, or when no hardened template exists.
 	var rs []Result
+	var onSecure []string
+	for _, d := range hestia.WebDomains(s) {
+		if d.Proxy == "wp-secure" {
+			onSecure = append(onSecure, d.Name)
+		}
+	}
+	anyHardened := false
+	if ents, err := s.ReadDir(hestia.NginxTpl); err == nil {
+		for _, e := range ents {
+			if strings.HasSuffix(e.Name(), ".tpl") && ProxyHardened(env, strings.TrimSuffix(e.Name(), ".tpl")) {
+				anyHardened = true
+			}
+		}
+	}
 	switch {
-	case !exists(s, hestia.NginxTpl+"/wp-secure.tpl"):
-		rs = append(rs, New(Warn, "wp-secure is not installed").For("wp-secure").
-			Because("There is no hardened proxy template to put sites on.").Fixed("run.sh → 12 (Nginx Templates) → 1"))
-	case !WPSecureBuilt(env):
-		rs = append(rs, New(Fail, "wp-secure.tpl contains no security rules").For("wp-secure").
-			Because("It is a plain copy of default.tpl, so every domain on it is unhardened while reporting as protected.").
-			Fixed("run.sh → 12 (Nginx Templates) → 1"))
+	case !anyHardened:
+		rs = append(rs, New(Warn, "no proxy template on this box carries the security rules").For("hardened templates").
+			Because("There is no hardened template to put sites on.").Fixed("Web server → Install / update nginx templates"))
+	case len(onSecure) > 0 && !WPSecureBuilt(env):
+		rs = append(rs, New(Fail, "wp-secure.tpl contains no security rules, and sites use it").For("wp-secure").Ev(onSecure...).
+			Because("It is a plain copy of default.tpl, so these domains are unhardened while reporting as protected.").
+			Fixed("Web server → Install / update nginx templates, then rebuild those domains"))
 	}
 	if env.RepoDir != "" {
 		for _, f := range []string{"wp-rocket.tpl", "wp-rocket.stpl"} {
@@ -96,9 +113,9 @@ func checkTemplates(ctx context.Context, env *Env) []Result {
 		return rs
 	}
 	if env.RepoDir == "" {
-		return []Result{New(Configured, "wp-secure built; repo not found, so wp-rocket was not compared")}
+		return []Result{New(Configured, "hardened templates present; repo not found, so wp-rocket was not compared")}
 	}
-	return []Result{New(Configured, "wp-secure built, wp-rocket identical to the repo, cartbypass generated")}
+	return []Result{New(Configured, "hardened templates present, wp-rocket identical to the repo, cartbypass generated")}
 }
 
 // The layer nothing caught for months: a template only protects domains

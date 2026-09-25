@@ -493,27 +493,26 @@ audit_wp_exposure() {
 # against a tab-indented Hestia template, so `cp` succeeded, no rules landed,
 # and every file-exists check called the box hardened.
 audit_templates() {
+  # A site is protected when ITS proxy template carries the rules — wp-rocket
+  # does, like wp-secure. An empty wp-secure only matters to domains on it.
   local dir="/usr/local/hestia/data/templates/web/nginx"
   [ -f "$dir/wp-secure.tpl" ] || return 0
   grep -q "Valolink security rules" "$dir/wp-secure.tpl" 2>/dev/null && return 0
-  finding WARNING "nginx wp-secure.tpl contains no security rules" \
-    "It is a plain copy of default.tpl, so every domain using it is unhardened while reporting as protected." \
-    "run.sh → 12 (Web Templates) → 1, then re-check the status line"
+  local on
+  on=$(grep -l "PROXY='wp-secure'" /usr/local/hestia/data/users/*/web.conf 2>/dev/null | head -1)
+  [ -n "$on" ] || return 0
+  finding WARNING "nginx wp-secure.tpl contains no security rules, and domains use it" \
+    "It is a plain copy of default.tpl, so every domain on it is unhardened while reporting as protected." \
+    "run.sh → 12 (Web Templates) → 1, then v-rebuild-web-domain for those domains"
 }
 
 # ------------------------------------------------- is the template in USE? ---
-# The layer nothing caught for months. wp-secure.tpl can exist AND contain the
-# rules AND still protect nothing, because a template only applies to domains
-# assigned to it. setup-status reporting wpSecure:true only ever meant "a file
-# with that name exists" — on kuumalahde all three domains sat on PROXY='default'
-# the whole time.
+# The layer nothing caught for months: a template only protects domains
+# assigned to it (kuumalahde: all three domains sat on PROXY='default').
+# Judged per domain by the template's content, so wp-rocket counts as hardened.
 audit_template_usage() {
   local dir="/usr/local/hestia/data/templates/web/nginx"
-  [ -f "$dir/wp-secure.tpl" ] || return 0
-  # The "exists but empty" case belongs to audit_templates; don't report twice.
-  grep -q "Valolink security rules" "$dir/wp-secure.tpl" 2>/dev/null || return 0
-
-  local f line dom proxy total=0 covered=0 uncovered=""
+  local f line dom proxy total=0 uncovered=""
   for f in /usr/local/hestia/data/users/*/web.conf; do
     [ -f "$f" ] || continue
     while IFS= read -r line; do
@@ -521,25 +520,13 @@ audit_template_usage() {
       [ -n "$dom" ] || continue
       proxy=$(echo "$line" | grep -oE "PROXY='[^']*'" | cut -d"'" -f2)
       total=$((total + 1))
-      if [ "$proxy" = "wp-secure" ]; then
-        covered=$((covered + 1))
-      else
-        uncovered="$uncovered $dom"
-      fi
+      grep -q "Valolink security rules" "$dir/${proxy:-none}.tpl" 2>/dev/null || uncovered="$uncovered $dom(${proxy:-none})"
     done < "$f"
   done
-
-  [ "$total" -gt 0 ] || return 0
-
-  if [ "$covered" -eq 0 ]; then
-    finding WARNING "wp-secure template is built but no domain uses it" \
-      "The rules exist in the file and apply to nothing — every domain is still on its default proxy template." \
-      "v-change-web-domain-proxy-tpl <user> <domain> wp-secure   # test one small site first"
-  elif [ -n "$uncovered" ]; then
-    finding ADVISORY "Domains not on the wp-secure proxy template:$uncovered" \
-      "They get no hardening rules. Some of this may be deliberate — wp-rocket sites and the panel domain are reasonable exceptions." \
-      "v-change-web-domain-proxy-tpl <user> <domain> wp-secure"
-  fi
+  [ "$total" -gt 0 ] && [ -n "$uncovered" ] || return 0
+  finding ADVISORY "Domains on a proxy template without the security rules:$uncovered" \
+    "They get none of the deny rules (dumps, logs, PHP in uploads, xmlrpc). The panel domain is a reasonable exception." \
+    "v-change-web-domain-proxy-tpl <user> <domain> wp-secure   # or wp-rocket for WP Rocket sites"
 }
 
 # ------------------------------------------------------------------ netdata ---
