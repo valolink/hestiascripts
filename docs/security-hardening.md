@@ -1,345 +1,335 @@
 # Security hardening for the Hestia fleet
 
-Written 2026-09-25, after the May 2026 compromise of three boxes. This is a plan, not a record of
-what is deployed: each item says why it matters (with the evidence from this incident), what to
-change, and where in this repo it belongs. Incident details: `~/valolink/hzdemolink-incident-2026-09-25.md`.
+Written 2026-09-25, after the May 2026 compromise of three boxes, and built the same day. Every
+control here is permanent: it is part of how a box is run, not a stopgap. Each item says why it
+matters (with the evidence), what hs does about it — the check that reports it and the operation or
+fix that applies it — and what is still open. Incident details: `~/valolink/hzdemolink-incident-2026-09-25.md`.
+
+Applying it to a box: `git pull` in the checkout, `bash install-v2.sh --watch`, then work through
+`hs check --section security` (every finding opens its operation on enter in the TUI). All
+operations show their exact commands, and how to undo them, before anything runs.
 
 ## What happened, in one paragraph
 
 Between 2026-05-20 and 05-26, ten IP addresses opened 62 unauthenticated root shells through the
 Hestia **web terminal** (`hestia-web-terminal` 1.0.2, `/_shell/` on the panel port) on hzdemolink,
 alavus and hzweb1. The 1.0.2 `server.js` read the PHP session file with a string split, so a session
-that had only loaded `/login/` was accepted as root (upstream fixed it in hestiacp commit `854d71b3c`).
-Automated tooling then grepped the disk for cloud and API keys, read `/root/.my.cnf`, installed a
-**Realm C2 agent** (`ulibd`, callback `195.72.61.165:8000`), a second agent disguised as a systemd
-helper, a C++ pivot/rootkit tool, an XMRig miner, and dropped a password-gated PHP webshell into every
-web root. Nothing noticed for four months. On two boxes the web terminal was still installed and
-running on 2026-09-25, and all three boxes held the operator's unencrypted personal SSH key, which also
-opened root on most of the fleet and push access to this repository on GitHub.
+that had only loaded `/login/` was accepted as root (upstream fixed it in hestiacp commit `854d71b3c`;
+advisory GHSA-gh6f-9gpr-x9m2). Automated tooling then grepped the disk for cloud and API keys, read
+`/root/.my.cnf`, installed a **Realm C2 agent** (`ulibd`, callback `195.72.61.165:8000`), a second
+agent disguised as a systemd helper, a C++ pivot/rootkit tool, an XMRig miner, and dropped a
+password-gated PHP webshell into every web root. Nothing noticed for four months. On two boxes the web
+terminal was still installed and running on 2026-09-25, and all three boxes held the operator's
+unencrypted personal SSH key, which also opened root on most of the fleet and push access to this
+repository on GitHub. The same attack hit other Hestia operators: a forum report from 2026-05-22
+shows the same `/login/` → `/_shell/` sequence from 45.86.230.242 and the same rootkit files
+(`/usr/lib/__hesti`, `libnss_cache.so.2` via `/etc/ld.so.preload`).
 
 ## What would have changed the outcome
 
-Ranked by how much each one would have limited this specific incident.
+| Control | Effect on this incident | In hs |
+|---|---|---|
+| Panel (and its web terminal) reachable only from the admin network | The bug is unreachable; nothing else follows. | `panel-restrict` |
+| Web terminal off unless in use | Same, on every box, even with the panel public. | check `hestia.web-terminal`, fix `web-terminal-off` |
+| Outbound traffic limited to known ports | The C2 (:8000, :50051) and the mining pool (:8444) never connect. | `egress` |
+| No personal private keys on servers | The breach stays on three boxes instead of reaching the fleet and GitHub. | check `ssh.private-keys` |
+| Persistence / unknown-binary checks, with alerts | Detection within a day instead of four months. | `persist.*`, `hs watch` |
+| Logs kept long, ideally off-box | The first shells and every download could have been reconstructed. | `log-retention`, `audit` |
+| No dumps or archives in web roots | Two customer databases and a site backup not downloadable by scanners. | template deny rules, `dumps` fix |
 
-| Control | Effect on this incident |
+## HestiaCP's own vulnerabilities (researched 2026-09-25)
+
+GitHub lists 18 security advisories for HestiaCP, all published July–September 2026 (verified
+against `api.github.com/repos/hestiacp/hestiacp/security-advisories`). Seven are critical; most
+turn **any panel login** — even a low-privilege hosting user — into root. That changes what a panel
+password is worth: every panel account is effectively a root credential until the box runs the
+fixed release.
+
+| Advisory | Published | Severity | Fixed in | What |
+|---|---|---|---|---|
+| GHSA-gh6f-9gpr-x9m2 | 07-17 | critical | 1.9.6 | unauthenticated RCE via the web terminal (the May 2026 entry point) |
+| GHSA-5fpv-c8rg-x6r3 | 07-17 | critical | 1.9.5 | client → root via newline injection in v-add-cron-job |
+| GHSA-w3mx-xq85-8qqc | 07-17 | critical | 1.9.5 | root RCE via double eval() in parse_object_kv_list() |
+| GHSA-cr7q-frhq-xw4v | 07-17 | critical | 1.9.7 | low-privilege → root via web.conf path fields |
+| GHSA-2xw3-7h62-v4gf | 07-30 | critical | 1.9.8 | low-privilege → root via the restic restore queue |
+| GHSA-xffx-jj33-p2px | 08-05 | critical | 1.9.9 | low-privilege → root via v-update-user-backup-exclusions |
+| GHSA-r9q4-pmcm-5qqf | 09-15 | critical | 1.10.5 | local privilege escalation to root via a config write |
+| GHSA-47mf-74xr-f8x9 | 07-17 | high | 1.9.5 | second-order command injection in the queue → root |
+| GHSA-fcq6-p8cj-xx3c | 07-17 | high | 1.9.7 | authenticated admin takeover |
+| GHSA-8w7m-g9c2-9q9p | 07-17 | high | 1.9.7 | SQL injection in the database password |
+| GHSA-73p3-rqpv-59wx | 07-17 | high | 1.9.4 | IP spoofing via CF-Connecting-IP (defeats IP-based limits) |
+| GHSA-fg7j-gpvw-2m73 | 07-17 | high | 1.9.5 | XSS in the panel |
+| GHSA-c69h-jgpw-h9cj | 07-30 | medium | 1.9.8 | any admin account can take over the root user |
+| GHSA-3g4r-pfpf-8697 | 07-30 | medium | 1.9.8 | stored XSS in notifications |
+| GHSA-pr4w-cfq5-99h2 | 08-24 | medium | 1.10.4 / 1.9.10 | restore another user's backup into your account |
+| GHSA-8c5w-r7fj-qrqc, GHSA-2hxh-jhww-923x, GHSA-vp7q-fjv5-5vg8 | 09-15 | medium | 1.10.5 | suspended-user page leak, stale admin role, cron impersonation |
+
+Older: CVE-2025-30007/30008 (DNS record command injection / XSS, fixed 1.9.5), CVE-2023-3479 (XSS,
+1.7.8), CVE-2022-2550 (DokuWiki installer command injection, 1.6.5), CVE-2021-47871 (API file write,
+after 1.3.2). No CISA KEV entry. The web-terminal advisory's CVE number differs between GitHub
+(CVE-2026-84976, not resolvable at MITRE) and VulnCheck (CVE-2026-43633); the GHSA id is the
+reference.
+
+**In hs:** check `hestia.advisories` compares the installed version with the advisory list — fetched
+from GitHub at most twice a day, with the verified list built in as a fallback — and fails while any
+critical one applies (fix: `v-update-sys-hestia-all`, to **1.10.5 or later**). `hestia.2fa` reports
+panel users without two-factor login (the root user and admins individually, as Fail); `hestia.api`
+fails when the API is on and open to every address. The API check follows the source, not the
+research summary: an empty `API_ALLOWED_IP` denies every address (`web/api/index.php` compares the
+client with the list plus ""); only `allow-all` opens it.
+
+## The watch
+
+Something has to notice a return without anyone remembering to look. `hs watch` runs the security
+checks from cron, stays silent while nothing changes, and reports — and mails — only what is new
+since a person last accepted the state of the box.
+
+- Every 15 minutes: web terminal, indicators, processes, outbound connections, accounts, cron,
+  authorized and private SSH keys, IPv6 firewall, egress, Hestia advisories and API, exposed files,
+  signed updates. Hourly (`--sweep`): unpackaged binaries and units, webshells, root-owned PHP, PHP in
+  uploads, package integrity (weekly by its own interval). Both under `flock`.
+- `hs watch --baseline` accepts the current findings after review (operation `watch-baseline`, which
+  lists them first). New findings are mailed to `MAIL_TO` in `/etc/hs/watch.conf`
+  (**tuotanto@valolink.fi** by default), at most once a day each while they last; a finding that goes
+  away and comes back is mailed at once. A failed send is itself reported by the next run, so a
+  broken relay cannot silence the watch.
+- The last output line is one line of JSON (`{"new":[…],"critical":N,"warn":N,…}`), exit 2 new
+  critical / 1 new warning / 0 nothing new. `v-server-ioc-watch` runs it for EngineLink over the
+  streamer (report only: no mail, no baseline from there).
+- Install: `bash install-v2.sh --watch`, or operation `watch-enable`.
+
+The indicators (paths, process names, hosts, file hashes, the webshell marker) are one list,
+`internal/ioc/indicators.txt`, built into hs; box-local additions go in `/etc/hs/indicators.local`.
+The firewall block list reads the same hosts. A path that a Debian package owns is not reported.
+
+## The controls
+
+### 1. Web terminal off, and checked to stay off — built
+
+Check `hestia.web-terminal`: Fail when `WEB_TERMINAL='true'`, the service is active or anything
+listens on :8085; the fix `web-terminal-off` runs `v-delete-sys-web-terminal` and makes sure the unit
+is down. hs's earlier fix that repaired and restarted a failing web-terminal unit is gone — a failed
+unit now offers turning it off. If a browser terminal is ever needed: enable, use, disable in the same
+session.
+
+**Found 2026-09-25:** hzdemolink still has `WEB_TERMINAL='true'` with package 1.0.3 installed. The
+service is not running only because 1.0.3 shipped without `node-pty`; the pending upgrade to 1.0.5
+would bring it back to life. Turn it off there (`hs fix web-terminal-off`).
+
+### 2. Panel and SSH only from the admin network — built, needs a decision per box
+
+Check `panel.exposure` warns while Hestia's rules open :8083 or :22 to `0.0.0.0/0`. Operation
+`panel-restrict` rewrites those Hestia firewall rules to the listed networks (the first one in
+place, one more rule per further network), refuses unless the current SSH session's address is
+covered, and shows the break-glass path (the provider's web console) before asking. Tailscale is the
+recommended source (100.64.0.0/10 once every admin machine is on it); fixed office or admin addresses
+work the same way. EngineLink is unaffected (it uses the streamer, :8091, which has its own rule).
+
+### 2b. IPv6 bypasses Hestia's firewall — built (found 2026-09-25)
+
+Hestia's firewall is IPv4-only (its rules take an `IPV4_CIDR`) and leaves ip6tables at policy ACCEPT
+with no rules. On a box with a global IPv6 address, everything listening on `[::]` answers the whole
+IPv6 internet whatever the IPv4 rules say. Verified from outside on hzdemolink: the panel (302) and
+the Netdata dashboard (200) were reachable over IPv6, although Netdata is closed in the IPv4 rules;
+the streamer listened on all addresses too. The boxes are Hetzner machines with IPv6, so this is
+likely fleet-wide.
+
+Check `firewall.ipv6` (Fail, listing what is reachable). Operation `firewall-ipv6` makes IPv6 follow
+Hestia's own rules: the ports Hestia opens to everyone stay open, everything it limits to addresses
+is closed (plus optional admin IPv6 ranges); ICMPv6 and DHCPv6 stay allowed because IPv6 breaks
+without them. Applied on hzdemolink: Netdata no longer answers over IPv6, SSH and sites unaffected.
+
+How it is wired: `hs firewall apply` generates `/etc/hs/firewall.sh` (own chains, rebuilt on every
+run, jumps kept at the top) from `/etc/hs/firewall.conf` and Hestia's `rules.conf`; one line in
+Hestia's `data/firewall/custom.sh` runs it after every `v-update-firewall`, and `hs-firewall.service`
+runs it at boot — Hestia restores only its saved IPv4 rules then, so without the unit IPv6 would be
+open again after every reboot.
+
+### 3. SSH: key-only, no personal keys on servers — built
+
+- `ssh-keys-only` writes `/etc/ssh/sshd_config.d/00-hs-keys-only.conf` (read before any cloud-image
+  drop-in): `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin
+  prohibit-password`, `AllowAgentForwarding no`, `X11Forwarding no`. It refuses without an authorized
+  key and a key login in the last 30 days, or when the current session came in with a password, and
+  runs `sshd -t` before reloading. `MaxAuthTries` stays at sshd's default (6): an ssh agent offers each
+  of its keys as one try, and 3 locks out a legitimate client carrying several keys (the operator's
+  agent holds 19); key-only login and fail2ban already cover guessing. hzdemolink still accepted
+  passwords on 2026-09-25.
+- **Never copy a personal private key to a server.** For server-to-server copies, generate a throwaway
+  key on the destination, add its public half to the source with `from="<dest-ip>",restrict`, remove
+  both when done. Check `ssh.private-keys` fails on any private key under `/root/.ssh` or
+  `/home/*/.ssh` that is not an allowed automation key (`/root/.ssh/storagebox`, plus
+  `/etc/hs/ssh-private-keys.allowed`); fix `ssh-private-key-remove` shreds it (rotate it first — removal
+  does not revoke it). **Found:** `id_valolink` is still on hzdemolink.
+- Check `ssh.authorized-keys` asks for a review until the current keys are accepted
+  (`ssh-keys-accept`, fingerprints in `/etc/hs/ssh-keys.accepted`); after that any key nobody accepted
+  is a Fail. Hestia's file-manager keys (`filemanager.ssh.key`) are among them — accept them.
+
+### 4. Outbound traffic: allow known ports, log the rest — built
+
+Operation `egress`: known-bad hosts are always dropped (in and out); the filter allows DNS, NTP, HTTP,
+HTTPS, mail submission 465/587, the Storage Box 23 and SSH 22 (git, migrations), plus extra ports per
+box. Mode `log` logs everything else with the sending uid (prefix `hs-egress:`), mode `drop` rejects
+it. Check `egress` summarises what the log caught in the last 7 days — what would break — so the
+switch to drop is an informed one. Run log for a week, allow what is legitimate (a box delivering
+mail itself needs 25), then drop. hzdemolink runs in log mode since 2026-09-25. The Realm agent can
+also tunnel over DNS and ICMP; the port filter does not stop those, the detection has to.
+
+### 5. Secrets never on a command line — built
+
+- `setup-restic-backup.sh --password` takes no value; a word typed after it is refused without being
+  echoed, with the instruction to change the password and clear the history line (`1564830`). The
+  hs `restic-setup` form takes the password masked and passes it in `SB_PASS`. (The Storage Box
+  password that reached hzdemolink's history this way was rotated on 2026-09-25.)
+- Operation `shell-history`: `/etc/profile.d/hs-history.sh` — a command typed with a leading space is
+  not saved, every entry gets a timestamp.
+- `install-scripts.sh` prints the streamer token only to a terminal; under `v-hestiascripts-update`
+  (systemd-run, stdout to the journal) it names the file instead.
+- hs secret fields never reach argv, the action log or the plan (`HS_SECRET_*` environment).
+
+### 6. Streamer: fail closed — built
+
+- Both `main.go` (hestia-streamer) and `hs serve` refuse to start without `HESTIA_STREAMER_TOKEN`, and
+  refuse every request if the token is somehow empty: a missing env file is an outage, not an open
+  root API. The `streamer` check fails when no token is configured.
+- Listen address from `HESTIA_STREAMER_ADDR` (e.g. the Tailscale IP:8091) instead of every interface;
+  unset keeps :8091 on all addresses, with the firewall (IPv4 and now IPv6) as the gate.
+- `v-hestiascripts-update` stays on the allowlist, because it now installs only signed code (§13).
+
+### 7. Nothing downloadable that should not be — built
+
+- The wp-secure snippet and both wp-rocket templates deny archives (`zip gz tgz tar bz2 xz 7z rar
+  wpress dump`) at the web root and directly under `wp-content/`, backup-plugin folders whole
+  (`ai1wm-backups`, `updraft`, `backups-dup-*`, `backup-db`, `wpvividbackups`, `backupwordpress*`,
+  `uploads/backwpup*` — nginx serves them straight from disk, so the plugins' `.htaccess` never
+  applies) and `.wpress` anywhere. `wp-content/uploads/` stays downloadable for shops that sell files.
+  Verified on hzdemolink in an isolated nginx: all denied, an uploads zip still 200. Boxes pick it up
+  with `web-templates` + `web-rebuild`.
+- Fixes `dumps` / `debug-log` move files to the site's `private/hs-moved-<date>/` with a
+  `MANIFEST.tsv` (original → new path). nginx may answer a moved URL from its open-file cache for up to
+  a minute — recheck after that. `web.exposure` findings are part of the watch, so they alert.
+- `WP_DEBUG_LOG` to a path under `private/` when debugging (fix `debug-keep`), never the default.
+- **Staging sites are behind HTTP basic auth by default** (`v-wp-staging-create`, `--no-httpauth` to
+  opt out; the hs staging form has the switch). Credentials in `/root/.hestia-staging-auth/<domain>`
+  (root only, never printed), reused on every refresh so reviewers keep access; removed on teardown.
+  Not yet run against a real staging build.
+
+### 8. Detection — built
+
+| Check | Looks for |
 |---|---|
-| Panel (and its web terminal) reachable only from the admin network | The bug is unreachable; nothing else follows. |
-| Web terminal off unless in use | Same, on every box, even with the panel public. |
-| Outbound traffic limited to known ports | The C2 (:8000, :50051) and the mining pool (:8444) never connect. |
-| No personal private keys on servers | The breach stays on three boxes instead of reaching the whole fleet and GitHub. |
-| Persistence / unknown-binary checks in `hs check`, with alerts | Detection within a day instead of four months. |
-| Logs kept 12 months, ideally off-box | The first shells (May) and every download could have been reconstructed. |
-| No dumps or archives in web roots | Two customer databases and a site backup not downloadable by scanners. |
+| `persist.iocs` | indicator paths (unless a package owns them), process names, connections to known-bad hosts |
+| `persist.processes` | processes running from /tmp, /var/tmp, /dev/shm or memfd; deleted or unpackaged binaries (hash compared with the indicator list) |
+| `persist.outbound` | established or pending outbound connections to ports outside the usual set |
+| `persist.accounts` | uid-0 accounts besides root; sudoers drop-ins no package installed |
+| `persist.cron` | cron entries (Hestia's own `v-*` jobs aside) nobody accepted (`cron-accept`) |
+| `persist.unowned` | ELF executables and libraries no package owns (merged-/usr aware, diversions included), hashed; hourly |
+| `persist.units` | systemd units no package installed (alias symlinks aside) |
+| `web.webshell` | the webshell marker, and eval/assert on request data outside wp-admin/wp-includes; hourly |
+| `web.root-owned` | root-owned PHP in sites — a whole root-owned site (a migration) is one finding with the permissions fix |
 
-## Interim: watch the boxes until they are rebuilt
+Known-good unpackaged files are built in (hs, the checkout the v-scripts link into, rclone, maldet,
+Hestia's and cloud-init's sudoers files, Postfix's chroot copies); others go in
+`/etc/hs/unowned.allowed` (operation `persist-allow`). On hzdemolink the only remaining findings are
+two cron entries to review, two modified package files (`/usr/bin/restic` after a self-update,
+Hestia's own nginx.conf) and the root-owned boostwith sites.
 
-The rebuilds (see *Later*) wait until they can be tested properly, which may take a while. Until
-then the boxes keep running, so something has to notice a return without anyone remembering to look.
+Operation `maldet-signatures` adds the webshell marker to maldet's `custom.hex.dat` (maldet takes
+custom signatures as MD5 or hex only). maldet scanned these boxes daily from June and found nothing.
 
-### `v-server-ioc-watch.sh`
+### 9. Package integrity — built
 
-A read-only watch that runs from cron on **every box**, stays silent while nothing changes, and
-alerts on anything new. It repeats, automatically, the checks that found this incident by hand on
-2026-09-25. The `v-server-` prefix gets it symlinked by `install-scripts.sh` and allows it through
-the streamer, so EngineLink can also call it. These checks become `hs check` items later (§8); the
-script exists so the fleet is covered now.
+Check `pkg.integrity`: `dpkg --verify` weekly; modified files from packages, configuration files
+excluded, are a finding. It would not have caught this incident (the attackers added files), but it
+is the check for the next rootkit that replaces one.
 
-**Contract**
+### 10. Logs long enough to answer questions — built
 
-- Read-only; every probe bounded with `timeout`; never kills, moves or deletes anything.
-- State in `/var/lib/hestia-ioc-watch/` (root, 700): `baseline.txt` (accepted findings) and
-  `last.txt`. A run compares its findings with the baseline and **reports only what is new**.
-- `--baseline` records the current findings as accepted (run once after reviewing them).
-  `--full` prints everything, including accepted findings. `--quiet` prints only new findings.
-- Exit `0` nothing new · `1` new warning · `2` new critical. The final stdout line is one line of
-  JSON (`{"new":[…],"critical":N,"warn":N,"checkedAt":"…"}`), the same contract as
-  `v-server-health`, so EngineLink can parse the last `data:` frame.
-- Cron: `/etc/cron.d/hestia-ioc-watch` (a drop-in we own, like `hestia-restic`), fast checks every
-  15 minutes, the filesystem sweeps hourly (`--sweep`). `flock` against overlapping runs.
-- Alerts: on exit ≥ 1 from cron, mail the new findings to **tuotanto@valolink.fi** (decided
-  2026-09-25; the address is the default in `/etc/hestia-ioc-watch.conf`, overridable per box). Send
-  through the box's configured SMTP relay, and treat a failed send as a finding in the next run's
-  output, so a broken relay does not silence the watch. Re-alert on the same finding at most once a day.
+Operation `log-retention`: a journald drop-in (persistent, a size cap never below current use,
+`MaxRetentionSec=1year`) and `rotate 26` (weekly) in the nginx, apache2 and hestia logrotate files —
+edited in place, since a second logrotate file for the same logs is an error. Applied on hzdemolink.
+Shipping `auth`, `sshd`, Hestia's auth log and the panel access log off the box (EngineLink or a
+small log host) is still open: root on the box can delete local logs.
 
-**Checks — critical** (each one was true on at least one box this year)
+### 11. A small audit trail — built
 
-| Check | How | Incident evidence |
-|---|---|---|
-| Web terminal back on | `WEB_TERMINAL='true'` in `hestia.conf`, or `hestia-web-terminal` active, or anything listening on :8085 | the entry point on all three boxes |
-| C2 block missing | no `DROP` for `195.72.61.165` in `iptables -S OUTPUT`, on a box whose `custom.sh` carries it | the block is the only thing stopping a leftover agent |
-| Connections to known-bad hosts | `ss -tnp` to `195.72.61.165`, `161.97.132.209`, `74.48.66.73` | implant SYN-SENT to :8000 on hzweb1 |
-| Known implant files or names | paths `/usr/lib/systemd/systemd-ulibd`, `/usr/lib/systemd/systemd-{journal-upload,rfkill-watcher,resolved-helper}`, `/usr/lib/__root/`, `/usr/lib/__hesti/`, `/usr/{s,}bin/chrony2*`, `/var/tmp/system-id`, `/usr/lib/x86_64-linux-gnu/.nss_cache.init`; processes with those names | all of them, on 1–3 boxes |
-| Known hashes (sha256) | see the list below the table | — |
-| `/etc/ld.so.preload` exists | file present at all | rootkit preload, 2026-05-29 |
-| Webshell in a web root | the marker string `bc764c3a318cf1fae267a7276e7c92ba219a651f337d39274ea6462f08d6a3f7` in any `.php` under `/home/*/web/*/public_html` and `/var/www` (hourly) | 49 copies incl. `/var/www/html` |
-| New uid-0 account | any account other than root with uid 0 | — |
+Operation `audit`: auditd with watches on systemd unit directories, `/etc/ld.so.preload`, cron,
+accounts and sudoers, and every `.ssh` directory, plus kernel module loads (`ausearch -k hs_units`
+etc.; in a script add `--input /var/log/audit/audit.log`, as ausearch reads stdin without a
+terminal). Programs started from /tmp are not in it: both rule forms for that (`-F dir=/tmp` on
+execve, `-w /tmp -p x`) loaded but recorded nothing on Debian 12 in testing, while a plain execve rule
+did — /tmp execution is covered by §14 and `persist.processes` instead. Applied on hzdemolink.
 
-Known sha256 hashes (not secret; also in the quarantine manifests on each box):
+### 12. Tripwires — manual
 
-```
-24cddd5f50e695176762a30e0069709eda51dc1182c092f8683e4ac622850b95  ulibd (Realm imix agent)
-407df667ea2df5e859b03cdda629016485775b1ac5bb22e851833daa2eb9a131  second agent (systemd-journal-upload / -rfkill-watcher / -resolved-helper)
-663a8088faca8e126a11648f5671fcf4eaf96435e10daf63a1d1b17d8385154c  __root (pivot / rootkit tool)
-82d072ab03d90c0131b06a576eadf2c986a51f0de986d50db4e49be01bf125cb  __hesti (same family, earlier build)
-4baecd2b1ef9045b62bc212989e44ceabe5c7a88cde2baf8f53e385952ee0e19  chrony2 (XMRig), alavus/hzweb1/hzdemolink /usr/bin
-b0e1ae6d73d656b203514f498b59cbcf29f067edf6fbd3803a3de7d21960848d  chrony2 (XMRig), hzdemolink /usr/sbin
-2658e8fde41f119deaec1977c14343c2fc6472f6a8e6149f70f95c8f3fd3ffb4  PHP webshell (xcbin.php and its disguised copies)
-```
+A canary AWS key (canarytokens.org) in `/root/.aws/credentials` and a canary token in a `.env`: the
+May 2026 tooling's first commands were `cat /root/.aws/credentials`, `env | grep KEY` and a disk-wide
+grep for `AKIA`, `sk-ant-`, `sk-proj-`, `ghp_`. Needs an account at canarytokens.org; not automated.
 
-**Checks — warning**
+### 13. Signed code on the path to root — built, needs signing set up
 
-| Check | How | Why |
-|---|---|---|
-| Unpackaged binaries | ELF executables and `.so` files under `/usr /etc /opt /var /root /boot /srv /tmp /var/tmp /dev/shm` that no package owns — merged-/usr aware (try the `/lib`↔`/usr/lib`, `/bin`↔`/usr/bin`, `/sbin`↔`/usr/sbin` aliases before `dpkg -S` says "unowned") — hourly | found `__hesti` and the second miner after name-based checks missed them |
-| Unpackaged systemd units | `.service`/`.timer` under `/etc/systemd/system` and `/usr/lib/systemd/system` that no package owns | the agents installed as fake systemd units |
-| Processes from temp dirs | `/proc/*/exe` pointing into `/tmp`, `/var/tmp`, `/dev/shm`, or unowned; sustained CPU > 50 % from an unowned binary (sample twice, 10 s apart) | `/tmp/a.elf`; the miner |
-| Unusual outbound ports | established or SYN-SENT connections to remote ports outside 22, 23, 25, 53, 80, 123, 443, 465, 587, 993, 995 (plus loopback) | C2 on :8000/:50051, pool on :8444 |
-| New `authorized_keys` lines | fingerprints of every line in `/root/.ssh` and `/home/*/.ssh` `authorized_keys*`, compared with the baseline | persistence the attackers did not use this time, but the obvious next one |
-| Private keys on the box | files under `/root/.ssh` and `/home/*/.ssh` that start with `-----BEGIN … PRIVATE KEY` or `openssh-key-v1`, other than allowlisted automation keys | `id_valolink` on all three compromised boxes |
-| Root-owned PHP in web roots | `find /home/*/web/*/public_html -name '*.php' -user root` (hourly) | every webshell copy was root-owned |
-| New cron entries | files in `/etc/cron.d` and lines in `/var/spool/cron/crontabs/*` not in the baseline, ignoring Hestia's own `v-*` commands | — |
+`v-hestiascripts-update` fetches, then verifies the new commit with `git verify-commit` against
+`/etc/hs/allowed_signers` — a file on the box, outside the repository, so a push cannot change who is
+trusted — **before** merging anything. No signers file, or no valid signature: nothing changes and
+it says why. `--allow-unsigned` works only from a terminal on the box. Check `updates.signing` warns
+until the signers file exists, and warns if the installed checkout's HEAD is not signed by a trusted
+key. Until commits are signed, EngineLink's update button is refused.
 
-**Known-good, never reported** (starting allowlist, extend per box): `/usr/bin/rclone`, the `hs`
-binary and `/root/hs-v2-test/*`, `hestia-streamer`, `hestia-streamer.service`, the `hs` units and
-`/etc/cron.d/hs-logcap`, `/etc/cron.d/hestia-restic`, Postfix's chroot copies under
-`/var/spool/postfix/lib/`, `/root/.ssh/storagebox`, deleted-binary processes that are only stale
-after an apt upgrade (`agetty`, `dhcpcd` on hzdocker).
+Setting it up (dev machine): `git config --global gpg.format ssh`, `git config --global
+user.signingkey ~/.ssh/<signing key>.pub`, `git config --global commit.gpgsign true`. On each box:
+`install -d -m 700 /etc/hs && echo "reima.kokko@valolink.fi ssh-ed25519 AAAA…" > /etc/hs/allowed_signers`.
+GitHub: 2FA, branch protection on `main` (no force-push), read-only deploy keys instead of personal
+keys.
 
-**Not in the watch:** the disk-wide API-key grep (too slow for cron; run by hand when needed) and
-WordPress integrity (`wp core verify-checksums` calls out to api.wordpress.org; belongs in `hs check`
-per site, §8).
+### 14. Smaller attack surface — built
 
-**Rollout:** build and test on hzdemolink (a clean run after `--baseline` must report nothing; place
-a harmless file named like an IOC, e.g. `/usr/lib/__test/x`, and confirm a critical), then deploy with
-`install-scripts.sh` and run `--full` + `--baseline` on each box after reviewing its findings.
+- Operation `tmp-noexec`: /dev/shm remounted `noexec,nosuid,nodev` now, /tmp a RAM-backed tmpfs with
+  the same options from the next boot, apt pointed at /var/tmp. Check `tmp.noexec`.
+- Operation `remove-service`: Dovecot, ClamAV, SpamAssassin, vsftpd, and now ProFTPD (only when no
+  domain has an FTP user) and BIND (only when the box hosts no DNS zone); `services.idle` reports the
+  unused ones.
+- Operation `pma-restrict`: phpMyAdmin (answering at `/phpmyadmin/` on every site domain) limited to
+  admin networks in both its nginx and Apache includes, between `hs:pma` markers; config tests before
+  each reload. Check `web.phpmyadmin`.
+- Check `php.functions` / operation `php-functions`: exec, system, passthru, shell_exec, proc_open,
+  popen and pcntl_exec disabled for every PHP-FPM version (Hestia's installer already does this for the
+  versions it installs; the check keeps it so).
+- Panel users: two-factor login for every account that logs in, login disabled for accounts nobody
+  uses (`hestia.2fa`); the API off or limited (`hestia.api`).
 
-## Now (this week)
+### 15. Backups an attacker cannot delete — manual
 
-### 1. Keep the web terminal off, and check it stays off
+Storage Box snapshots on every subaccount (Hetzner console; not visible from the box, so not
+checked). Every snapshot of the three boxes since May contains the implants and webshells: a restore
+needs the indicator list in hand (`hs check --section security` right after restoring).
 
-- Done 2026-09-25 on alavus and hzweb1 (`v-delete-sys-web-terminal`), hzdemolink earlier. The other
-  boxes never had the package.
-- **hs check `hestia.web-terminal`:** `Fail` when `WEB_TERMINAL='true'` or `hestia-web-terminal` is
-  active; `Fail` (not Warn) when the installed package version is below 1.0.3. `Fix`:
-  `v-delete-sys-web-terminal`. A Hestia upgrade must not be able to bring it back unnoticed.
-- If a browser terminal is ever needed again: enable, use, disable in the same session.
+## The three compromised boxes
 
-### 2. Panel, SSH and streamer only from the admin network
-
-The panel on :8083 is open to the internet on every box today, and so is SSH (brute-force noise in
-every auth log). The next panel bug is the same story as the web terminal.
-
-- **Recommended: Tailscale on every box** (the operator already uses it). Allow :8083, :22 and :8091
-  only on `tailscale0` plus the EngineLink host, drop them on the public interface.
-- **Fallback:** Hestia firewall rules allowing :8083/:22 only from the admin IP ranges.
-- Keep a documented break-glass path (the provider's web console) in the same doc as the rule, since
-  a Tailscale outage must not lock everyone out.
-- **hs check `panel.exposure`:** warn when :8083 or :22 accept from `0.0.0.0/0` in `iptables -S`.
-- Where: `hs op panel-restrict` (writes the Hestia firewall rules, shows the break-glass note first).
-
-### 3. SSH: key-only, no personal keys on servers
-
-- `PasswordAuthentication no` everywhere. hzdemolink still had `yes`; `hs op ssh-keys-only` already
-  exists and refuses unless a key login is proven. Add `PermitRootLogin prohibit-password`,
-  `KbdInteractiveAuthentication no`, `MaxAuthTries 3`, `AllowAgentForwarding no` to the same drop-in.
-- **Never copy a personal private key to a server.** `id_valolink` was on hzdemolink (for an rsync),
-  hzweb1 (a migration from web1) and twice on alavus. For server-to-server copies, generate a
-  throwaway key on the *destination*, add its public half to the source's `authorized_keys` with
-  `from="<dest-ip>",restrict`, and remove both when done. `v-wp-migrate-site.sh` and the migration
-  docs should say so.
-- **hs check `ssh.private-keys`:** list private key files under `/root/.ssh` and `/home/*/.ssh`;
-  `Fail` for any key whose comment or fingerprint is not in an allowlist of automation keys
-  (`/root/.ssh/storagebox`).
-- **hs check `ssh.authorized-keys`:** fingerprints of every `authorized_keys` line, compared with the
-  previous run; any new line is a finding with the file, fingerprint and comment. Keys are per-server
-  now (`ssh-keyswap`, 2026-09-25), so the expected set per box is small and known.
-
-### 4. Outbound traffic: allow known ports, log the rest
-
-Every connection the attackers needed went to non-standard ports: C2 on :8000 and :50051, the mining
-pool on :8444, tools from :18888. A port allowlist on `OUTPUT` would have cut all of it, without the
-maintenance cost of a destination allowlist (WordPress plugins call too many APIs for that).
-
-- Allow: loopback, established/related, DNS 53, NTP 123/udp, HTTP 80, HTTPS 443, SMTP submission
-  587/465 (relay), Storage Box 23, SSH 22 (git and migrations), the MariaDB/Redis ports on
-  localhost only. Log and drop everything else.
-- Roll out in two steps: a week of `LOG` only (`hs check egress` reports what would have been
-  dropped), then `DROP`.
-- Where: the same `/usr/local/hestia/data/firewall/custom.sh` mechanism already carrying the C2 block
-  (it survives `v-update-firewall` and reboots). Generate it from a template in `templates/firewall/`
-  so every box gets the same rules; the C2 block becomes one line of it.
-- Limitation: the Realm agent can also tunnel over DNS and ICMP. The port filter does not stop those;
-  the detection in §8 has to.
-
-### 5. Secrets never on a command line
-
-`setup-restic-backup.sh --password <value>` put the `u626683-sub3` password into hzdemolink's
-`/root/.bash_history`, which the attackers had root on.
-
-- `setup-restic-backup.sh`: make `--password` take no value and read it with `read -rs` (or from
-  `HS_SECRET_STORAGEBOX`), and refuse a value on argv with a message that says why. **Done
-  (`1564830`):** `--password` already took no value and prompted (or read `SB_PASS`); the password had
-  been typed after it by mistake, and the script then echoed it back as "unknown argument". A word
-  after `--password` (or `--password=…`) is now refused without being printed, the message says to
-  change the password and clear the history line, and unknown bare arguments are never echoed.
-  hs's `restic-setup` form takes the password masked and passes it in `SB_PASS`.
-- Every box: `HISTCONTROL=ignoreboth` in `/etc/profile.d/`, so a command typed with a leading space
-  is not saved.
-- `install-scripts.sh` prints the streamer token to stdout; when `v-hestiascripts-update` runs it
-  under `systemd-run`, that output lands in the journal. Print only on a TTY.
-
-### 6. Streamer: fail closed
-
-- `main.go` skips the token check when `HESTIA_STREAMER_TOKEN` is unset. Refuse to start instead
-  (log why), so a missing env file is an outage, not an open root API.
-- Listen on a configured address (the Tailscale IP or the interface facing EngineLink) instead of
-  `:8091` on every interface. The firewall rule is then the second layer, not the only one.
-- `v-hestiascripts-update` is on the allowlist and runs `git pull` + `install-scripts.sh` as root:
-  whoever can push to `valolink/hestiascripts` gets root on every box at the next update. Until
-  commits are signed and verified (§13), remove it from the allowlist and update over SSH.
-- Once `hs serve` replaces the streamer, carry these three over, not the old defaults.
-
-### 7. Nothing downloadable that should not be
-
-On 2026-09-25, 23 dumps/archives on hzweb1 and 15 on hzdemolink were moved out of `public_html`.
-Scanners had already fetched `staging.valolink.fi/db.sql` (the valolink.fi database with admin
-hashes) and several 5–54 MB `debug.log` files.
-
-- `templates/nginx/wp-secure-snippet.conf` denies `.sql` and `.log` but not archives. Extend the
-  extension rule with `gz|tgz|tar|zip|7z|rar|wpress|sql\.gz|dump`, scoped so plugin downloads under
-  `wp-content/uploads` still work where a site sells files (decide per site; default deny at the
-  web root and directly under `wp-content/`).
-- The rules only exist in domains on a hardened template. `debug.log` was served on domains that were
-  not. The existing `web.exposure` finding needs an **alert**, not just a line in `hs check`.
-- `hs fix web.exposure`: move each file to `<domain>/private/moved-from-public-<date>/` with a
-  `MANIFEST.tsv`, as done by hand today. Remember nginx's `open_file_cache_valid 60s`: recheck the URL
-  after a minute.
-- `WP_DEBUG_LOG` → a path under `private/` when debugging, never the default `wp-content/debug.log`.
-- Staging and demo domains: HTTP basic auth by default (`v-wp-staging-create.sh`), so scanners get a
-  401 instead of the site.
-
-## Next (this month)
-
-### 8. Detection: `hs check` looks for what we found by hand
-
-Everything below is read-only and bounded, so it fits the existing check model, and each one has a
-real positive from this incident. They only help if a new `Fail` reaches a person: EngineLink should
-notify on any `security` finding that was not there on the previous run.
-
-| Check ID | Looks for | Would have caught |
-|---|---|---|
-| `persist.unowned-binaries` | ELF executables and `.so` files under `/usr`, `/etc`, `/opt`, `/var`, `/root`, `/tmp`, `/dev/shm` that no package owns (merged-/usr aware), minus an allowlist (`rclone`, `hs`, `hestia-streamer`) | `ulibd`, the second agent, `__root`, `__hesti`, `chrony2` |
-| `persist.units` | unit files and timers under `/etc/systemd/system` and `/usr/lib/systemd/system` not owned by a package, minus our own (`hestia-streamer`, `hs`) | `ulibd.service`, `systemd-journal-upload.service` and its renamed copies |
-| `persist.preload` | `/etc/ld.so.preload` exists at all | the rootkit preload (2026-05-29) |
-| `persist.processes` | processes whose binary is deleted, lives in `/tmp`, `/var/tmp` or `/dev/shm`, or is unowned; sustained CPU > 50% from an unknown binary | `/tmp/a.elf`, the miner |
-| `persist.outbound` | established or pending connections to ports outside the §4 allowlist | the implant's SYNs to :8000 |
-| `persist.accounts` | uid-0 accounts other than root, new login-shell users, sudoers drop-ins not from packages or Hestia | — (clean here, cheap to keep clean) |
-| `web.root-owned` | files owned by root inside any `public_html` | every webshell copy was root-owned |
-| `web.webshell` | known incident hashes and markers, plus PHP with `eval`/`assert` on request data outside `wp-includes`/`wp-admin` | the `_sauth` webshell (maldet found nothing) |
-
-Also feed the incident hashes into maldet's custom signatures
-(`/usr/local/maldetect/sigs/custom.md5.dat`): maldet scanned these boxes daily from 06-10 and found
-nothing, because its signatures did not know this shell.
-
-### 9. Package integrity
-
-`dpkg --verify` (or `debsums -s`) weekly, as `hs check pkg.integrity`: any modified file from a
-package, outside a dpkg run, is a finding. It would not have caught this incident (the attackers added
-files rather than modifying packaged ones), but it is the check for the next rootkit that does.
-
-### 10. Keep logs long enough to answer questions
-
-Most boxes kept 2–6 weeks of journal and `auth.log`; the web logs rotate after five weeks. That is why
-the May shells could only be reconstructed on the two boxes whose journal happened to reach back, and
-why nobody can say who opened phpMyAdmin on hzdemolink on 06-07.
-
-- journald: `Storage=persistent`, `SystemMaxUse=1G`, `MaxRetentionSec=1year` (drop-in in
-  `templates/journald/`).
-- logrotate: `/var/log/apache2/domains/*.log` and `/usr/local/hestia/log/*` to 26 weeks, compressed.
-- Better: ship `auth`, `sshd`, `server.js`, Hestia `auth.log` and the panel access log off the box
-  (to EngineLink or a small Loki), because root on the box can delete local logs. The attackers did
-  not bother this time.
-
-### 11. A small audit trail
-
-`auditd` with a minimal rule set (not a full-disk watch): writes under `/etc/systemd/system`,
-`/usr/lib/systemd/system`, `/etc/ld.so.preload`, `/etc/cron*`, `/var/spool/cron`, every
-`authorized_keys`, `/etc/passwd` and `/etc/shadow`; `execve` from `/tmp`, `/var/tmp` and `/dev/shm`;
-kernel module loads. That gives the "who ran what, when" that bash history only half-answered here.
-
-### 12. Tripwires the attackers would have hit
-
-Their first commands were `cat /root/.aws/credentials`, `env | grep KEY`, and a disk-wide grep for
-`AKIA`, `sk-ant-`, `sk-proj-`, `ghp_`. A **canary** AWS key (canarytokens.org, free) in
-`/root/.aws/credentials`, and a canary token in a `.env`, alert the moment someone uses what they
-found. Cheap, no false positives, and it would have fired on 2026-05-20.
-
-### 13. Signed code on the path to root
-
-hestiascripts and valolink-plugin both deploy with root or site-level privileges, and no commit is
-signed (146 + 44 since May, all unsigned, all by the operator — nothing foreign was found).
-
-- Sign commits (SSH signing with a dedicated key, which fits the new per-purpose keys).
-- `v-hestiascripts-update`: `git verify-commit HEAD` after the pull, against an allowed-signers file
-  shipped in the repo; refuse to install on failure.
-- GitHub: 2FA on the account, branch protection on `main` (no force-push), and read-only deploy keys
-  on the boxes instead of a personal key.
-
-### 14. Smaller attack surface on every box
-
-- `/tmp` and `/dev/shm` as `tmpfs` with `noexec,nosuid,nodev`. The attackers ran `/tmp/a.elf` and
-  `/tmp/rg`; automated tooling fails on `noexec`. Test first: apt and a few installers want to
-  execute from `/tmp` (`APT::ExtractTemplates::TempDir` fixes apt).
-- Turn off what a box does not serve: exim/dovecot/roundcube without mail domains, proftpd without
-  FTP users, named when DNS is elsewhere, clamav when nothing uses it. `v-server-audit` already
-  reports "resident services with nothing to serve"; give it an `hs fix`.
-- phpMyAdmin answers at `/phpmyadmin/` on every site domain (checked 2026-09-25 on valolink.fi,
-  rainset.fi, reservationat8ight.fi, alavusikkunat.fi — all 200), and its login is a database
-  password prompt anyone can brute-force. Restrict the alias to the admin network (§2) or disable it.
-  Roundcube lives on `webmail.<domain>` for mail domains only; restrict it the same way where used.
-- PHP-FPM pools: `disable_functions = exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec`
-  where the site does not need them (a webshell loses most of its use), and confirm `open_basedir`
-  is set per pool. Needs a per-site opt-out for the few plugins that shell out.
-- Hestia panel users: 2FA for `admin`/`valolink`, remove unused panel users, per-user login IP
-  lists where Hestia supports them. The API is already effectively off (`API_ALLOWED_IP=''` denies
-  every address); keep it that way.
-
-### 15. Backups an attacker cannot delete
-
-With root on a box, the attackers also held its Storage Box credentials. Per-box subaccounts limit
-the blast radius, but they can still delete that box's repository.
-
-- Enable Storage Box snapshots on every subaccount (already a follow-up in `setup-restic-backup.sh`;
-  make `hs check backups.snapshots` report it).
-- Remember that every snapshot of the three boxes since May contains the implants and webshells. A
-  restore needs the incident IOC list in hand, or it restores the backdoor with the site.
-
-## Later (with the rebuilds)
-
-- **Rebuild** hzdemolink, alavus and hzweb1 from scratch. The containment removed everything we
-  know of; four months of root means we cannot prove there is nothing we do not know of.
-- **One baseline, applied at install:** an `hs install` profile that applies §1–§7 and §10–§14 on a
-  fresh Hestia box, so a new server starts hardened instead of being hardened later (or not).
-- **External view:** a weekly port scan of every box from the EngineLink host, compared with the
-  expected set (80, 443, and nothing else on the public interface once §2 is done).
+hzdemolink, alavus and hzweb1 had four months of root access by someone else. The containment removed
+everything known; nothing can prove there is nothing unknown. Rebuilding them from scratch is the
+operator's decision; everything in this document applies to them the same way whether or not they
+are rebuilt, and the watch is how an unknown leftover would show itself.
 
 ## Findings in this repo's own code
 
-| Where | Finding | Change |
+| Where | Finding | Status |
 |---|---|---|
-| `main.go` | token check skipped when the env var is unset | refuse to start without a token (§6) |
-| `main.go` | `ListenAndServe(":8091")` on every interface, as root | configurable listen address (§6) |
-| `main.go` | `v-hestiascripts-update` allowlisted → root via git | remove until commits are verified (§6, §13) |
-| `install-scripts.sh` | prints the token unconditionally | print only on a TTY (§5) |
-| `install-scripts.sh` | EngineLink IP hardcoded (`NUXT_IP`); rule only added when no :8091 rule exists, so an IP change leaves the old one | read the IP from config; replace the rule when it differs |
-| `setup-restic-backup.sh` | `--password <value>` ends up in shell history | refused without echo (`1564830`, §5) |
-| `setup/security.sh` (run.sh) | edits `sshd_config` directly, which a `sshd_config.d/` drop-in silently overrides | superseded by `hs op ssh-keys-only`; retire the run.sh path |
-| `templates/nginx/wp-secure-snippet.conf` | archives not denied | extend the extension rule (§7) |
+| `main.go` | token check skipped when the env var is unset | fails closed |
+| `main.go` | `ListenAndServe(":8091")` on every interface, as root | `HESTIA_STREAMER_ADDR` |
+| `main.go` | `v-hestiascripts-update` allowlisted → root via git | updates verified against box-local signers |
+| `install-scripts.sh` | prints the token unconditionally | only to a terminal |
+| `install-scripts.sh` | EngineLink IP hardcoded (`NUXT_IP`); the rule is only added when no :8091 rule exists, so an IP change leaves the old one | open |
+| `setup-restic-backup.sh` | a password typed after `--password` ended up in shell history and was echoed | refused without echo (`1564830`) |
+| `setup/security.sh` (run.sh) | edits `sshd_config` directly, which a `sshd_config.d/` drop-in silently overrides | superseded by `ssh-keys-only` |
+| `templates/nginx/*` | archives not denied | denied |
+| run.sh `setup/nginx-templates.sh` | Apache wp-secure written where php-fpm boxes never read it, HTTPS copy without rules | fixed in `hs templates install` |
+| hs fix `web-terminal-update` | repaired and restarted the web terminal | replaced by `web-terminal-off` |
 
 ## Open questions for the operator
 
-- Tailscale on every box (and on the EngineLink host), or IP allowlists? Tailscale is the stronger
-  and simpler option if the break-glass path is acceptable.
-- Which sites legitimately serve archives from `wp-content/uploads` (downloadable products)? They need
-  an exception to the archive deny rule.
+- Tailscale on every box (and on the EngineLink host), or address allowlists, for `panel-restrict` and
+  `pma-restrict`?
+- Which sites legitimately serve archives directly from the web root or `wp-content/` (outside
+  uploads)? They need an exception to the archive rule.
 - Where should off-box logs go: EngineLink, or a separate small log host?
+- Signing key for §13: a dedicated SSH key for commit signing, and who else commits.

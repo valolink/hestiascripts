@@ -351,6 +351,20 @@ Reima: "id like to migrate all of the interactive stuff from the old hestiascrip
 
 Tested on hzdemolink: dry runs of every operation against the live box; real runs of `fpm-profile` (standard, 8.3), `hs f2b repair` + reload, and `web-templates`. The other change operations are covered by tests and dry runs only. `run.sh` and `setup/` stay in the repo for boxes without hs until phase 5.
 
+## Security hardening (2026-09-25)
+
+Built from docs/security-hardening.md after the May 2026 compromise — that document is the record
+(each control, its check, its operation, what is open). What it added to hs: checks for the web
+terminal, Hestia advisories (live from GitHub), API, panel 2FA, IPv6 exposure, SSH/panel exposure,
+egress, private and authorized keys, persistence (indicators, processes, outbound, accounts, cron,
+unpackaged binaries and units, webshells, root-owned PHP, dpkg --verify), log retention, auditd,
+/tmp noexec, PHP shell functions, phpMyAdmin exposure, signed updates; `hs watch` (new-since-accepted
+findings, mailed once a day, JSON line, `v-server-ioc-watch`); `hs firewall` (IPv6 mirror of Hestia's
+public rules, outbound log/drop, C2 block list; custom.sh hook + boot unit); `hs conf block`; the
+indicator list `internal/ioc/indicators.txt`; operations for all of it. The streamer fails closed
+(both implementations), and `v-hestiascripts-update` installs only commits signed by a key in
+`/etc/hs/allowed_signers`.
+
 ## Open questions
 
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.
