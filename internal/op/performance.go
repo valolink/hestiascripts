@@ -111,7 +111,7 @@ func versionField(label, help string, all bool, pick func(ctx context.Context, e
 			for _, v := range fpmVersions(env) {
 				out = append(out, [2]string{v, label2(ctx, env, v)})
 			}
-			if all && len(out) > 1 {
+			if all && len(out) > 0 {
 				out = append(out, [2]string{"all", "every version above"})
 			}
 			return out
@@ -440,6 +440,11 @@ func init() {
 				return nil, fmt.Errorf("under 128M is too small to be useful")
 			}
 			c := dbClient(env)
+			out, _ := env.Sys.Run(ctx, c, "-N", "-B", "-e", "SELECT @@innodb_buffer_pool_size")
+			running, _ := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+			if box.MariaDBBufferConf(env) == v["size"] && running == sizeBytes(v["size"]) {
+				return nil, nil
+			}
 			return []Step{
 				{Why: "resize the running pool (online, no restart)", Argv: []string{c, "-e", fmt.Sprintf("SET GLOBAL innodb_buffer_pool_size = %d", sizeBytes(v["size"]))}},
 				confSet("keep it across restarts", mariadbCnf, conf.Opts{Section: "mysqld", Style: conf.INI}, "innodb_buffer_pool_size", v["size"]),

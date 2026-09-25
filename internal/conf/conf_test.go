@@ -93,10 +93,25 @@ func TestSetFileBacksUpOutsideTheDirectoryAndSkipsNoops(t *testing.T) {
 
 func TestPoolTemplateKeysStayTogether(t *testing.T) {
 	in := "[%domain%]\npm = ondemand\npm.max_children = 8\npm.max_requests = 4000\npm.process_idle_timeout = 10s\n\nenv[TMP] = /tmp\n"
-	out, _ := Set(in, Opts{Style: INI, After: "pm.max_children"}, "pm", "dynamic", "pm.start_servers", "4")
+	out, _ := Set(in, Opts{Style: INI, After: "pm.max_children"}, "pm", "dynamic", "pm.start_servers", "4", "pm.min_spare_servers", "2")
 	out, _ = Unset(out, Opts{Comment: ";"}, "pm.process_idle_timeout")
-	want := "[%domain%]\npm = dynamic\npm.max_children = 8\npm.start_servers = 4\npm.max_requests = 4000\n;pm.process_idle_timeout = 10s\n\nenv[TMP] = /tmp\n"
+	want := "[%domain%]\npm = dynamic\npm.max_children = 8\npm.start_servers = 4\npm.min_spare_servers = 2\npm.max_requests = 4000\n;pm.process_idle_timeout = 10s\n\nenv[TMP] = /tmp\n"
 	if out != want {
 		t.Fatalf("got\n%s", out)
+	}
+}
+
+func TestBackupsWithinOneSecondAreAllKept(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HS_STATE_DIR", filepath.Join(dir, "state"))
+	p := filepath.Join(dir, "x.conf")
+	os.WriteFile(p, []byte("a 1\n"), 0o644)
+	_, b1, _ := SetFile(p, Opts{}, "a", "2")
+	_, b2, _ := SetFile(p, Opts{}, "a", "3")
+	if b1 == b2 {
+		t.Fatalf("same backup %s", b1)
+	}
+	if b, _ := os.ReadFile(b1); string(b) != "a 1\n" {
+		t.Errorf("first backup holds %q", b)
 	}
 }

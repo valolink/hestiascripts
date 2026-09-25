@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -177,6 +178,9 @@ func Set(content string, o Opts, kv ...string) (string, []Change) {
 			nl := render(o.Style, key, val)
 			lines = append(lines[:at], append([]string{nl}, lines[at:]...)...)
 			changes = append(changes, Change{Key: key, New: nl})
+			if o.After != "" {
+				o.After = key // the next missing key follows this one
+			}
 		}
 	}
 	out := strings.Join(lines, "\n")
@@ -261,6 +265,14 @@ func write(path, content string, mode os.FileMode) (string, error) {
 			uid, gid = int(s.Uid), int(s.Gid)
 		}
 		bak = BackupPath(path, time.Now())
+		// Several steps can edit one file within a second: never overwrite
+		// an earlier backup — it is the state before the first of them.
+		for n := 2; ; n++ {
+			if _, err := os.Stat(bak); os.IsNotExist(err) {
+				break
+			}
+			bak = BackupPath(path, time.Now()) + "-" + strconv.Itoa(n)
+		}
 		if err := os.MkdirAll(filepath.Dir(bak), 0o700); err != nil {
 			return "", err
 		}

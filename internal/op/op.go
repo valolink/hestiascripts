@@ -215,6 +215,15 @@ func (o Op) Defaults(ctx context.Context, env *check.Env, t Target) Values {
 		if f.Default != nil {
 			v[f.Key] = f.Default(ctx, env, t)
 		}
+		switch {
+		case v[f.Key] != "":
+		case f.Kind == Choice && f.Choices != nil:
+			if cs := f.Choices(ctx, env, t); len(cs) > 0 {
+				v[f.Key] = cs[0][0]
+			}
+		case f.Kind == Bool:
+			v[f.Key] = "no"
+		}
 	}
 	return v
 }
