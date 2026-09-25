@@ -177,7 +177,12 @@ maintenance cost of a destination allowlist (WordPress plugins call too many API
 `/root/.bash_history`, which the attackers had root on.
 
 - `setup-restic-backup.sh`: make `--password` take no value and read it with `read -rs` (or from
-  `HS_SECRET_STORAGEBOX`), and refuse a value on argv with a message that says why.
+  `HS_SECRET_STORAGEBOX`), and refuse a value on argv with a message that says why. **Done
+  (`1564830`):** `--password` already took no value and prompted (or read `SB_PASS`); the password had
+  been typed after it by mistake, and the script then echoed it back as "unknown argument". A word
+  after `--password` (or `--password=…`) is now refused without being printed, the message says to
+  change the password and clear the history line, and unknown bare arguments are never echoed.
+  hs's `restic-setup` form takes the password masked and passes it in `SB_PASS`.
 - Every box: `HISTCONTROL=ignoreboth` in `/etc/profile.d/`, so a command typed with a leading space
   is not saved.
 - `install-scripts.sh` prints the streamer token to stdout; when `v-hestiascripts-update` runs it
@@ -327,7 +332,7 @@ the blast radius, but they can still delete that box's repository.
 | `main.go` | `v-hestiascripts-update` allowlisted → root via git | remove until commits are verified (§6, §13) |
 | `install-scripts.sh` | prints the token unconditionally | print only on a TTY (§5) |
 | `install-scripts.sh` | EngineLink IP hardcoded (`NUXT_IP`); rule only added when no :8091 rule exists, so an IP change leaves the old one | read the IP from config; replace the rule when it differs |
-| `setup-restic-backup.sh` | `--password <value>` ends up in shell history | prompt or env var only (§5) |
+| `setup-restic-backup.sh` | `--password <value>` ends up in shell history | refused without echo (`1564830`, §5) |
 | `setup/security.sh` (run.sh) | edits `sshd_config` directly, which a `sshd_config.d/` drop-in silently overrides | superseded by `hs op ssh-keys-only`; retire the run.sh path |
 | `templates/nginx/wp-secure-snippet.conf` | archives not denied | extend the extension rule (§7) |
 
