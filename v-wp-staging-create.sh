@@ -146,6 +146,25 @@ redis_next_free_db() {
 # Bind + remount,ro is the historically-portable way; a single mount -o ro,bind
 # is silently ignored on older util-linux. The probe runs as root so the test
 # is meaningful even when POSIX perms would already block writes for DEST_USER.
+# Persist the read-only uploads mount across reboots with a tagged fstab line.
+# `nofail` keeps a missing directory from blocking boot; util-linux applies the
+# `ro` to a bind mount itself. Without this a reboot silently turns staging's
+# uploads into its own writable, nearly empty folder (kuumalahde, 2026-09-25).
+FSTAB_TAG="# hestia-staging-uploads"
+persist_uploads_mount() {
+  local src="$1" dst="$2"
+  sed -i "\#[[:space:]]$dst[[:space:]]#d" /etc/fstab
+  printf '%s %s none bind,ro,nofail 0 0 %s %s\n' "$src" "$dst" "$FSTAB_TAG" "$dst" >> /etc/fstab
+  systemctl daemon-reload 2>/dev/null || true
+  findmnt --verify --tab-file /etc/fstab >/dev/null 2>&1 \
+    || echo "       ⚠ findmnt --verify reports a problem in /etc/fstab — check it before the next reboot."
+}
+forget_uploads_mount() {
+  local dst="$1"
+  sed -i "\#[[:space:]]$dst[[:space:]]#d" /etc/fstab
+  systemctl daemon-reload 2>/dev/null || true
+}
+
 bind_mount_uploads_ro() {
   local src="$1" dst="$2"
   mount --bind "$src" "$dst"
@@ -292,6 +311,7 @@ if [ "$TEARDOWN" = true ]; then
       umount -l "$mp"
       check_status "Failed to unmount $mp — run manually: umount -l $mp"
     fi
+    forget_uploads_mount "$mp"
   done
 
   # Capture DB name from whichever directory has a wp-config.
@@ -771,7 +791,8 @@ mkdir -p "$NEW_UPLOADS"
 chown "$DEST_USER:$DEST_USER" "$NEW_UPLOADS"
 bind_mount_uploads_ro "$LIVE_UPLOADS" "$NEW_UPLOADS"
 echo "       ✓ $LIVE_UPLOADS mounted RO at $NEW_UPLOADS (write probe confirmed)"
-echo "       ⚠ Bind mount does not survive a server reboot — re-run to refresh."
+persist_uploads_mount "$LIVE_UPLOADS" "$NEW_UPLOADS"
+echo "       ✓ persisted in /etc/fstab (bind,ro,nofail) — survives reboots"
 
 # [11/11] Reload PHP-FPM (so workers drop stale wp-config) and flush every cache.
 # This must happen on BOTH staging and live: staging because its workers may
