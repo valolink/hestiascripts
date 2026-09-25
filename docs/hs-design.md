@@ -133,6 +133,12 @@ hs site <domain> info|update|cache-flush|harden|...
 hs backup status|run|restore|dr-script
 hs serve                        the streamer (systemd unit)
 hs self update                  git pull + install (replaces v-hestiascripts-update)
+hs fix ID [SUBJECT] [--dry-run]  a finding's fix
+hs op ID [--site D] k=v … [--dry-run]   an operation (run.sh's menus)
+hs conf set|unset|install|get   config edits with before → after and backups
+hs apt preview|repos            pending updates classified; failing repositories explained
+hs f2b repair|reload|restart    fail2ban repairs, bounded reload
+hs templates install            web templates, verified
 hs version
 ```
 
@@ -308,6 +314,42 @@ Read from the redis-cache plugin's README, FAQ and CHANGELOG and its 2.8.0 drop-
 - `redis.sites` is now one finding per site listing every deviation (shared database — Fail when the prefix is shared too —, missing prefix, no MAXTTL, selective flush, group flush off on a shared database, drop-in behind the plugin) plus "more sites than databases". `redis` carries hit rate, FLUSHDB and Lua scans per hour, evictions, and warns on blocking flushes when a database exceeds 50k keys.
 - Fixes: `redis-own-db` (free database by the same rule as v-wp-redis-install, prefix/MAXTTL on the way, old keys removed from the shared database by prefix with SCAN + UNLINK — never FLUSHDB of a shared database), `redis-maxttl` / `redis-maxttl-all` (background FLUSHDB only on an own database), `redis-no-selective`, `redis-dropin` (`wp redis update-dropin`), `redis-group-flush` (own-database sites only, offered when Lua scans are costly), `redis-lazyfree` (CONFIG SET + redis.conf), `redis-databases`.
 - `v-server-audit` no longer advises the guard constant; it reports sites without MAXTTL and sites sharing a database.
+
+## run.sh's menus → operations (2026-09-25)
+
+Reima: "id like to migrate all of the interactive stuff from the old hestiascripts to the tui". hs no longer runs anything in `setup/` — every menu item is an **operation** (`internal/op`): a form (each field with today's value beside it and a suggestion pre-filled), a plan computed from the live box with the same planner for preview and run, How / Undo text, and `hs op ID [--site D] key=value … [--dry-run]` for the CLI. Enter on a finding opens the operation that resolves it (`Resolves` / `Applies`). The source was a full inventory of every prompt in run.sh, setup/ and the prompting scripts.
+
+| run.sh | now |
+|---|---|
+| 2 WP-CLI | `wpcli` (install or `wp cli update`, wp-rocket-cli only if missing), `php-cli-functions` (Hestia's own CLI `disable_functions`, CLI php.ini only) |
+| 3 Redis | `redis-install` (cap, policy, lazyfree, PHP extension), `redis-memory` (live `CONFIG SET` + redis.conf — **no restart**; run.sh's restart emptied every cache), `redis-php-ext` |
+| 4 Fail2ban | `f2b-wp-jail`, `f2b-restart`, `f2b-jail-limits`; the repair logic is `hs f2b repair` (self-ban guard, ban mails off, xmlrpc filter line, jails without logs disabled — each change printed) and `hs f2b reload|restart` (killed after 3 s if stuck) |
+| 5 Maldet | `maldet-install` (+ ed, inotify-tools), `maldet-alerts` (detect-only kept as policy), `maldet-scan` — run.sh's scan passed a shell glob and maldet reads only `$1`, so it scanned the first site only (verified in maldet's source); now `maldet -a /home/?/web/?/public_html` |
+| 6 Netdata | `netdata-install`, `netdata-tune` (profile now `templates/netdata/netdata.conf`). "Open port 19999" dropped — the streamer proxies Netdata; the netdata fix closes such a rule |
+| 7 Security | `unattended` (scope field; `20auto-upgrades` from `templates/apt/` instead of the `dpkg-reconfigure` dialog), `swap` (refuses an existing /swapfile, fstab line once), `ssh-keys-only` |
+| 8 SMTP | `smtp-install` (refused where exim4 is installed — apt would remove Hestia's mail server), `smtp-relay` (API key a masked **secret**), `smtp-recipients` (no longer switches fail2ban to a mail per ban), `smtp-test` |
+| 9 PHP-FPM | `fpm-profile` (per version or all, per profile or all), `php-add-version` (Hestia's own `v-add-web-php` + redis extension, instead of run.sh's own sury repo steps) |
+| 10 OpCache | `opcache` (version or all; never lowers `max_accelerated_files`; graceful FPM reload) |
+| 11 MariaDB | `mariadb-buffer` (`SET GLOBAL` online resize + my.cnf — **no restart**; refuses > 75 % of RAM) |
+| 12 Templates | `web-templates` (cache-headers drop-in, then `hs templates install`), `web-rebuild` (rebuild domains on wp-* templates, `nginx -t` before reload) |
+| 13 Maintenance | `updates-preview` / `updates-apply` / `apt-changelog` (Go port of the apt classifier, `internal/aptinfo`), `apt-repos` (`hs apt repos`), `remove-service` (typed confirm; only clears a hestia.conf key that names that service), `filemanager-fix` (the SessionStorage.php shipped with the installed Hestia, not GitHub main) |
+| 14 Disk | `disk-apt`, `disk-journal`, `disk-wp-caches`, `disk-transients`, `disk-php-sessions`, `disk-wpcli-cache`, `log-trim` (truncate / keep 500 / cap with logcap — always in place), `logs-rotated`, `ncdu` (interactive op) |
+| 15 Audit | unchanged actions (`v-server-audit`, `v-server-memory`) |
+| v-wp-config | `wp-config` site form: the 17 defines, only changed ones written, `--raw` where PHP literals |
+| v-wp-clone-site, v-wp-staging-create, v-wp-migrate-site | `clone`, `staging`, `staging-teardown`, `migrate-finish` — forms over the scripts' flags; an overwrite switch makes the confirmation typed (`RiskOf`); teardown refuses a site that is not staging |
+| setup-restic-backup.sh | `restic-setup` (password a secret → `SB_PASS`; interactive because key mode may prompt remotely) |
+
+**Stays TTY-only, by design:** `v-restore-restic` (guided restore, its own typed confirmation), `make-restore-script.sh` (the output is a root credential — written to a file, never shown), `safe-reboot.sh` (the typed hostname is the last bail-out before its commit point; replacing it with the TUI's confirmation was declined).
+
+**Building blocks added:** `hs conf set|unset|install|get` (config edits keeping each line's form, missing keys after their commented example or `--after` a key, before → after printed, previous file under `/var/lib/hs/backups/<path>.<time>` — never next to the original, where jail.d or cron.d would read it; backups within one second never overwrite each other); `hs apt preview|repos`; `hs f2b`; `hs templates install`; secret fields (masked, passed as `HS_SECRET_<KEY>` in the environment, never in argv, the action log or the plan; `hs op` refuses one given as an argument); interactive operations (ncdu, restic onboarding) get the terminal; `RiskOf` for value-dependent confirmation.
+
+**Found while porting:**
+- Apache `wp-secure` was never usable on a php-fpm box: run.sh wrote it to `templates/web/apache2/`, but Hestia reads `apache2/$WEB_BACKEND/` (`is_web_template_valid`), and the HTTPS template's `<Directory %sdocroot%>` never matched the injection, so `wp-secure.stpl` had no rules. `hs templates install` writes both into `apache2/php-fpm/` (verified on hzdemolink). **These Apache rules have never served real traffic — test on staging before assigning.** The nginx templates came out byte-identical to the shell version.
+- hzdemolink's WordPress jail had no `ignoreip` (the 2026-07-05 self-ban guard); fixed there by `hs f2b repair`, and now a finding (`fail2ban`: "WordPress jail can ban this box's own addresses").
+- `smtp-recipients` in run.sh set `action = %(action_mwl)s` — the per-ban mail its own fail2ban repair turns off.
+- SSH: run.sh edited `sshd_config`, which a cloud image's `sshd_config.d/*PasswordAuthentication yes` silently overrides. `ssh-keys-only` writes `sshd_config.d/00-hs-keys-only.conf` (read first), refuses without an authorized key and a key login in the journal (30 days) or when this session came in by password, and runs `sshd -t` before reloading.
+
+Tested on hzdemolink: dry runs of every operation against the live box; real runs of `fpm-profile` (standard, 8.3), `hs f2b repair` + reload, and `web-templates`. The other change operations are covered by tests and dry runs only. `run.sh` and `setup/` stay in the repo for boxes without hs until phase 5.
 
 ## Open questions
 

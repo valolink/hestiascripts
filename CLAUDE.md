@@ -15,6 +15,7 @@ WordPress automation and streaming toolkit for **HestiaCP** (Hestia Control Pane
 
 - **Build:** `./build-hs.sh` (vet + tests + static build into `./hs`). Boxes have no Go toolchain, so the binary is committed like `hestia-streamer`: commit the source, run `./build-hs.sh`, commit `hs`.
 - **Install on a box:** `git pull`, then `bash install-v2.sh` (hs on PATH, `/var/lib/hs`, `/var/log/hs`); `--cron` refreshes results every 15 min; `--serve` runs the streamer as `hs serve` via a systemd drop-in that install-scripts.sh cannot overwrite (`--no-serve` reverts). `install-scripts.sh` (v1) is unchanged and still deploys the v-scripts.
+- **run.sh's menus are operations** (`internal/op`, `hs op --list`): forms with the current value per field, plans from the live box, How/Undo. hs runs nothing from `setup/` any more; `run.sh` stays for boxes without hs until phase 5. Config edits go through `hs conf` (backups under `/var/lib/hs/backups`), secrets through `HS_SECRET_*` env vars. Map and findings: `docs/hs-design.md` → "run.sh's menus → operations".
 - **Principles:** OK means a probe saw it working; checks are read-only and bounded; every action and fix shows its exact commands (and, for fixes, how and how to undo) before running; everything run is logged to `/var/log/hs` with a transcript; files are moved, never deleted.
 
 ## Repo structure
@@ -160,7 +161,7 @@ So there are two proxy templates, and the choice is about **where cart state is 
 | `wp-rocket` | no | cart state repaints client-side (block mini-cart, cart fragments). Best hit rate — the default. |
 | `wp-rocket-cartbypass` | yes | cart state is rendered **server-side** on cacheable pages (themed header count, `[woocommerce_cart]` shortcode), where no client-side repaint can help because the wrong HTML is already cached. |
 
-`wp-rocket-cartbypass.{tpl,stpl}` is **generated** from `wp-rocket.{tpl,stpl}` by `_nginx_install_profiles`, via one anchored `sed` on `comment_author_)`, verified three ways. Two hand-maintained copies of a 130-line template drift — this repo has already shipped a template whose security rules silently went missing.
+`wp-rocket-cartbypass.{tpl,stpl}` is **generated** from `wp-rocket.{tpl,stpl}` by `hs templates install` (and run.sh's `_nginx_install_profiles`), via one anchored `sed` on `comment_author_)`, verified three ways. Two hand-maintained copies of a 130-line template drift — this repo has already shipped a template whose security rules silently went missing.
 
 #### The bypass is two layers, and nginx is only the first
 
