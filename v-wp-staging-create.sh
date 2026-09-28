@@ -794,6 +794,14 @@ $WP_STG config set WP_ENVIRONMENT_TYPE "staging" --type=constant --quiet
 $WP_STG config set DISABLE_WP_CRON     "true"    --type=constant --raw --quiet
 $WP_STG config set DISALLOW_FILE_MODS  "true"    --type=constant --raw --quiet
 
+# PHP errors go to a log, never onto the page: EngineLink's update run
+# empties it before updating staging and reads it after the page checks
+# (v-wp-debug-log). private/ is outside the docroot, inside open_basedir.
+echo "       Debug log: private/wp-debug.log (display off)..."
+$WP_STG config set WP_DEBUG         "true"  --type=constant --raw --quiet
+$WP_STG config set WP_DEBUG_DISPLAY "false" --type=constant --raw --quiet
+$WP_STG config set WP_DEBUG_LOG     "/home/$DEST_USER/web/$NEW_WEB_DOMAIN/private/wp-debug.log" --type=constant --quiet
+
 # [5/11] (Re)create the staging database.
 echo "[5/11] Creating staging database ($NEW_DB_NAME)..."
 v-add-database "$DEST_USER" "$NEW_DB_BASENAME" "$NEW_DB_BASENAME" "$NEW_DB_PASS"
