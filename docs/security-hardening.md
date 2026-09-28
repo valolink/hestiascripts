@@ -109,8 +109,9 @@ The firewall block list reads the same hosts. A path that a Debian package owns 
 Check `hestia.web-terminal`: Fail when `WEB_TERMINAL='true'`, the service is active or anything
 listens on :8085; the fix `web-terminal-off` runs `v-delete-sys-web-terminal` and makes sure the unit
 is down. hs's earlier fix that repaired and restarted a failing web-terminal unit is gone — a failed
-unit now offers turning it off. If a browser terminal is ever needed: enable, use, disable in the same
-session.
+unit now offers turning it off. Hestia's switch leaves the package installed; a build older than
+1.0.3 left behind (alavus had 1.0.2) is a Warn with the fix `web-terminal-purge`. If a browser
+terminal is ever needed: enable, use, disable in the same session.
 
 **Found 2026-09-25:** hzdemolink still has `WEB_TERMINAL='true'` with package 1.0.3 installed. The
 service is not running only because 1.0.3 shipped without `node-pty`; the pending upgrade to 1.0.5
@@ -231,8 +232,11 @@ also tunnel over DNS and ICMP; the port filter does not stop those, the detectio
 Known-good unpackaged files are built in (hs, the checkout the v-scripts link into, rclone, maldet,
 Hestia's and cloud-init's sudoers files, Postfix's chroot copies); others go in
 `/etc/hs/unowned.allowed` (operation `persist-allow`). On hzdemolink the only remaining findings are
-two cron entries to review, two modified package files (`/usr/bin/restic` after a self-update,
-Hestia's own nginx.conf) and the root-owned boostwith sites.
+two cron entries to review, `/usr/bin/restic` and the root-owned boostwith sites. The panel's
+nginx.conf is known good (Hestia writes the box's DNS resolvers into it). `/usr/bin/restic` differs
+from Debian's package on every box set up for restic: Hestia's installer and `v-add-backup-host-restic`
+run `restic self-update`. On hzdemolink the binary was verified byte-identical to the official 0.19.1
+release (2026-09-28); accept it per box with `persist-allow` after such a check.
 
 Operation `maldet-signatures` adds the webshell marker to maldet's `custom.hex.dat` (maldet takes
 custom signatures as MD5 or hex only). maldet scanned these boxes daily from June and found nothing.

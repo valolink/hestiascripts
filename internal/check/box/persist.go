@@ -103,7 +103,10 @@ func allowPrefixes(env *Env) []string {
 		// installed by maldet's own install.sh
 		"/usr/local/maldetect/", "/usr/lib/systemd/system/maldet.service",
 		// Hestia's and cloud-init's own sudoers files
-		"/etc/sudoers.d/hestiaweb", "/etc/sudoers.d/admin", "/etc/sudoers.d/90-cloud-init-users"}
+		"/etc/sudoers.d/hestiaweb", "/etc/sudoers.d/admin", "/etc/sudoers.d/90-cloud-init-users",
+		// the panel's nginx.conf: Hestia's installer and upgrades write the
+		// box's own DNS resolvers into it (install/upgrade/versions/1.0.2.sh)
+		"/usr/local/hestia/nginx/conf/nginx.conf"}
 	if env.RepoDir != "" {
 		out = append(out, env.RepoDir+"/")
 	}

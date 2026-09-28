@@ -401,6 +401,19 @@ func init() {
 			return steps, nil
 		},
 	})
+	register(Fix{
+		ID: "web-terminal-purge", Title: "Uninstall the vulnerable web terminal package", Check: "hestia.web-terminal", Scope: "", Risk: Change,
+		Applies: func(r check.Result) bool { return strings.Contains(r.Summary, "vulnerable package") },
+		Note:    "The terminal is off, but the build the May 2026 attackers used is still installed; re-enabling it would start that build.",
+		How:     "`apt-get purge hestia-web-terminal` removes the package and its files; WEB_TERMINAL stays 'false'. If a browser terminal is ever needed, v-add-sys-web-terminal installs the current version.",
+		Undo:    "v-add-sys-web-terminal (installs the current, fixed version).",
+		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
+			return []Step{
+				{Why: "remove the package", Argv: []string{"env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "purge", "-y", "hestia-web-terminal"}},
+				{Why: "gone", Argv: []string{"sh", "-c", "dpkg-query -W hestia-web-terminal 2>/dev/null | grep . || echo 'hestia-web-terminal: not installed'"}},
+			}, nil
+		},
+	})
 	webTerminalOff := Fix{
 		ID: "web-terminal-off", Title: "Turn the Hestia web terminal off", Check: "hestia.web-terminal", Scope: "", Risk: Change,
 		Note: "The panel's browser terminal is a root shell on the panel port; its 1.0.2 build admitted unauthenticated visitors — the entry point of the May 2026 compromise.",

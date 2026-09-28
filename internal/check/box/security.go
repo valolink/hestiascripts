@@ -601,33 +601,39 @@ func humanBytes(n int64) string {
 // back unnoticed, so on, running or listening are all Fail.
 func checkWebTerminal(ctx context.Context, env *Env) []Result {
 	s := env.Sys
-	var ev []string
+	var on []string // evidence that it runs or will run
 	if hestia.Conf(s)["WEB_TERMINAL"] == "true" {
-		ev = append(ev, "hestia.conf: WEB_TERMINAL='true'")
+		on = append(on, "hestia.conf: WEB_TERMINAL='true'")
 	}
 	if active(ctx, s, "hestia-web-terminal") {
-		ev = append(ev, "hestia-web-terminal.service is active")
+		on = append(on, "hestia-web-terminal.service is active")
 	}
 	if out, _ := s.Run(ctx, "ss", "-Hltn", "sport = :8085"); strings.TrimSpace(out) != "" {
-		ev = append(ev, "something listens on :8085: "+strings.Join(strings.Fields(out), " "))
+		on = append(on, "something listens on :8085: "+strings.Join(strings.Fields(out), " "))
 	}
 	ver, _ := s.Run(ctx, "dpkg-query", "-W", "-f=${Status} ${Version}", "hestia-web-terminal")
-	installed := strings.HasPrefix(ver, "install ok installed")
+	installed, vulnerable := strings.HasPrefix(ver, "install ok installed"), false
+	var pkg []string
 	if installed {
 		f := strings.Fields(ver)
 		v := f[len(f)-1]
-		ev = append(ev, "package hestia-web-terminal "+v+" installed")
+		pkg = append(pkg, "package hestia-web-terminal "+v+" installed")
 		if versionLess(v, "1.0.3") {
-			ev = append(ev, "versions before 1.0.3 accept an unauthenticated session as root")
+			vulnerable = true
+			pkg = append(pkg, "versions before 1.0.3 accept an unauthenticated session as root")
 		}
 	}
 	switch {
-	case len(ev) > 0 && (len(ev) > 1 || !installed):
-		return []Result{New(Fail, "the web terminal is on").Ev(ev...).
+	case len(on) > 0:
+		return []Result{New(Fail, "the web terminal is on").Ev(append(on, pkg...)...).
 			Because("The browser terminal on the panel port gives a root shell; its 1.0.2 build let unauthenticated visitors in, which is how three boxes were compromised in May 2026. Keep it off; enable it only for the minutes it is used.").
 			Fixed("v-delete-sys-web-terminal")}
+	case vulnerable:
+		return []Result{New(Warn, "off, but the vulnerable package is still installed").Ev(pkg...).
+			Because("Turning it on again (v-add-sys-web-terminal, or a Hestia upgrade re-enabling it) would start the exact build the May 2026 attackers used.").
+			Fixed("apt-get purge hestia-web-terminal")}
 	case installed:
-		return []Result{New(Configured, "off (package still installed)").Ev(ev...)}
+		return []Result{New(Configured, "off (package still installed)").Ev(pkg...)}
 	}
 	return []Result{New(OK, "off and not installed")}
 }
