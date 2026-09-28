@@ -238,6 +238,10 @@ OPTIONS:
   --force              Skip overwrite confirmation
   --no-httpauth        Leave the staging site open to everyone (default: HTTP
                        basic auth; credentials in /root/.hestia-staging-auth/)
+  --print-auth         On success, print the basic-auth pair once as
+                       STAGING_AUTH=<user>:<password>. EngineLink captures it
+                       so its screenshots and the operator get through; treat
+                       the output as secret
   --teardown           Remove the staging site: unmounts uploads, deletes
                        the domain and database; pass --src-user/--src-domain
                        too to also forget the saved staging URL
@@ -264,6 +268,7 @@ NEW_DOMAIN=""
 FORCE=false
 TEARDOWN=false
 HTTPAUTH=true
+PRINT_AUTH=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -274,6 +279,7 @@ while [[ $# -gt 0 ]]; do
     --force)        FORCE=true ;;
     --teardown)     TEARDOWN=true ;;
     --no-httpauth)  HTTPAUTH=false ;;
+    --print-auth)   PRINT_AUTH=true ;;
     -h|--help)      show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
@@ -794,6 +800,28 @@ $WP_STG search-replace "$LIVE_HOME" "$NEW_HOME" --all-tables --quiet --skip-colu
 sed -i "s#$LIVE_HOME#$NEW_HOME#g" "$SETUP_DIR/wp-config.php"
 mkdir -p "$NEW_HOME/private" && chown "$DEST_USER:$DEST_USER" "$NEW_HOME/private"
 
+# valolink-plugin's Staging module (noindex, mail interception, live payment
+# gateways off, auto-updates off) — switched on in the copy only. Live keeps
+# whatever it had: enabling the module on live is unsafe, because its
+# subdomain heuristic would flip a live site served on a subdomain into
+# staging mode. WP_ENVIRONMENT_TYPE=staging (above) is what the module's
+# detector treats as authoritative, so it activates here and nowhere else.
+if $WP_STG plugin is-active valolink-plugin --skip-plugins --skip-themes 2>/dev/null; then
+  echo "       Enabling valolink-plugin's Staging module in the copy..."
+  $WP_STG eval --skip-plugins --skip-themes '
+    $s = get_option("valolink_settings");
+    if (!is_array($s)) { $s = []; }
+    $s["modules"]["staging"]["enabled"] = true;
+    update_option("valolink_settings", $s);
+    $check = get_option("valolink_settings");
+    echo empty($check["modules"]["staging"]["enabled"]) ? "fail" : "ok";
+  ' 2>/dev/null | grep -qx ok
+  check_status "Failed to enable the Staging module in the copy."
+  echo "       ✓ Staging module on (copy only)"
+else
+  echo "       ⚠️  valolink-plugin not active — no Staging module: mail and payment gateways are NOT intercepted on staging."
+fi
+
 # [8/11] Pre-publish verification.
 # Refuse to publish if any of the safety constants or URLs are wrong.
 echo "[8/11] Verifying staging is safe to publish..."
@@ -881,6 +909,10 @@ else
 fi
 echo "   Stored URL:   $URL_STORE"
 echo ""
+if [ "$HTTPAUTH" = true ] && [ "$PRINT_AUTH" = true ]; then
+  read -r _auth_user _auth_pass < "$(staging_auth_store "$NEW_WEB_DOMAIN")"
+  echo "STAGING_AUTH=${_auth_user}:${_auth_pass}"
+fi
 echo "   To tear down:"
 echo "   v-wp-staging-create --teardown --dest-user=$DEST_USER \\"
 echo "       --new-domain=$NEW_WEB_DOMAIN --src-user=$SRC_USER \\"
