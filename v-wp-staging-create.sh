@@ -103,6 +103,33 @@ flush_site_caches() {
   fi
 }
 
+# WP Rocket keeps the home URL base64-encoded in wp_rocket_last_base_url,
+# which search-replace can't see, so every copy greets the admin with "the
+# website domain has changed" and a Regenerate button. Do what that button
+# does (Engine/Admin/DomainChange/Subscriber.php, 3.23): record the new URL
+# and fire rocket_domain_changed, which regenerates advanced-cache.php, the
+# per-host config file and .htaccess, drops the old configs and clears the
+# cache. Must run on the published path: WP Rocket writes ABSPATH into
+# those files. Slug-agnostic (the fleet has both wp-rocket and wprocket).
+rocket_domain_moved() {
+  local user="$1" path="$2"
+  local out
+  out=$(sudo -u "$user" wp --path="$path" eval '
+    if (!function_exists("rocket_generate_config_file")) { echo "absent"; return; }
+    $new = trailingslashit(get_option("home"));
+    $old = base64_decode((string) get_option("wp_rocket_last_base_url"));
+    update_option("wp_rocket_last_base_url", base64_encode($new), true);
+    delete_transient("rocket_domain_changed");
+    if ($old !== "" && $old !== $new) { do_action("rocket_domain_changed", $new, $old); }
+    echo "ok";
+  ' 2>/dev/null | tail -n1)
+  case "$out" in
+    ok)     echo "        ✓ WP Rocket configuration regenerated for the staging domain" ;;
+    absent) ;;
+    *)      echo "        ⚠ WP Rocket regenerate failed — use the notice's Regenerate button" ;;
+  esac
+}
+
 # Sanity-check a wp-config value. Aborts the script if it doesn't match.
 require_wpconfig() {
   local user="$1" path="$2" key="$3" expected="$4"
@@ -893,6 +920,7 @@ echo "       ✓ persisted in /etc/fstab (bind,ro,nofail) — survives reboots"
 # and any historical pollution may have left staging URLs in live's Redis.
 echo "[11/11] Reloading PHP-FPM and flushing caches..."
 reload_php_fpm
+rocket_domain_moved "$DEST_USER" "$NEW_DIR"
 flush_site_caches "$DEST_USER" "$NEW_DIR"  "staging ($NEW_WEB_DOMAIN)"
 flush_site_caches "$SRC_USER"  "$LIVE_DIR" "live ($OLD_WEB_DOMAIN)"
 
