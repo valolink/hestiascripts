@@ -797,7 +797,32 @@ LIVE_HOME="/home/$SRC_USER/web/$OLD_WEB_DOMAIN"
 NEW_HOME="/home/$DEST_USER/web/$NEW_WEB_DOMAIN"
 echo "       Domain-root paths: $LIVE_HOME  →  $NEW_HOME (database and wp-config.php)"
 $WP_STG search-replace "$LIVE_HOME" "$NEW_HOME" --all-tables --quiet --skip-columns=guid
-sed -i "s#$LIVE_HOME#$NEW_HOME#g" "$SETUP_DIR/wp-config.php"
+# Regex-escape: a bare "valolink.fi" would also match "valolink-fi…".
+LIVE_HOME_RE=$(printf '%s' "$LIVE_HOME" | sed 's/[.[\*^$#]/\\&/g')
+sed -i "s#$LIVE_HOME_RE#$NEW_HOME#g" "$SETUP_DIR/wp-config.php"
+
+# Files outside the database that hardcode live's absolute path, copied
+# verbatim by the rsync: cache drop-ins (WP Rocket's advanced-cache.php
+# carries its plugin path) and root-level loaders (.user.ini
+# auto_prepend_file, wordfence-waf.php). On staging they point into live,
+# which open_basedir refuses with a warning on every page. Only these
+# generated top-level files — plugin code is never rewritten.
+for f in "$SETUP_DIR"/*.php "$SETUP_DIR"/.user.ini "$SETUP_DIR"/.htaccess "$SETUP_DIR"/wp-content/*.php; do
+  [ -f "$f" ] && [ ! -L "$f" ] && [ "$f" != "$SETUP_DIR/wp-config.php" ] || continue
+  if grep -qF "$LIVE_HOME" "$f"; then
+    sed -i "s#$LIVE_HOME_RE#$NEW_HOME#g" "$f"
+    echo "       Live path rewritten in ${f#$SETUP_DIR/}"
+  fi
+done
+# Absolute symlinks into live (Query Monitor's wp-content/db.php links to
+# its plugin file by absolute path) are copied as-is by rsync -a and would
+# resolve to live's files. Repoint them at the same path under staging.
+while IFS= read -r -d '' link; do
+  target=$(readlink "$link")
+  ln -sfn "$NEW_HOME${target#"$LIVE_HOME"}" "$link"
+  chown -h "$DEST_USER:$DEST_USER" "$link"
+  echo "       Symlink repointed: ${link#$SETUP_DIR/} → staging"
+done < <(find "$SETUP_DIR" -path "$SETUP_DIR/wp-content/uploads" -prune -o -type l -lname "$LIVE_HOME/*" -print0)
 mkdir -p "$NEW_HOME/private" && chown "$DEST_USER:$DEST_USER" "$NEW_HOME/private"
 
 # valolink-plugin's Staging module (noindex, mail interception, live payment
