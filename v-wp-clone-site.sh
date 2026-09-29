@@ -268,8 +268,17 @@ if [ "$OVERWRITE_MODE" = false ]; then
   NEW_IP=$(getent hosts "$NEW_WEB_DOMAIN" | awk '{ print $1 }' | head -n 1)
 
   if [ -n "$NEW_IP" ] && [ "$OLD_IP" == "$NEW_IP" ]; then
-    echo "      ✅ DNS matches ($NEW_IP). Provisioning SSL..."
-    v-add-web-domain-ssl "$DEST_USER" "$NEW_WEB_DOMAIN"
+    echo "      ✅ DNS matches ($NEW_IP). Requesting a Let's Encrypt certificate..."
+    # v-add-web-domain-ssl installs an existing certificate from a directory
+    # and failed here with its usage line on every clone (until 2026-09-29).
+    # No aliases: the www. alias v-add-web-domain adds has no DNS on copies.
+    if v-add-letsencrypt-domain "$DEST_USER" "$NEW_WEB_DOMAIN"; then
+      v-add-web-domain-ssl-force "$DEST_USER" "$NEW_WEB_DOMAIN" >/dev/null 2>&1 || true
+      echo "      ✅ SSL on, HTTPS forced."
+    else
+      echo "      ⚠️  Let's Encrypt failed — the clone continues without SSL. Retry later with:"
+      echo "         v-add-letsencrypt-domain $DEST_USER $NEW_WEB_DOMAIN"
+    fi
   else
     echo "      ⚠️ DNS for $NEW_WEB_DOMAIN does not match $OLD_WEB_DOMAIN."
     echo "      Skipping SSL provisioning."
