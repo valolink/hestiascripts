@@ -406,6 +406,14 @@ sudo -u "$DEST_USER" wp --path="$NEW_DIR" cache flush --quiet
 echo "Cleaning up temporary files..."
 rm -f "$DB_DUMP"
 
+# Register the copy in the box's copy registry (v-wp-copies; EngineLink lists
+# copies from it). Root-only KEY=value file named after the copy's domain.
+REG_DIR="/root/.hestia-site-copies"
+mkdir -p "$REG_DIR" && chmod 700 "$REG_DIR"
+printf 'KIND=clone\nDOMAIN=%s\nUSER=%s\nSOURCE_DOMAIN=%s\nSOURCE_USER=%s\nCREATED=%s\nSCRIPT=v-wp-clone-site\n' \
+  "$NEW_WEB_DOMAIN" "$DEST_USER" "$OLD_WEB_DOMAIN" "$SRC_USER" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REG_DIR/$NEW_WEB_DOMAIN.conf"
+chmod 600 "$REG_DIR/$NEW_WEB_DOMAIN.conf"
+
 echo "=================================================================="
 echo "✅ Clone Successful!"
 echo "Source Site:  $OLD_DOMAIN (User: $SRC_USER)"

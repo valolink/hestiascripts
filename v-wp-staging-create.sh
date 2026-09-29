@@ -25,6 +25,20 @@ staging_url_store() {
   echo "/root/.hestia-staging-urls/${1}_${2}"
 }
 
+# The box's copy registry (v-wp-copies reads it; EngineLink lists copies from
+# it). One root-only KEY=value file per copy, named after the copy's domain.
+copy_registry_file() {
+  echo "/root/.hestia-site-copies/${1}.conf"
+}
+
+register_copy() { # KIND COPY_DOMAIN COPY_USER SRC_DOMAIN SRC_USER
+  local f; f=$(copy_registry_file "$2")
+  mkdir -p "$(dirname "$f")" && chmod 700 "$(dirname "$f")"
+  printf 'KIND=%s\nDOMAIN=%s\nUSER=%s\nSOURCE_DOMAIN=%s\nSOURCE_USER=%s\nCREATED=%s\nSCRIPT=%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(basename "$0")" > "$f"
+  chmod 600 "$f"
+}
+
 # HTTP basic auth on staging (docs/security-hardening.md §7): scanners get a
 # 401 instead of a copy of a live site. The credentials live root-only in
 # /root/.hestia-staging-auth/<domain> ("user password") and are reused on
@@ -425,6 +439,7 @@ if [ "$TEARDOWN" = true ]; then
   fi
 
   rm -f "$(staging_auth_store "$NEW_DOMAIN")"
+  rm -f "$(copy_registry_file "$NEW_DOMAIN")"
 
   echo ""
   echo "✅ Staging site $NEW_DOMAIN removed."
@@ -954,6 +969,8 @@ if sudo -u "$SRC_USER" wp --path="$LIVE_DIR" config has WP_STAGING_URL --quiet 2
 fi
 
 rm -f "$DB_DUMP"
+
+register_copy staging "$NEW_WEB_DOMAIN" "$DEST_USER" "$OLD_WEB_DOMAIN" "$SRC_USER"
 
 echo ""
 echo "=================================================================="
