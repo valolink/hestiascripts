@@ -283,6 +283,11 @@ OPTIONS:
                        STAGING_AUTH=<user>:<password>. EngineLink captures it
                        so its screenshots and the operator get through; treat
                        the output as secret
+  --flush-live         Also flush the live site's caches (object cache,
+                       transients, WP Rocket). Off by default since 2026-09-29:
+                       staging is built isolated with its own Redis prefix and
+                       database, so live's cache is not touched by it. Use it
+                       when you suspect staging URLs in live's cache.
   --teardown           Remove the staging site: unmounts uploads, deletes
                        the domain and database; pass --src-user/--src-domain
                        too to also forget the saved staging URL
@@ -310,6 +315,7 @@ FORCE=false
 TEARDOWN=false
 HTTPAUTH=true
 PRINT_AUTH=false
+FLUSH_LIVE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -321,6 +327,7 @@ while [[ $# -gt 0 ]]; do
     --teardown)     TEARDOWN=true ;;
     --no-httpauth)  HTTPAUTH=false ;;
     --print-auth)   PRINT_AUTH=true ;;
+    --flush-live)   FLUSH_LIVE=true ;;
     -h|--help)      show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
@@ -432,9 +439,11 @@ if [ "$TEARDOWN" = true ]; then
       if sudo -u "$SRC_USER" wp --path="$LIVE_DIR" config has WP_STAGING_URL --quiet 2>/dev/null; then
         sudo -u "$SRC_USER" wp --path="$LIVE_DIR" config delete WP_STAGING_URL --quiet \
           && echo "✅ Removed legacy WP_STAGING_URL constant from live wp-config."
+        reload_php_fpm   # live wp-config changed
       fi
-      flush_site_caches "$SRC_USER" "$LIVE_DIR" "live ($OLD_WEB_DOMAIN)"
-      reload_php_fpm
+      if [ "$FLUSH_LIVE" = true ]; then
+        flush_site_caches "$SRC_USER" "$LIVE_DIR" "live ($OLD_WEB_DOMAIN)"
+      fi
     fi
   fi
 
@@ -937,15 +946,23 @@ echo "       ✓ $LIVE_UPLOADS mounted RO at $NEW_UPLOADS (write probe confirmed
 persist_uploads_mount "$LIVE_UPLOADS" "$NEW_UPLOADS"
 echo "       ✓ persisted in /etc/fstab (bind,ro,nofail) — survives reboots"
 
-# [11/11] Reload PHP-FPM (so workers drop stale wp-config) and flush every cache.
-# This must happen on BOTH staging and live: staging because its workers may
-# have cached the empty disarmed wp-config; live because the traffic-window
-# and any historical pollution may have left staging URLs in live's Redis.
+# [11/11] Reload PHP-FPM (so workers drop stale wp-config) and flush staging's
+# caches: its workers may have cached the empty disarmed wp-config. Live's
+# caches are flushed only with --flush-live (since 2026-09-29). The live flush
+# was added 2026-06-26 against staging URLs leaking into live's Redis during
+# the build's traffic window; the isolated build, staging's own Redis prefix
+# and database closed that, and the flush emptied live's object cache,
+# transients and page cache on every refresh — on a box whose sites share a
+# Redis database, every site's object cache.
 echo "[11/11] Reloading PHP-FPM and flushing caches..."
 reload_php_fpm
 rocket_domain_moved "$DEST_USER" "$NEW_DIR"
 flush_site_caches "$DEST_USER" "$NEW_DIR"  "staging ($NEW_WEB_DOMAIN)"
-flush_site_caches "$SRC_USER"  "$LIVE_DIR" "live ($OLD_WEB_DOMAIN)"
+if [ "$FLUSH_LIVE" = true ]; then
+  flush_site_caches "$SRC_USER"  "$LIVE_DIR" "live ($OLD_WEB_DOMAIN)"
+else
+  echo "      Live caches left alone (--flush-live to flush them)."
+fi
 
 # Drop old staging DB if we replaced one. Best-effort; non-fatal.
 if [ -n "$OLD_STAGING_DB" ] && [ "$OLD_STAGING_DB" != "$NEW_DB_NAME" ]; then
