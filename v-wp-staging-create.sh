@@ -738,7 +738,15 @@ echo "---------------------------------------------------"
 # inherit live's WP_REDIS_PREFIX + DB creds — the exact bug we're killing.
 if [ "$OVERWRITE_MODE" = false ]; then
   echo "[1/11] Creating staging domain ($NEW_WEB_DOMAIN) in HestiaCP..."
-  v-add-web-domain "$DEST_USER" "$NEW_WEB_DOMAIN"
+  # On the source site's IP: on UpCloud boxes the public address is NATed to a
+  # private interface, and a new user's default IP is the private one — a copy
+  # created there is unreachable and Let's Encrypt fails (dev2, 2026-09-29).
+  SRC_IP=$(v-list-web-domain "$SRC_USER" "$OLD_WEB_DOMAIN" json 2>/dev/null | grep -oP '"IP": "\K[0-9.]+' | head -1)
+  if [ -n "$SRC_IP" ]; then
+    v-add-web-domain "$DEST_USER" "$NEW_WEB_DOMAIN" "$SRC_IP"
+  else
+    v-add-web-domain "$DEST_USER" "$NEW_WEB_DOMAIN"
+  fi
   check_status "Failed to create staging domain."
   echo "       SSL skipped — configure separately for your staging domain."
 else
