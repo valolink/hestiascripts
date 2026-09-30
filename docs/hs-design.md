@@ -326,7 +326,7 @@ Reima: "id like to migrate all of the interactive stuff from the old hestiascrip
 | 4 Fail2ban | `f2b-wp-jail`, `f2b-restart`, `f2b-jail-limits`; the repair logic is `hs f2b repair` (self-ban guard, ban mails off, xmlrpc filter line, jails without logs disabled — each change printed) and `hs f2b reload|restart` (killed after 3 s if stuck) |
 | 5 Maldet | `maldet-install` (+ ed, inotify-tools), `maldet-alerts` (detect-only kept as policy), `maldet-scan` — run.sh's scan passed a shell glob and maldet reads only `$1`, so it scanned the first site only (verified in maldet's source); now `maldet -a /home/?/web/?/public_html` |
 | 6 Netdata | `netdata-install`, `netdata-tune` (profile now `templates/netdata/netdata.conf`). "Open port 19999" dropped — the streamer proxies Netdata; the netdata fix closes such a rule |
-| 7 Security | `unattended` (scope field; `20auto-upgrades` from `templates/apt/` instead of the `dpkg-reconfigure` dialog), `swap` (refuses an existing /swapfile, fstab line once), `ssh-keys-only` |
+| 7 Security | `unattended` (scope field; `20auto-upgrades` from `templates/apt/` instead of the `dpkg-reconfigure` dialog), `swap` (create; since 2026-09-30 also resize — see *Memory*), `ssh-keys-only` |
 | 8 SMTP | `smtp-install` (refused where exim4 is installed — apt would remove Hestia's mail server), `smtp-relay` (API key a masked **secret**), `smtp-recipients` (no longer switches fail2ban to a mail per ban), `smtp-test` |
 | 9 PHP-FPM | `fpm-profile` (per version or all, per profile or all), `php-add-version` (Hestia's own `v-add-web-php` + redis extension, instead of run.sh's own sury repo steps) |
 | 10 OpCache | `opcache` (version or all; never lowers `max_accelerated_files`; graceful FPM reload) |
@@ -364,6 +364,81 @@ public rules, outbound log/drop, C2 block list; custom.sh hook + boot unit); `hs
 indicator list `internal/ioc/indicators.txt`; operations for all of it. The streamer fails closed
 (both implementations), and `v-hestiascripts-update` installs only commits signed by a key in
 `/etc/hs/allowed_signers`.
+
+## Memory: swap, kernel knobs, the FPM ceiling, alarms on pressure (2026-09-30)
+
+EngineLink raised a Netdata alarm on kuumalahde (UpCloud, 7.9 GB, 1 GB `/swapfile`): swap 94 %
+used. A read-only look: `vmstat` si/so 0, 3.2 GB MemAvailable, no OOM kills — pages parked during
+an old peak, harmless. Netdata's stock `used_swap` fires on swap *fill level*, which says nothing
+about pressure. The risk that look did find was the ceiling: the kuumalahde.fi pool allowed
+`pm.max_children = 50` with ~250 MB workers on a 7.9 GB box (MariaDB 1.4 GB, Redis 633 MB of a
+1.12 GB cap) — a traffic spike would OOM it. Reima: "add something I can adjust swap size and
+swappiness and other settings to the hs tui, and I'd like alerts when resources on a box are
+actually getting thin." What that became:
+
+- **`memory.swap`** no longer calls a well-used swap "real memory pressure". It reads
+  `/proc/pressure/memory` (PSI): full but nothing stalling → OK "parked, no memory pressure";
+  ≥ 90 % full *and* tasks stalled ≥ 20 % of the last minute → Warn. Evidence carries the
+  areas, `vm.swappiness` and MemAvailable.
+- **`memory.fpm-ceiling`** keeps the PSS-based projection (`sum(pm.max_children)` × private +
+  shared vs RAM, from `box.FPMWorkerMemory`) and now lists the ceiling per backend template
+  (`box.FPMTemplates`: domains × max_children) so the operator sees which template to lower.
+  A second result, subject `now`, appears when PSI shows stalls: some ≥ 20 % → Warn, full ≥ 5 %
+  → Fail — the box thrashing, not merely projected to.
+- **`swap`** (op) creates *or resizes* `/swapfile`. Resize: the new file is made and switched on
+  as `/swapfile.new` first (a full disk fails before anything changes; pages leaving the old file
+  have somewhere to go), `swapoff /swapfile` — refused at planning time unless MemAvailable covers
+  what is in swap with 512 MB to spare —, the old file moved to `/root/hs-moved/<date>/swapfile`
+  (never deleted; stale pages, rm once satisfied), then the new file off for a moment, renamed to
+  `/swapfile` (an active swap file cannot be renamed — `vfs_rename` refuses `S_SWAPFILE`) and on
+  again; the fstab line does not change. Swap on a partition or another path is refused, not
+  automated.
+- **`vm-sysctl`** (op): `vm.swappiness` (10 suggested when at Debian's 60 — the kernel parks idle
+  PHP/MariaDB/Redis heap early even with RAM to spare, which is how a 1 GB file reads 94 % with
+  nothing moving; not 0, that is no swapping until the box is out), `vm.vfs_cache_pressure` (50 —
+  WordPress stats thousands of files per request), `vm.overcommit_memory` (1 when Redis is
+  installed — its RDB save forks and its startup log asks for it). Written with `hs conf set` to
+  `/etc/sysctl.d/90-hs-memory.conf`, applied with `sysctl -p` on that file; the plan names any
+  other sysctl file setting the same key. Enter on a "parked" swap finding opens this; other swap
+  findings open `swap`.
+- **`fpm-pool-size`** (op): lowers a pool template's `pm.max_children` (and pm mode / spare
+  workers) *in the template* — Hestia re-renders every pool file from its template on
+  `v-rebuild-web-domain` / `v-change-web-domain-backend-tpl`, so a pool file edited directly is
+  lost at the next rebuild. Then `v-rebuild-web-domain USER DOMAIN no` per domain on it,
+  `php-fpmX.Y -t`, a graceful `try-reload-or-restart`, and the rebuilt pools' pm lines. The form
+  pre-fills a size that fits when the box is over budget: RAM − 1 GB system − MariaDB buffer pool
+  − Redis cap, ÷ one worker's private memory (PSS), shared across pools by their share of today's
+  ceiling. Hestia's own templates (`default`, `PHP-X_Y`) get a note that an upgrade may rewrite
+  them; `fpm-profile` makes ours.
+- **Netdata alarms on pressure** — `templates/netdata/health.d/`, installed by **`netdata-alarms`**
+  (and by `netdata-install`) to `/etc/netdata/health.d/`, reloaded with `netdatacli reload-health`
+  (no restart, no metrics gap; restart where netdatacli is missing). Names are what EngineLink's
+  alarm list shows (`poll-server-alarms` reads raised alarms through the streamer's
+  `/netdata/alarms`):
+
+  | alarm | on | warn | crit | why |
+  |---|---|---|---|---|
+  | `hs_ram_pressure` | `system.memory_some_pressure`, `${some 60}` | > 20 % (clears < 10) | > 50 % (clears < 30) | some task stalled on memory that share of the last minute; 0.00 on a healthy box |
+  | `hs_ram_stall` | `system.memory_full_pressure`, `${full 60}` | > 5 % (< 2) | > 20 % (< 10) | every task stalled — thrashing; the OOM killer is next |
+  | `hs_swap_io` | `mem.swapio`, `average -3m absolute` | > 1024 KiB/s (< 512) | > 8192 (< 4096) | swap that *moves*; parked swap moves nothing |
+  | `hs_cpu_pressure` | `system.cpu_some_pressure`, `${some 300}` | > 30 % (< 20) | > 70 % (< 50) | runnable tasks waited for a CPU over five minutes — capacity, not a spike |
+
+  `swap.conf` carries the stock file's name on purpose: a file in the operator's `health.d` takes
+  the stock file's place (Netdata's documented override rule), which retires `used_swap` and the
+  silent `30min_ram_swapped_out`. Stock `ram_available` (MemAvailable < 10 %) and `oom_kill` are
+  left alone — they measure the right thing and are raised in the API whatever their `to:` line.
+  Syntax checked against Netdata's stock `health.d/swap.conf`, `ram.conf`, `cpu.conf` and
+  `REFERENCE.md` (master, 2026-09-30) and the PSI collector source: the dimension ids are
+  `some 10` / `some 60` / `some 300` and `full …` — with a space, hence `${some 60}`; the kernel's
+  own moving averages, so no lookup window. The `system.*_pressure` charts exist only with PSI
+  (Debian 12 has it); without them Netdata creates no alarm and the check caps at Configured.
+- **`netdata.alarms`** (check): the two files identical to the repo → then `/api/v1/alarms?all`
+  must list the `hs_` alarms and not `used_swap`; OK only then (files on disk alone are
+  Configured/Warn). `netdata` itself is unchanged.
+
+Not exercised on a box: hzdemolink has not run the new operations (the resize's two swapoffs and
+the health files' loading are the two things to watch there first: `hs op swap --dry-run`, then
+`hs op netdata-alarms` and `hs check --section monitoring`).
 
 ## Open questions
 

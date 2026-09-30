@@ -129,6 +129,31 @@ func meminfo(s sys.Sys) map[string]int64 {
 	return m
 }
 
+// psi reads the kernel's pressure stall information for a resource
+// (/proc/pressure/memory, cpu, io): the share of recent time in which some
+// task (some) or every task (full) was stalled waiting for it, as
+// percentages over 10, 60 and 300 s — keys some10 … full300. nil when the
+// kernel does not expose it (PSI off or a kernel before 4.20).
+func psi(s sys.Sys, resource string) map[string]float64 {
+	text := readString(s, "/proc/pressure/"+resource)
+	if text == "" {
+		return nil
+	}
+	m := map[string]float64{}
+	for _, line := range strings.Split(text, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || (f[0] != "some" && f[0] != "full") {
+			continue
+		}
+		for _, kv := range f[1:] {
+			if k, v, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "avg") {
+				m[f[0]+strings.TrimPrefix(k, "avg")], _ = strconv.ParseFloat(v, 64)
+			}
+		}
+	}
+	return m
+}
+
 func hostname() string {
 	h, _ := os.Hostname()
 	return h

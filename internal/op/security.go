@@ -235,41 +235,6 @@ func init() {
 		},
 	})
 	register(Op{
-		ID: "swap", Title: "Create a swapfile", Section: "system", Risk: Change,
-		Resolves: "memory.swap", Applies: summaryHas("no swap"),
-		Note: "Without swap the kernel OOM-kills at once instead of degrading.",
-		How:  "fallocate reserves /swapfile, chmod 600, mkswap, swapon; one /swapfile line in /etc/fstab (added only if absent) brings it back at boot.",
-		Undo: "swapoff /swapfile; remove its /etc/fstab line; rm /swapfile.",
-		Fields: []Field{{Key: "size", Label: "Size", Kind: Text, Pattern: sizeRe, Help: "e.g. 2G or 1024M.",
-			Current: func(ctx context.Context, env *check.Env, _ Target) string {
-				out, _ := env.Sys.Run(ctx, "swapon", "--show", "--noheadings")
-				if strings.TrimSpace(out) == "" {
-					return "no swap · RAM " + mb(box.RAMMB(env.Sys))
-				}
-				return strings.Join(strings.Fields(out), " ")
-			},
-			Default: func(_ context.Context, env *check.Env, _ Target) string {
-				if box.RAMMB(env.Sys) <= 4096 {
-					return "2G"
-				}
-				return "1G"
-			}}},
-		Recheck: []string{"memory.swap"},
-		Plan: func(_ context.Context, env *check.Env, _ Target, v Values) ([]Step, error) {
-			if exists(env, "/swapfile") {
-				return nil, fmt.Errorf("/swapfile already exists — resizing means swapoff and recreating it, which is not automated")
-			}
-			return []Step{
-				{Why: "reserve " + v["size"], Argv: []string{"fallocate", "-l", v["size"], "/swapfile"}},
-				{Argv: []string{"chmod", "600", "/swapfile"}},
-				{Argv: []string{"mkswap", "/swapfile"}},
-				{Why: "use it now", Argv: []string{"swapon", "/swapfile"}},
-				{Why: "and at boot", Argv: []string{"sh", "-c", "grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab; grep '^/swapfile ' /etc/fstab"}},
-				{Argv: []string{"swapon", "--show"}},
-			}, nil
-		},
-	})
-	register(Op{
 		ID: "ssh-keys-only", Title: "SSH: keys only, no passwords", Section: "security", Risk: Destructive,
 		Resolves: "ssh.auth",
 		Note:     "Refused unless root has authorized keys and has logged in with one in the last 30 days — and not if this session came in with a password. Keep this session open until a NEW key login works.",

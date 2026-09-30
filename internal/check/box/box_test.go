@@ -248,3 +248,109 @@ func TestFailedUnitsCarryCauseAndKnownPatterns(t *testing.T) {
 		t.Errorf("quotacheck: %+v", q)
 	}
 }
+
+// kuumalahde 2026-09-30: swap 94 % full, nothing moving, 3 GB available —
+// parked, not pressure. The same numbers with PSI showing stalls are.
+func TestSwapFullButParkedIsNotPressure(t *testing.T) {
+	mk := func(pressure string) *sys.Fake {
+		return &sys.Fake{Files: map[string]string{
+			"/proc/meminfo":           "MemTotal:        8155000 kB\nMemAvailable:    3300000 kB\nSwapTotal:       1048572 kB\nSwapFree:          60000 kB\n",
+			"/proc/swaps":             "Filename\tType\tSize\tUsed\tPriority\n/swapfile file 1048572 988572 -2\n",
+			"/proc/sys/vm/swappiness": "60\n",
+			"/proc/pressure/memory":   pressure,
+			"/proc/pressure/cpu":      "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\n",
+		}}
+	}
+	rs := checkSwap(context.Background(), env(mk("some avg10=0.00 avg60=0.00 avg300=0.00 total=100\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")))
+	if states(rs) != "ok" || !strings.Contains(rs[0].Summary, "parked") || rs[0].Data["swappiness"] != "60" {
+		t.Errorf("parked swap: %+v", rs)
+	}
+	rs = checkSwap(context.Background(), env(mk("some avg10=40.00 avg60=35.00 avg300=20.00 total=100\nfull avg10=2.00 avg60=1.00 avg300=0.50 total=0\n")))
+	if states(rs) != "warn" || !strings.Contains(rs[0].Summary, "under pressure") {
+		t.Errorf("full swap under pressure: %+v", rs)
+	}
+	// No PSI (older kernel): the swap's own numbers, nothing claimed about pressure.
+	f := mk("")
+	delete(f.Files, "/proc/pressure/memory")
+	if rs := checkSwap(context.Background(), env(f)); states(rs) != "ok" || strings.Contains(rs[0].Summary, "parked") {
+		t.Errorf("without PSI: %+v", rs)
+	}
+}
+
+func TestFPMCeilingNamesTheTemplateAndReadsPSI(t *testing.T) {
+	f := &sys.Fake{Files: map[string]string{
+		"/proc/meminfo":                           "MemTotal:        8155000 kB\n",
+		hestia.UsersDir + "/u/web.conf":           "DOMAIN='a.fi' BACKEND='production-PHP-8_2'\nDOMAIN='b.fi' BACKEND='production-PHP-8_2'\nDOMAIN='c.fi' BACKEND='PHP-8_2'\n",
+		hestia.FpmTpl + "/production-PHP-8_2.tpl": "pm = dynamic\npm.max_children = 50\npm.min_spare_servers = 10\npm.max_spare_servers = 20\n",
+		hestia.FpmTpl + "/PHP-8_2.tpl":            "pm = ondemand\npm.max_children = 8\n",
+		"/etc/php/8.2/fpm/pool.d/a.fi.conf":       "pm.max_children = 50\n",
+		"/etc/php/8.2/fpm/pool.d/b.fi.conf":       "pm.max_children = 50\n",
+		"/etc/php/8.2/fpm/pool.d/c.fi.conf":       "pm.max_children = 8\n",
+		"/proc/200/comm":                          "php-fpm8.2\n",
+		"/proc/200/smaps_rollup":                  "Rss:              256000 kB\nPss:              205000 kB\n",
+		"/proc/201/comm":                          "php-fpm8.2\n",
+		"/proc/201/smaps_rollup":                  "Rss:              256000 kB\nPss:              205000 kB\n",
+		"/proc/pressure/memory":                   "some avg10=0.00 avg60=0.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+	}}
+	rs := checkFPMCeiling(context.Background(), env(f))
+	if len(rs) != 1 || rs[0].State != Warn || !strings.Contains(rs[0].Fix, "fpm-pool-size") {
+		t.Fatalf("108 workers × ~150 MB on 8 GB should warn: %+v", rs)
+	}
+	ev := strings.Join(rs[0].Evidence, "\n")
+	if !strings.Contains(ev, "production-PHP-8_2: 2 domains × max_children 50 = 100 workers (a.fi, b.fi)") || !strings.Contains(ev, "PHP-8_2: 1 domain × max_children 8 = 8 workers") || !strings.Contains(ev, "none") {
+		t.Errorf("evidence:\n%s", ev)
+	}
+	ts := FPMTemplates(f)
+	if len(ts) != 2 || ts[0].Name != "production-PHP-8_2" || ts[0].Version != "8.2" || ts[0].Mode != "dynamic" || ts[0].MinSpare != 10 || ts[0].Ceiling() != 100 {
+		t.Errorf("templates: %+v", ts)
+	}
+	// Every task stalled 12 % of the last minute: a second, failing result for "now".
+	f.Files["/proc/pressure/memory"] = "some avg10=60.00 avg60=45.00 avg300=10.00 total=1\nfull avg10=15.00 avg60=12.00 avg300=3.00 total=0\n"
+	rs = checkFPMCeiling(context.Background(), env(f))
+	got := map[string]State{}
+	for _, r := range rs {
+		got[r.Subject] = r.State
+	}
+	if got["now"] != Fail || got[""] != Warn || len(rs) != 2 {
+		t.Errorf("under full pressure: %v", got)
+	}
+}
+
+func TestNetdataAlarmsGreenOnlyWhenLoaded(t *testing.T) {
+	tpl := "alarm: hs_swap_io\n"
+	mk := func(installed bool, alarms string) *sys.Fake {
+		f := &sys.Fake{
+			Commands: map[string]bool{"netdata": true},
+			Files: map[string]string{
+				"/repo/templates/netdata/health.d/swap.conf":        tpl,
+				"/repo/templates/netdata/health.d/hs-pressure.conf": tpl,
+			},
+			Cmds: map[string]sys.FakeCmd{"systemctl is-active --quiet netdata": {}},
+			HTTP: map[string]sys.FakeHTTP{"http://127.0.0.1:19999/api/v1/alarms?all": {Status: 200, Body: alarms}},
+		}
+		if installed {
+			f.Files["/etc/netdata/health.d/swap.conf"], f.Files["/etc/netdata/health.d/hs-pressure.conf"] = tpl, tpl
+		}
+		return f
+	}
+	withRepo := func(f *sys.Fake) *Env {
+		e := env(f)
+		e.RepoDir = "/repo"
+		return e
+	}
+	all := `{"alarms":{"system.memory_some_pressure.hs_ram_pressure":{"name":"hs_ram_pressure"},"system.memory_full_pressure.hs_ram_stall":{"name":"hs_ram_stall"},"mem.swapio.hs_swap_io":{"name":"hs_swap_io"},"system.cpu_some_pressure.hs_cpu_pressure":{"name":"hs_cpu_pressure"},"mem.available.ram_available":{"name":"ram_available"}}}`
+	if rs := checkNetdataAlarms(context.Background(), withRepo(mk(false, all))); states(rs) != "warn" || !strings.Contains(rs[0].Fix, "netdata-alarms") {
+		t.Errorf("not installed: %+v", rs)
+	}
+	if rs := checkNetdataAlarms(context.Background(), withRepo(mk(true, all))); states(rs) != "ok" {
+		t.Errorf("installed and loaded: %+v", rs)
+	}
+	stale := strings.Replace(all, `"mem.available.ram_available"`, `"mem.swap.used_swap":{"name":"used_swap"},"mem.available.ram_available"`, 1)
+	if rs := checkNetdataAlarms(context.Background(), withRepo(mk(true, stale))); states(rs) != "warn" || !strings.Contains(rs[0].Summary, "used_swap") {
+		t.Errorf("files written, not reloaded: %+v", rs)
+	}
+	noPSI := `{"alarms":{"mem.swapio.hs_swap_io":{"name":"hs_swap_io"}}}`
+	if rs := checkNetdataAlarms(context.Background(), withRepo(mk(true, noPSI))); states(rs) != "configured" {
+		t.Errorf("a kernel without PSI caps at configured: %+v", rs)
+	}
+}

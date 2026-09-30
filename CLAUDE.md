@@ -17,6 +17,7 @@ WordPress automation and streaming toolkit for **HestiaCP** (Hestia Control Pane
 - **Install on a box:** `git pull`, then `bash install-v2.sh` (hs on PATH, `/var/lib/hs`, `/var/log/hs`); `--cron` refreshes results every 15 min; `--serve` runs the streamer as `hs serve` via a systemd drop-in that install-scripts.sh cannot overwrite (`--no-serve` reverts). `install-scripts.sh` (v1) is unchanged and still deploys the v-scripts.
 - **run.sh's menus are operations** (`internal/op`, `hs op --list`): forms with the current value per field, plans from the live box, How/Undo. hs runs nothing from `setup/` any more; `run.sh` stays for boxes without hs until phase 5. Config edits go through `hs conf` (backups under `/var/lib/hs/backups`), secrets through `HS_SECRET_*` env vars. Map and findings: `docs/hs-design.md` → "run.sh's menus → operations".
 - **Security hardening:** `docs/security-hardening.md` (2026-09-25, after the May 2026 web-terminal compromise) — every control, the check that reports it and the operation that applies it, HestiaCP's own advisories, and what is still open. Permanent, not a stopgap. Read it before touching the streamer, the firewall, the watch or `hs check` security items. Pieces: `hs watch` (+ `v-server-ioc-watch` for EngineLink, `install-v2.sh --watch`), `hs firewall` (IPv6 inbound mirror, outbound filter, C2 block list; `/etc/hs/firewall.conf` → `/etc/hs/firewall.sh`, run from Hestia's `custom.sh` and `hs-firewall.service`), the indicator list `internal/ioc/indicators.txt`, signed updates (`/etc/hs/allowed_signers`).
+- **Memory and alarms (2026-09-30):** `hs op swap` (create or resize `/swapfile`, old file moved to `/root/hs-moved/<date>/`), `hs op vm-sysctl` (`/etc/sysctl.d/90-hs-memory.conf`), `hs op fpm-pool-size` (edits the pool *template*, then rebuilds its domains — a pool file edited by hand is lost at the next rebuild), and `hs op netdata-alarms`, which installs `templates/netdata/health.d/{swap.conf,hs-pressure.conf}` into `/etc/netdata/health.d/`: the stock `used_swap` (swap fill level) is retired and EngineLink's alarm list shows `hs_ram_pressure`, `hs_ram_stall`, `hs_swap_io`, `hs_cpu_pressure` instead. `docs/hs-design.md` → *Memory*.
 - **Principles:** OK means a probe saw it working; checks are read-only and bounded; every action and fix shows its exact commands (and, for fixes, how and how to undo) before running; everything run is logged to `/var/log/hs` with a transcript; files are moved, never deleted.
 
 ## Repo structure
@@ -41,6 +42,10 @@ templates/
     wp-secure-snippet.conf   # Rewrite rules injected into <Directory %docroot%> of the Apache template
   php-fpm/
     production.conf / standard.conf / staging.conf / small.conf  # pm settings per profile
+  netdata/
+    netdata.conf             # low-footprint profile (hs op netdata-tune)
+    health.d/swap.conf       # replaces the stock swap.conf: no used_swap, hs_swap_io instead
+    health.d/hs-pressure.conf  # hs_ram_pressure / hs_ram_stall / hs_cpu_pressure from PSI
 ```
 
 ## Build & Run

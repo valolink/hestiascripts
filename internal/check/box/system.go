@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
+	"github.com/valolink/hestiascripts/internal/sys"
 )
 
 func systemChecks() []Check {
@@ -192,27 +195,22 @@ func checkDisk(ctx context.Context, env *Env) []Result {
 	return []Result{New(OK, strings.Join(fine, " · "))}
 }
 
-// The check that would have predicted the web1 OOM (2026-07-06): what PHP-FPM
-// may allocate under load, not what it uses at rest. Not children × RSS —
-// every worker maps the same opcache SHM. sum(PSS) = shared + N×private and
-// RSS ≈ shared + private solve for both.
-func checkFPMCeiling(ctx context.Context, env *Env) []Result {
-	s := env.Sys
-	ramMB := meminfo(s)["MemTotal"] / 1024
-
-	children := 0
-	pools, _ := s.Glob("/etc/php/*/fpm/pool.d/*.conf")
-	for _, p := range pools {
-		for _, l := range strings.Split(readString(s, p), "\n") {
-			t := strings.TrimSpace(l)
-			if strings.HasPrefix(t, "pm.max_children") {
-				if i := strings.LastIndex(t, "="); i >= 0 {
-					n, _ := strconv.Atoi(strings.TrimSpace(t[i+1:]))
-					children += n
-				}
-			}
-		}
+// FPMPoolChildren sums pm.max_children over every pool file — what PHP-FPM
+// is allowed to fork, box-wide, as configured today.
+func FPMPoolChildren(s sys.Sys) (children, pools int) {
+	files, _ := s.Glob("/etc/php/*/fpm/pool.d/*.conf")
+	for _, p := range files {
+		pools++
+		children += poolInt(readString(s, p), "pm.max_children")
 	}
+	return
+}
+
+// FPMWorkerMemory measures what one more PHP worker costs. Not RSS — every
+// worker maps the same opcache SHM, so children × RSS counts that block once
+// per worker. With N workers, sum(PSS) = shared + N×private and RSS ≈ shared
+// + private solve for both (kB); only private is paid again per child.
+func FPMWorkerMemory(s sys.Sys) (private, shared int64, workers int) {
 	var n, rssSum, pssSum int64
 	procs, _ := s.Glob("/proc/[0-9]*")
 	for _, p := range procs {
@@ -240,11 +238,11 @@ func checkFPMCeiling(ctx context.Context, env *Env) []Result {
 			pssSum += pss
 		}
 	}
-	if children == 0 || n == 0 {
-		return []Result{New(Unknown, "no PHP-FPM pools or workers to measure")}
+	if n == 0 {
+		return 0, 0, 0
 	}
 	avg := rssSum / n
-	private, shared := avg, int64(0)
+	private, shared = avg, 0
 	if n > 1 && pssSum > avg {
 		private = (pssSum - avg) / (n - 1)
 		shared = max(avg-private, 0)
@@ -252,31 +250,188 @@ func checkFPMCeiling(ctx context.Context, env *Env) []Result {
 	if private < 1 {
 		private = avg
 	}
-	worstMB := (shared + int64(children)*private) / 1024
-	ev := fmt.Sprintf("%d max_children × %d MB private + %d MB shared (measured over %d workers)",
-		children, private/1024, shared/1024, n)
-	if worstMB > ramMB {
-		return []Result{New(Warn, fmt.Sprintf("PHP-FPM can request %d MB on a %d MB box", worstMB, ramMB)).Ev(ev).
-			Because("A traffic spike OOM-kills MariaDB before PHP notices.").
-			Fixed("move the busiest sites to a smaller pool profile (hs op fpm-profile, then Sites → Switch PHP version / pool template)")}
-	}
-	return []Result{New(OK, fmt.Sprintf("worst case %d MB of %d MB RAM", worstMB, ramMB)).Ev(ev)}
+	return private, shared, int(n)
 }
 
+// FPMTemplate is a php-fpm pool template Hestia renders into one pool per
+// domain on it (v-rebuild-web-domain, v-change-web-domain-backend-tpl) —
+// so the template, not the pool file, is where a limit lasts.
+type FPMTemplate struct {
+	Name, Path                             string
+	Version                                string // from a PHP-X_Y suffix; "" = Hestia's default PHP
+	Mode                                   string
+	MaxChildren, Start, MinSpare, MaxSpare int
+	IdleTimeout                            string
+	Domains                                []hestia.Domain
+}
+
+// Ceiling is the workers every domain on the template may fork together.
+func (t FPMTemplate) Ceiling() int { return len(t.Domains) * t.MaxChildren }
+
+var fpmVersionRe = regexp.MustCompile(`PHP-(\d+)_(\d+)$`)
+
+func poolValue(text, key string) string {
+	m := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*(\S+)`).FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+func poolInt(text, key string) int {
+	n, _ := strconv.Atoi(poolValue(text, key))
+	return n
+}
+
+// FPMTemplates lists the backend templates in use, biggest ceiling first.
+func FPMTemplates(s sys.Sys) []FPMTemplate {
+	byName := map[string]*FPMTemplate{}
+	var out []*FPMTemplate
+	for _, d := range hestia.WebDomains(s) {
+		name := d.Backend
+		if name == "" {
+			name = "default"
+		}
+		t, ok := byName[name]
+		if !ok {
+			t = &FPMTemplate{Name: name, Path: hestia.FpmTpl + "/" + name + ".tpl"}
+			if m := fpmVersionRe.FindStringSubmatch(name); m != nil {
+				t.Version = m[1] + "." + m[2]
+			}
+			text := readString(s, t.Path)
+			t.Mode, t.IdleTimeout = poolValue(text, "pm"), poolValue(text, "pm.process_idle_timeout")
+			t.MaxChildren, t.Start = poolInt(text, "pm.max_children"), poolInt(text, "pm.start_servers")
+			t.MinSpare, t.MaxSpare = poolInt(text, "pm.min_spare_servers"), poolInt(text, "pm.max_spare_servers")
+			byName[name] = t
+			out = append(out, t)
+		}
+		t.Domains = append(t.Domains, d)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Ceiling() != out[j].Ceiling() {
+			return out[i].Ceiling() > out[j].Ceiling()
+		}
+		return out[i].Name < out[j].Name
+	})
+	var ts []FPMTemplate
+	for _, t := range out {
+		ts = append(ts, *t)
+	}
+	return ts
+}
+
+// PSI thresholds, the same as templates/netdata/health.d/hs-pressure.conf:
+// "some" = at least one task stalled on memory for that share of the last
+// minute, "full" = every task. Both read 0.00 on a healthy web box.
+const (
+	PSISomeWarn = 20.0
+	PSIFullFail = 5.0
+)
+
+// The check that would have predicted the web1 OOM (2026-07-06): what PHP-FPM
+// may allocate under load, not what it uses at rest. And, from PSI, whether
+// the box is stalling on memory right now — the number a full swap file does
+// not give (kuumalahde 2026-09-30: 94 % used, nothing moving, 3 GB available).
+func checkFPMCeiling(ctx context.Context, env *Env) []Result {
+	s := env.Sys
+	ramMB := meminfo(s)["MemTotal"] / 1024
+	children, _ := FPMPoolChildren(s)
+	private, shared, n := FPMWorkerMemory(s)
+	if children == 0 || n == 0 {
+		return []Result{New(Unknown, "no PHP-FPM pools or workers to measure")}
+	}
+	worstMB := (shared + int64(children)*private) / 1024
+	ev := []string{fmt.Sprintf("%d max_children × %d MB private + %d MB shared (measured over %d workers)",
+		children, private/1024, shared/1024, n)}
+	for _, t := range FPMTemplates(s) {
+		var names []string
+		for _, d := range t.Domains {
+			names = append(names, d.Name)
+		}
+		ev = append(ev, fmt.Sprintf("%s: %s × max_children %d = %d workers (%s)", t.Name, plural(len(t.Domains), "domain", "domains"), t.MaxChildren, t.Ceiling(), joinMax(names, 4)))
+	}
+	var rs []Result
+	if p := psi(s, "memory"); p != nil {
+		now := fmt.Sprintf("memory pressure now (PSI, last 60 s): some %.1f %%, full %.1f %%", p["some60"], p["full60"])
+		switch {
+		case p["full60"] > PSIFullFail:
+			rs = append(rs, New(Fail, fmt.Sprintf("every task stalled on memory %.0f %% of the last minute", p["full60"])).For("now").Ev(now).
+				Because("Full memory pressure is the box thrashing, not degrading: requests hang while the kernel reclaims, and the OOM killer is next.").
+				Fixed("hs op fpm-pool-size (lower the biggest pool's max_children); v-server-memory for the whole picture"))
+		case p["some60"] > PSISomeWarn:
+			rs = append(rs, New(Warn, fmt.Sprintf("tasks stalled on memory %.0f %% of the last minute", p["some60"])).For("now").Ev(now).
+				Because("The working set no longer fits: the kernel is reclaiming and swapping under load, which is where the ceiling below becomes real.").
+				Fixed("hs op fpm-pool-size"))
+		default:
+			ev = append(ev, now+" — none")
+		}
+	}
+	if worstMB > ramMB {
+		return append(rs, New(Warn, fmt.Sprintf("PHP-FPM can request %d MB on a %d MB box", worstMB, ramMB)).Ev(ev...).
+			Because("A traffic spike OOM-kills MariaDB before PHP notices.").
+			Fixed("hs op fpm-pool-size — lower max_children in the pool template with the biggest ceiling (Hestia regenerates the pools from it)"))
+	}
+	return append(rs, New(OK, fmt.Sprintf("worst case %d MB of %d MB RAM", worstMB, ramMB)).Ev(ev...))
+}
+
+// SwapArea is one line of /proc/swaps (sizes in kB).
+type SwapArea struct {
+	Path, Type     string
+	SizeKB, UsedKB int64
+}
+
+func SwapAreas(s sys.Sys) []SwapArea {
+	var out []SwapArea
+	for _, l := range nonEmpty(readString(s, "/proc/swaps")) {
+		f := strings.Fields(l)
+		if len(f) < 4 || f[0] == "Filename" {
+			continue
+		}
+		size, _ := strconv.ParseInt(f[2], 10, 64)
+		used, _ := strconv.ParseInt(f[3], 10, 64)
+		out = append(out, SwapArea{Path: f[0], Type: f[1], SizeKB: size, UsedKB: used})
+	}
+	return out
+}
+
+// Sysctl reads a running kernel setting ("" when unreadable).
+func Sysctl(s sys.Sys, key string) string {
+	return strings.TrimSpace(readString(s, "/proc/sys/"+strings.ReplaceAll(key, ".", "/")))
+}
+
+// A full swap is not pressure: pages parked there during an old peak stay
+// until something needs them. Whether anything is stalling on memory is
+// PSI's question (the ceiling check asks it); this is the swap's own state.
 func checkSwap(ctx context.Context, env *Env) []Result {
 	m := meminfo(env.Sys)
 	total, free := m["SwapTotal"]/1024, m["SwapFree"]/1024
 	used := total - free
-	switch {
-	case total == 0:
+	if total == 0 {
 		return []Result{New(Warn, "no swap configured").
 			Because("Without swap the kernel OOM-kills immediately instead of degrading.").
 			Fixed("hs op swap")}
-	case used > total/2:
-		return []Result{New(Warn, fmt.Sprintf("%d of %d MB swap in use", used, total)).
-			Because("The box is under real memory pressure, not merely parked.").Fixed("v-server-memory")}
 	}
-	return []Result{New(OK, fmt.Sprintf("%d MB, %d MB used", total, used))}
+	swappiness := orDash(Sysctl(env.Sys, "vm.swappiness"))
+	ev := []string{fmt.Sprintf("%d of %d MB in use · vm.swappiness %s · MemAvailable %d MB", used, total, swappiness, m["MemAvailable"]/1024)}
+	for _, a := range SwapAreas(env.Sys) {
+		ev = append(ev, fmt.Sprintf("%s (%s) %d MB, %d MB used", a.Path, a.Type, a.SizeKB/1024, a.UsedKB/1024))
+	}
+	p := psi(env.Sys, "memory")
+	if p != nil {
+		ev = append(ev, fmt.Sprintf("memory pressure now (PSI, last 60 s): some %.1f %%, full %.1f %%", p["some60"], p["full60"]))
+	}
+	r := New(OK, fmt.Sprintf("%d of %d MB in use", used, total))
+	switch {
+	case p != nil && p["some60"] > PSISomeWarn && used*100/total >= 90:
+		r = New(Warn, fmt.Sprintf("swap is %d %% full and memory is under pressure", used*100/total)).
+			Because(fmt.Sprintf("Nothing is left to park into and tasks are already stalling on memory (some %.0f %% of the last minute): the next spike goes to the OOM killer.", p["some60"])).
+			Fixed("hs op fpm-pool-size; a bigger file with hs op swap")
+	case used == 0:
+		r.Summary = fmt.Sprintf("%d MB, unused — no memory pressure since boot", total)
+	case p != nil && p["some60"] <= PSISomeWarn:
+		r.Summary += " — parked, no memory pressure"
+	}
+	return []Result{r.With("swappiness", swappiness).Ev(ev...)}
 }
 
 // Big resident services nothing on this box consumes, and PHP past EOL.

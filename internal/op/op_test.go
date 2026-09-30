@@ -2,6 +2,7 @@ package op
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -340,5 +341,174 @@ func TestCloneOverwriteIsOptInAndTyped(t *testing.T) {
 	o, _ := ByID("clone")
 	if o.RiskFor(Values{"overwrite": "yes"}) != Destructive || o.RiskFor(Values{"overwrite": "no"}) != Change {
 		t.Error("overwrite must require the typed confirmation")
+	}
+}
+
+// kuumalahde 2026-09-30 in miniature: a 1 GB /swapfile nearly full of parked
+// pages on an 8 GB box with 3 GB available.
+func swapBox(availKB string) *sys.Fake {
+	f := box8G()
+	f.Files["/proc/meminfo"] = "MemTotal:        8155000 kB\nMemAvailable:    " + availKB + " kB\nSwapTotal:       1048572 kB\nSwapFree:          60000 kB\n"
+	f.Files["/proc/swaps"] = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/swapfile                               file\t\t1048572\t\t988572\t\t-2\n"
+	f.Files["/swapfile"] = "x"
+	return f
+}
+
+func TestSwapResizeKeepsTheOldFileAndNeverLeavesTheBoxWithoutRAM(t *testing.T) {
+	p := text(planOf(t, "swap", swapBox("3300000"), Values{"size": "2G"}))
+	for _, want := range []string{"fallocate -l 2G /swapfile.new", "swapon /swapfile.new", "swapoff /swapfile\n", "mv -n -v -- /swapfile \"$1/swapfile\"", "/root/hs-moved/", "mv -n -v -- /swapfile.new /swapfile", "swapon /swapfile\n"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %q in\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "$ rm") {
+		t.Errorf("the old swap file must be moved, not deleted:\n%s", p)
+	}
+	if i, j := strings.Index(p, "fallocate"), strings.Index(p, "swapoff /swapfile\n"); i > j {
+		t.Errorf("the new file must exist before the old one is switched off:\n%s", p)
+	}
+	// The same size again: nothing to do.
+	if st := planOf(t, "swap", swapBox("3300000"), Values{"size": "1G"}); len(st) != 0 {
+		t.Errorf("same size planned %v", st)
+	}
+	// 965 MB in swap, 976 MB available: swapoff would leave nothing.
+	o, _ := ByID("swap")
+	if _, err := o.Plan(context.Background(), &check.Env{Sys: swapBox("1000000")}, Target{}, Values{"size": "2G"}); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Errorf("swapoff into a full box was allowed: %v", err)
+	}
+	// Swap on a partition is not ours to resize.
+	f := swapBox("3300000")
+	f.Files["/proc/swaps"] = "Filename\tType\tSize\tUsed\tPriority\n/dev/vda3 partition 2097148 0 -2\n"
+	if _, err := o.Plan(context.Background(), &check.Env{Sys: f}, Target{}, Values{"size": "2G"}); err == nil {
+		t.Error("a swap partition was accepted")
+	}
+	// No swap at all: create it, fstab line once.
+	f = box8G()
+	f.Files["/proc/meminfo"] = "MemTotal:        8155000 kB\nMemAvailable:    3300000 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\n"
+	if p := text(planOf(t, "swap", f, Values{"size": "2G"})); !strings.Contains(p, "fallocate -l 2G /swapfile\n") || !strings.Contains(p, "mkswap /swapfile") || strings.Contains(p, "swapoff") {
+		t.Errorf("create plan:\n%s", p)
+	}
+}
+
+func TestVMSysctlWritesTheDropInAndAppliesLive(t *testing.T) {
+	f := box8G()
+	f.Files["/proc/sys/vm/swappiness"] = "60\n"
+	f.Files["/proc/sys/vm/vfs_cache_pressure"] = "100\n"
+	f.Files["/proc/sys/vm/overcommit_memory"] = "0\n"
+	f.Files["/etc/sysctl.conf"] = "# vm.swappiness = 60\nnet.ipv4.ip_forward = 0\n"
+	o, _ := ByID("vm-sysctl")
+	d := o.Defaults(context.Background(), &check.Env{Sys: f}, Target{})
+	if d["vm.swappiness"] != "10" || d["vm.vfs_cache_pressure"] != "50" || d["vm.overcommit_memory"] != "1" {
+		t.Errorf("suggestions for a Debian-default box with Redis: %v", d)
+	}
+	p := text(planOf(t, "vm-sysctl", f, nil))
+	for _, want := range []string{
+		"# hs: kernel memory settings (hs op vm-sysctl)", "> /etc/sysctl.d/90-hs-memory.conf",
+		"conf set --style ini /etc/sysctl.d/90-hs-memory.conf vm.swappiness 10 vm.vfs_cache_pressure 50 vm.overcommit_memory 1",
+		"sysctl -p /etc/sysctl.d/90-hs-memory.conf",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %q in\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "systemctl") || strings.Contains(p, "also set in") {
+		t.Errorf("no restart, and a commented-out line elsewhere is not a competitor:\n%s", p)
+	}
+	// Another file setting the key is named — it wins at boot if it sorts later.
+	f.Files["/etc/sysctl.d/99-cloud.conf"] = "vm.swappiness = 30\n"
+	if p := text(planOf(t, "vm-sysctl", f, nil)); !strings.Contains(p, "also set in /etc/sysctl.d/99-cloud.conf (30)") {
+		t.Errorf("competing file not named:\n%s", p)
+	}
+	// Already applied and written: nothing to do.
+	f.Files["/proc/sys/vm/swappiness"], f.Files["/proc/sys/vm/vfs_cache_pressure"], f.Files["/proc/sys/vm/overcommit_memory"] = "10", "50", "1"
+	f.Files["/etc/sysctl.d/90-hs-memory.conf"] = "vm.swappiness = 10\nvm.vfs_cache_pressure = 50\nvm.overcommit_memory = 1\n"
+	if st := planOf(t, "vm-sysctl", f, Values{"vm.swappiness": "10", "vm.vfs_cache_pressure": "50", "vm.overcommit_memory": "1"}); len(st) != 0 {
+		t.Errorf("nothing changed, planned %v", st)
+	}
+}
+
+// Two domains on a 50-worker dynamic template, workers ~150 MB private on
+// an 8 GB box: 100 allowed, about 40 fit.
+func fpmBox() *sys.Fake {
+	f := box8G()
+	f.Files[hestia.UsersDir+"/u/web.conf"] = "DOMAIN='a.fi' BACKEND='production-PHP-8_2'\nDOMAIN='b.fi' BACKEND='production-PHP-8_2'\n"
+	f.Files[hestia.FpmTpl+"/production-PHP-8_2.tpl"] = "[%domain%]\npm = dynamic\npm.max_children = 50\npm.start_servers = 10\npm.min_spare_servers = 10\npm.max_spare_servers = 20\npm.max_requests = 1000\n"
+	for _, d := range []string{"a.fi", "b.fi"} {
+		f.Files["/etc/php/8.2/fpm/pool.d/"+d+".conf"] = "[" + d + "]\npm = dynamic\npm.max_children = 50\n"
+	}
+	delete(f.Files, "/etc/php/8.2/fpm/pool.d/renea.fi.conf")
+	for i, pid := range []string{"100", "101", "102"} {
+		f.Files["/proc/"+pid+"/comm"] = "php-fpm8.2\n"
+		// shared 100 MB + private 150 MB each: RSS 250 MB, PSS shares the 100 MB three ways
+		f.Files["/proc/"+pid+"/smaps_rollup"] = "Rss:              256000 kB\nPss:              " + []string{"187733", "187733", "187734"}[i] + " kB\n"
+	}
+	return f
+}
+
+func TestFPMPoolSizeEditsTheTemplateThenRebuildsEachDomain(t *testing.T) {
+	f := fpmBox()
+	o, _ := ByID("fpm-pool-size")
+	d := o.Defaults(context.Background(), &check.Env{Sys: f}, Target{})
+	if d["template"] != "production-PHP-8_2" || d["mode"] != "dynamic" || d["min_spare"] != "10" {
+		t.Errorf("defaults from the biggest template: %v", d)
+	}
+	if n, _ := strconv.Atoi(d["max_children"]); n >= 50 || n < 2 {
+		t.Errorf("over budget, so a smaller size should be suggested: %v", d)
+	}
+	p := text(planOf(t, "fpm-pool-size", f, Values{"max_children": "20", "start": "", "min_spare": "", "max_spare": ""}))
+	for _, want := range []string{
+		"conf set --style ini --comment ';' --after pm.max_children " + hestia.FpmTpl + "/production-PHP-8_2.tpl pm dynamic pm.max_children 20 pm.start_servers 7 pm.min_spare_servers 4 pm.max_spare_servers 10",
+		"conf unset --comment ';' " + hestia.FpmTpl + "/production-PHP-8_2.tpl pm.process_idle_timeout",
+		"v-rebuild-web-domain u a.fi no", "v-rebuild-web-domain u b.fi no",
+		"php-fpm8.2 -t", "systemctl try-reload-or-restart php8.2-fpm",
+		"grep -H ^pm /etc/php/8.2/fpm/pool.d/a.fi.conf /etc/php/8.2/fpm/pool.d/b.fi.conf",
+		"100 → 40", "÷ 150 MB private per worker",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %q in\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "conf install") || strings.Contains(p, "systemctl restart") || strings.Contains(p, "pool.d/a.fi.conf pm") {
+		t.Errorf("only the template is edited, reload is graceful:\n%s", p)
+	}
+	if i, j := strings.Index(p, "php-fpm8.2 -t"), strings.Index(p, "try-reload-or-restart"); i > j {
+		t.Errorf("the config test comes before the reload:\n%s", p)
+	}
+	// Unchanged: nothing to do.
+	if st := planOf(t, "fpm-pool-size", f, Values{"max_children": "50", "start": "10", "min_spare": "10", "max_spare": "20"}); len(st) != 0 {
+		t.Errorf("same values planned %v", st)
+	}
+	// php-fpm's own rule: min ≤ start ≤ max ≤ children.
+	if _, err := o.Plan(context.Background(), &check.Env{Sys: f}, Target{}, Values{"template": "production-PHP-8_2", "mode": "dynamic", "max_children": "20", "start": "5", "min_spare": "8", "max_spare": "30"}); err == nil {
+		t.Error("spare servers above max_children accepted")
+	}
+	// static: the spare keys are commented out instead.
+	if p := text(planOf(t, "fpm-pool-size", f, Values{"mode": "static", "max_children": "12"})); !strings.Contains(p, "pm static pm.max_children 12\n") || !strings.Contains(p, "pm.start_servers pm.min_spare_servers pm.max_spare_servers pm.process_idle_timeout") {
+		t.Errorf("static plan:\n%s", p)
+	}
+}
+
+func TestNetdataAlarmsInstallThenReloadWithoutRestart(t *testing.T) {
+	f := box8G()
+	f.Commands["netdata"], f.Commands["netdatacli"] = true, true
+	f.Files["/repo/templates/netdata/health.d/swap.conf"] = "alarm: hs_swap_io\n"
+	f.Files["/repo/templates/netdata/health.d/hs-pressure.conf"] = "alarm: hs_ram_pressure\n"
+	p := text(planOf(t, "netdata-alarms", f, nil))
+	for _, want := range []string{
+		"install -d -m 755 /etc/netdata/health.d",
+		"conf install /repo/templates/netdata/health.d/swap.conf /etc/netdata/health.d/swap.conf",
+		"conf install /repo/templates/netdata/health.d/hs-pressure.conf /etc/netdata/health.d/hs-pressure.conf",
+		"netdatacli reload-health", "used_swap",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %q in\n%s", want, p)
+		}
+	}
+	if strings.Contains(p, "systemctl restart netdata") {
+		t.Errorf("netdatacli is here, no restart needed:\n%s", p)
+	}
+	delete(f.Commands, "netdatacli")
+	if p := text(planOf(t, "netdata-alarms", f, nil)); !strings.Contains(p, "systemctl restart netdata") {
+		t.Errorf("without netdatacli a restart is the way:\n%s", p)
 	}
 }

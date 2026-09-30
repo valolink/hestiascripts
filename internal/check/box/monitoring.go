@@ -2,8 +2,10 @@ package box
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 func monitoringChecks() []Check {
 	return []Check{
 		{ID: "netdata", Section: "monitoring", Title: "Netdata", Run: checkNetdata},
+		{ID: "netdata.alarms", Section: "monitoring", Title: "Netdata alarms", Run: checkNetdataAlarms},
 		{ID: "streamer", Section: "monitoring", Title: "hestia-streamer", Run: checkStreamer},
 		{ID: "wpcli", Section: "monitoring", Title: "WP-CLI", Run: checkWPCLI},
 		{ID: "updates.signing", Section: "security", Title: "Signed hestiascripts updates", Run: checkSigning},
@@ -62,6 +65,101 @@ func checkNetdata(ctx context.Context, env *Env) []Result {
 		return rs
 	}
 	return []Result{New(OK, "running, low-footprint profile, alarms API answering on localhost")}
+}
+
+// NetdataHealthDir is where Netdata reads the operator's health files; a
+// file there with a stock file's name takes the stock file's place.
+const NetdataHealthDir = "/etc/netdata/health.d"
+
+// HSAlarmFiles are the health files hs installs from templates/netdata/health.d/:
+// swap.conf replaces the stock one (its used_swap fired on how full swap is —
+// kuumalahde 2026-09-30, 94 % parked, nothing moving), hs-pressure.conf adds
+// alarms on PSI. The names are what EngineLink's alarm list shows.
+var (
+	HSAlarmFiles = []string{"swap.conf", "hs-pressure.conf"}
+	HSAlarmNames = []string{"hs_ram_pressure", "hs_ram_stall", "hs_swap_io", "hs_cpu_pressure"}
+)
+
+// NetdataAlarmNames lists every alarm the running Netdata has loaded
+// (raised or not), from /api/v1/alarms?all.
+func NetdataAlarmNames(ctx context.Context, env *Env) ([]string, error) {
+	hctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	code, body, err := env.Sys.HTTPGet(hctx, "http://127.0.0.1:19999/api/v1/alarms?all", nil)
+	if err != nil {
+		return nil, err
+	}
+	if code != 200 {
+		return nil, fmt.Errorf("HTTP %d", code)
+	}
+	var v struct {
+		Alarms map[string]struct{ Name string } `json:"alarms"`
+	}
+	if err := json.Unmarshal(body, &v); err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, a := range v.Alarms {
+		names = append(names, a.Name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// Green needs the alarms loaded in the running Netdata, not files on disk.
+func checkNetdataAlarms(ctx context.Context, env *Env) []Result {
+	s := env.Sys
+	if !s.Have("netdata") {
+		return []Result{New(NA, "Netdata is not installed")}
+	}
+	var missing []string
+	for _, f := range HSAlarmFiles {
+		if same, ok := sameFile(s, env.RepoDir+"/templates/netdata/health.d/"+f, NetdataHealthDir+"/"+f); !ok || !same {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		return []Result{New(Warn, "alarms fire on swap fill level, not on pressure").
+			Ev("not installed or differs from the repo: " + NetdataHealthDir + "/" + strings.Join(missing, ", ")).
+			Because("Stock Netdata warns when the swap file is nearly full — pages parked during an old peak, harmless while nothing moves (kuumalahde 2026-09-30) — and says nothing when tasks actually stall on memory or the box swaps under load.").
+			Fixed("hs op netdata-alarms")}
+	}
+	if !active(ctx, s, "netdata") {
+		return []Result{New(Configured, "alarm files installed; Netdata is not running to load them")}
+	}
+	names, err := NetdataAlarmNames(ctx, env)
+	if err != nil {
+		return []Result{New(Configured, "alarm files installed; the alarms API did not answer to confirm them").Ev(err.Error())}
+	}
+	have := map[string]bool{}
+	for _, n := range names {
+		have[n] = true
+	}
+	var loaded, absent []string
+	for _, n := range HSAlarmNames {
+		if have[n] {
+			loaded = append(loaded, n)
+		} else {
+			absent = append(absent, n)
+		}
+	}
+	ev := []string{fmt.Sprintf("%d alarms loaded; hs: %s", len(names), strings.Join(loaded, ", "))}
+	if have["used_swap"] {
+		return []Result{New(Warn, "the stock used_swap alarm is still loaded").Ev(ev...).
+			Because("The installed health.d/swap.conf should have taken the stock file's place; Netdata has not re-read its health configuration.").
+			Fixed("netdatacli reload-health (or hs op netdata-alarms)")}
+	}
+	if len(loaded) == 0 {
+		return []Result{New(Warn, "hs alarm files installed but none of their alarms is loaded").Ev(ev...).
+			Because("Netdata has not re-read its health configuration since the files were written, or the charts they watch do not exist here (PSI needs a kernel with /proc/pressure).").
+			Fixed("netdatacli reload-health (or hs op netdata-alarms)")}
+	}
+	if len(absent) > 0 {
+		// The charts PSI alarms watch exist only on kernels with PSI on.
+		return []Result{New(Configured, "some hs alarms are not loaded: "+strings.Join(absent, ", ")).Ev(ev...).
+			Ev("their charts are missing on this box (system.*_pressure needs /proc/pressure) — swap and the rest are covered")}
+	}
+	return []Result{New(OK, "pressure alarms loaded, stock used_swap off").Ev(ev...).Valid(24 * time.Hour)}
 }
 
 func errOrCode(err error, code int) string {

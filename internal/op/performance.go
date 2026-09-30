@@ -205,12 +205,9 @@ func (p fpmProfile) summary() string {
 	return s
 }
 
-// profileSteps: copy Hestia's base pool template for the version and set the
-// profile's pm keys, commenting out the ones its mode does not use.
-func profileSteps(p fpmProfile, ver string) []Step {
-	tag := strings.ReplaceAll(ver, ".", "_")
-	src := hestia.FpmTpl + "/PHP-" + tag + ".tpl"
-	dst := hestia.FpmTpl + "/" + p.Name + "-PHP-" + tag + ".tpl"
+// poolSteps sets a pool template's pm keys from the profile, commenting out
+// the ones its mode does not use. Shared by fpm-profile and fpm-pool-size.
+func poolSteps(why string, p fpmProfile, dst string) []Step {
 	o := conf.Opts{Style: conf.INI, Comment: ";", After: "pm.max_children"}
 	kv := []string{"pm", p.Mode, "pm.max_children", p.MaxChildren}
 	if p.MaxRequests != "" {
@@ -228,10 +225,19 @@ func profileSteps(p fpmProfile, ver string) []Step {
 		off = []string{"pm.start_servers", "pm.min_spare_servers", "pm.max_spare_servers", "pm.process_idle_timeout"}
 	}
 	return []Step{
-		confInstall(p.Name+" for PHP "+ver+": start from Hestia's base pool template", src, dst),
-		confSet("the profile's worker settings", dst, o, kv...),
+		confSet(why, dst, o, kv...),
 		confUnset("keys pm = "+p.Mode+" does not use", dst, conf.Opts{Comment: ";"}, off...),
 	}
+}
+
+// profileSteps: copy Hestia's base pool template for the version and set the
+// profile's pm keys.
+func profileSteps(p fpmProfile, ver string) []Step {
+	tag := strings.ReplaceAll(ver, ".", "_")
+	src := hestia.FpmTpl + "/PHP-" + tag + ".tpl"
+	dst := hestia.FpmTpl + "/" + p.Name + "-PHP-" + tag + ".tpl"
+	return append([]Step{confInstall(p.Name+" for PHP "+ver+": start from Hestia's base pool template", src, dst)},
+		poolSteps("the profile's worker settings", p, dst)...)
 }
 
 func multiPHP(env *check.Env) []string {
