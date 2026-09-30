@@ -436,3 +436,18 @@ func TestUnattendedCause(t *testing.T) {
 		t.Errorf("a later file setting 0 wins: %+v", rs)
 	}
 }
+
+func TestResendGuard(t *testing.T) {
+	f := &sys.Fake{Commands: map[string]bool{"postconf": true}, Cmds: map[string]sys.FakeCmd{
+		"postconf -h relayhost": {Out: "[smtp.resend.com]:587\n"},
+	}}
+	if rs := checkResendGuard(context.Background(), env(f)); rs[0].State != Warn || len(rs[0].Evidence) != 3 {
+		t.Errorf("no guard: %+v", rs)
+	}
+	f.Cmds["postconf -h sender_canonical_maps"] = sys.FakeCmd{Out: "regexp:/etc/postfix/hs_sender_canonical\n"}
+	f.Cmds["postconf -h smtp_reply_filter"] = sys.FakeCmd{Out: "regexp:/etc/postfix/hs_smtp_reply_filter\n"}
+	f.Cmds["postconf -h smtp_destination_rate_delay"] = sys.FakeCmd{Out: "1s\n"}
+	if rs := checkResendGuard(context.Background(), env(f)); rs[0].State != OK {
+		t.Errorf("guarded: %+v", rs)
+	}
+}

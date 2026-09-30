@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,10 @@ const (
 	postfixCF  = "/etc/postfix/main.cf"
 	saslPasswd = "/etc/postfix/sasl_passwd"
 	genericMap = "/etc/postfix/generic"
+
+	senderCanonical = "/etc/postfix/hs_sender_canonical"
+	smtpHeaderCheck = "/etc/postfix/hs_smtp_header_checks"
+	smtpReplyFilter = "/etc/postfix/hs_smtp_reply_filter"
 )
 
 func fqdn(ctx context.Context, env *check.Env) string {
@@ -63,7 +68,7 @@ func init() {
 		ID: "smtp-relay", Title: "Relay mail through Resend", Section: "mail", Risk: Change,
 		Resolves: "mail.delivery", Applies: summaryHas("no SMTP relay"),
 		Note: "Postfix sends everything through smtp.resend.com:587 with your API key. The key is typed masked and never appears in the plan, the command line, the action log or a backup — only in /etc/postfix/sasl_passwd (root-only), where postfix needs it.",
-		How:  "The API key reaches hs in an environment variable and is written to /etc/postfix/sasl_passwd (umask 077) and hashed with postmap. main.cf is copied to /var/lib/hs/backups first, then `postconf -e` sets the relay, SASL login and mandatory TLS. A sender address rewrites root@, www-data@ and @<hostname> through /etc/postfix/generic, so cron and alert mail comes from a domain verified in Resend. postfix reloads.",
+		How:  "The API key reaches hs in an environment variable and is written to /etc/postfix/sasl_passwd (umask 077) and hashed with postmap. main.cf is copied to /var/lib/hs/backups first, then `postconf -e` sets the relay, SASL login and mandatory TLS. A sender address rewrites root@, www-data@ and @<hostname> through /etc/postfix/generic, so cron and alert mail comes from a domain verified in Resend, and the Resend guard (see smtp-resend-guard) rewrites every other sender and paces deliveries. postfix reloads.",
 		Undo: "Copy the kept main.cf back (path in the plan) and `systemctl reload postfix`; rm /etc/postfix/sasl_passwd*.",
 		Fields: []Field{
 			{Key: "api-key", Label: "Resend API key", Kind: Secret, Help: "re_… from resend.com/api-keys (sending access is enough).",
@@ -113,10 +118,44 @@ func init() {
 					Step{Why: "system mail from " + s, Argv: []string{"sh", "-c",
 						`printf 'root              %s\nwww-data          %s\n@%s          %s\n@localhost        %s\n' "$1" "$1" "$2" "$1" "$1" > ` + genericMap + ` && postmap ` + genericMap, "sh", s, fqdn(ctx, env)}},
 					Step{Argv: []string{"postconf", "-e", "smtp_generic_maps = hash:" + genericMap}})
+				steps = append(steps, resendGuardSteps(s)...)
 			}
 			return append(steps,
 				Step{Why: "apply", Argv: []string{"systemctl", "reload-or-restart", "postfix"}},
 				Step{Why: "now: send a test (Mail → Send a test email)", Argv: []string{"postconf", "relayhost", "smtp_generic_maps"}},
+			), nil
+		},
+	})
+	register(Op{
+		ID: "smtp-resend-guard", Title: "Resend: send every sender as the box address, paced", Section: "mail", Risk: Change,
+		Resolves: "mail.resend-guard",
+		Note:     "Fleet 2026-09-30: Resend refused WordPress mail sent as admin@<site> (Hestia's PHP pools pass -f admin@<domain>) because only the sender address's own domain is verified — \"This API key is not authorized to send emails from <domain>\" — and answered bursts with a permanent \"550 Too many requests\", so postfix dropped them; the bounce notices then failed as \"Invalid from\".",
+		How:      "Three regexp tables in /etc/postfix: hs_sender_canonical (envelope senders not on the verified domain become the box address; sender_canonical_classes = envelope_sender only), hs_smtp_header_checks (only the From: header, display name kept — Reply-To is never touched, so replies still reach the original person) and hs_smtp_reply_filter (Resend's 550 Too many requests becomes a 450, so postfix retries). smtp_destination_rate_delay = 1s keeps one delivery per second. main.cf is backed up first; postfix reloads.",
+		Undo:     "Copy the kept main.cf back (path in the plan) and `systemctl reload postfix`; the three hs_* files can stay or be removed.",
+		Fields: []Field{{Key: "sender", Label: "Box address (on the verified domain)", Kind: Text, Pattern: emailRe,
+			Help: "The address system mail already uses — the root line of /etc/postfix/generic.",
+			Current: func(_ context.Context, env *check.Env, _ Target) string {
+				for _, l := range strings.Split(readFile(env, genericMap), "\n") {
+					if f := strings.Fields(l); len(f) == 2 && f[0] == "root" {
+						return f[1]
+					}
+				}
+				return ""
+			}}},
+		Recheck: []string{"mail.resend-guard", "mail.delivery"},
+		Plan: func(ctx context.Context, env *check.Env, _ Target, v Values) ([]Step, error) {
+			if !strings.Contains(box.Relay(ctx, env), "resend.com") {
+				return nil, fmt.Errorf("postfix does not relay through Resend — Relay mail through Resend first")
+			}
+			s := v["sender"]
+			if !strings.Contains(s, "@") {
+				return nil, fmt.Errorf("the box address needs a domain (%q)", s)
+			}
+			steps := []Step{{Why: "keep main.cf", Argv: []string{"install", "-D", "-m", "600", postfixCF, conf.BackupPath(postfixCF, time.Now())}}}
+			steps = append(steps, resendGuardSteps(s)...)
+			return append(steps,
+				Step{Why: "check and apply", Argv: []string{"sh", "-c", "postfix check && systemctl reload-or-restart postfix"}},
+				Step{Why: "an unverified sender now maps to", Argv: []string{"postmap", "-q", "admin@example.fi", "regexp:" + senderCanonical}},
 			), nil
 		},
 	})
@@ -178,4 +217,37 @@ func init() {
 			}, nil
 		},
 	})
+}
+
+// ResendGuardFiles is the content of the three postfix tables for a box
+// address on Resend's verified domain (the part after @).
+func ResendGuardFiles(sender string) (canonical, headers, reply string) {
+	dom := regexp.QuoteMeta(sender[strings.LastIndex(sender, "@")+1:])
+	canonical = "# hs: Resend accepts only its verified sender domain (" + dom + ").\n" +
+		"# Envelope senders on other domains (admin@<site> from Hestia's PHP pools, root@<host>) send as the box address.\n" +
+		"/^(.*@" + dom + ")$/\t${1}\n" +
+		"/^.+$/\t" + sender + "\n"
+	headers = "# hs: only the From header, display name kept; Reply-To is not touched.\n" +
+		"/^From:.*@" + dom + ">?[[:space:]]*$/\tDUNNO\n" +
+		"/^From:[[:space:]]*\"?([^\"<]*[^\"< ])\"?[[:space:]]*<[^>]*>[[:space:]]*$/\tREPLACE From: \"${1}\" <" + sender + ">\n" +
+		"/^From:[[:space:]]*[^[:space:]]+[[:space:]]*\\((.*)\\)[[:space:]]*$/\tREPLACE From: \"${1}\" <" + sender + ">\n" +
+		"/^From:.*$/\tREPLACE From: <" + sender + ">\n"
+	reply = "# hs: Resend answers rate limiting with a permanent 550; make it a retry.\n" +
+		"/^550([ -].*Too many requests.*)$/\t450${1}\n"
+	return
+}
+
+func resendGuardSteps(sender string) []Step {
+	c, h, r := ResendGuardFiles(sender)
+	write := func(path, content string) Step {
+		return Step{Why: "write " + path + ":\n" + strings.TrimRight(content, "\n"),
+			Argv: []string{"sh", "-c", `printf '%s' "$1" > "$2" && chmod 644 "$2"`, "sh", content, path}}
+	}
+	return []Step{
+		write(senderCanonical, c), write(smtpHeaderCheck, h), write(smtpReplyFilter, r),
+		{Why: "use them; one delivery per second", Argv: []string{"postconf", "-e",
+			"sender_canonical_maps = regexp:" + senderCanonical, "sender_canonical_classes = envelope_sender",
+			"smtp_header_checks = regexp:" + smtpHeaderCheck, "smtp_reply_filter = regexp:" + smtpReplyFilter,
+			"smtp_destination_rate_delay = 1s"}},
+	}
 }

@@ -353,6 +353,16 @@ soutuveneet.fi: PerplexityBot walked every category × `?product_orderby=` / `pr
 
 **`hs fix staging-uploads DOMAIN`** runs exactly the script's two functions: `mount --bind`, `mount -o remount,ro,bind`, a root write probe that unmounts again if the mount is writable (bind_mount_uploads_ro); then the fstab backup under `/var/lib/hs/backups`, the tagged line (an earlier one for the mount point replaced), `systemctl daemon-reload`, `findmnt --verify` (persist_uploads_mount). Steps already true are left out. Every directory on both paths is refused if it is a symlink, at plan time and again right before mounting — root must not mount over a place a site user points it at. Staging's own files stay underneath the mount, hidden, not deleted.
 
+## Mail through Resend: senders and pacing (2026-09-30)
+
+Every box relays through smtp.resend.com, and on 2026-09-30 about a third of relayed mail bounced (hzweb1 134 bounced / 86 sent in three days). Three causes, read from the logs, not guessed (a first guess — the RFC 822 `root (Cron Daemon)` From form — was tested on hzdemolink and Resend accepted it):
+
+- **Unverified sender domain.** Hestia's PHP pools send with `-f admin@<domain>`, and WordPress's own From is `wordpress@<domain>`; the Resend key only has `demolink.fi` verified (not its subdomains, not valolink.fi) → `550 This API key is not authorized to send emails from <domain>`. `/etc/postfix/generic` only covered root@, www-data@ and the hostname.
+- **Rate limit.** Resend answers bursts (backup time, alert storms) with a *permanent* `550 Too many requests`, so postfix dropped the mail.
+- **Bounce notices** for the two above go out with the null sender and fail as `550 Invalid from` — noise that disappears with the causes.
+
+`hs op smtp-resend-guard` (and `smtp-relay` when a sender is given): `hs_sender_canonical` rewrites envelope senders off the verified domain to the box address (`sender_canonical_classes = envelope_sender` only), `hs_smtp_header_checks` rewrites only the From header and keeps its display name (Reply-To untouched — `header_sender` would also rewrite Reply-To, so it is not used), `hs_smtp_reply_filter` turns the rate-limit 550 into a 450, and `smtp_destination_rate_delay = 1s`. Check `mail.resend-guard`. Customer-facing mail on the fleet goes through SMTP plugins (WP Mail SMTP, Easy WP SMTP), not postfix — no customer recipient appeared in three days of logs.
+
 ## Redis object cache — the documented layout (2026-09-25)
 
 Read from the redis-cache plugin's README, FAQ and CHANGELOG and its 2.8.0 drop-in source, then checked on the live boxes. `internal/redisinfo` holds the model; checks and fixes share it.

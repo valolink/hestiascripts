@@ -524,3 +524,27 @@ func TestNetdataAlarmsInstallThenReloadWithoutRestart(t *testing.T) {
 		t.Errorf("without netdatacli a restart is the way:\n%s", p)
 	}
 }
+
+// The tables hs writes are the ones rolled out by hand on 2026-09-30.
+func TestResendGuardFiles(t *testing.T) {
+	c, h, r := ResendGuardFiles("hestia@demolink.fi")
+	for _, want := range []string{"/^(.*@demolink\\.fi)$/\t${1}\n", "/^.+$/\thestia@demolink.fi\n"} {
+		if !strings.Contains(c, want) {
+			t.Errorf("canonical lacks %q:\n%s", want, c)
+		}
+	}
+	if !strings.Contains(h, "REPLACE From: \"${1}\" <hestia@demolink.fi>") || strings.Contains(h, "Reply-To") && !strings.Contains(h, "not touched") {
+		t.Errorf("header checks:\n%s", h)
+	}
+	if !strings.Contains(r, "450${1}") {
+		t.Errorf("reply filter:\n%s", r)
+	}
+	o, _ := ByID("smtp-resend-guard")
+	f := box8G()
+	f.Commands["postconf"] = true
+	f.Cmds["postconf -h relayhost"] = sys.FakeCmd{Out: "[smtp.resend.com]:587\n"}
+	st, err := o.Plan(context.Background(), &check.Env{Sys: f}, Target{}, Values{"sender": "hestia@demolink.fi"})
+	if err != nil || !strings.Contains(text(st), "smtp_destination_rate_delay = 1s") {
+		t.Errorf("plan: %v\n%s", err, text(st))
+	}
+}

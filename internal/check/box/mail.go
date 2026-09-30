@@ -14,6 +14,7 @@ func mailChecks() []Check {
 	return []Check{
 		{ID: "mail.queue", Section: "mail", Title: "Mail queue", Run: checkMailQueue},
 		{ID: "mail.delivery", Section: "mail", Title: "Outbound mail", Timeout: 20 * time.Second, Run: checkMailDelivery},
+		{ID: "mail.resend-guard", Section: "mail", Title: "Resend sender rewrite and pacing", Run: checkResendGuard},
 	}
 }
 
@@ -215,4 +216,33 @@ func syslogTime(l string, now time.Time) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+// Fleet 2026-09-30: every box relayed through Resend, and Resend refused
+// admin@<site> senders (unverified domain), dropped bursts with a permanent
+// 550 Too many requests, and rejected the null-sender bounces that followed.
+func checkResendGuard(ctx context.Context, env *Env) []Result {
+	if !strings.Contains(Relay(ctx, env), "resend.com") {
+		return []Result{New(NA, "not relaying through Resend")}
+	}
+	get := func(k string) string {
+		out, _ := env.Sys.Run(ctx, "postconf", "-h", k)
+		return strings.TrimSpace(out)
+	}
+	var missing []string
+	if !strings.Contains(get("sender_canonical_maps"), "hs_sender_canonical") {
+		missing = append(missing, "sender rewrite (site mail as admin@<domain> is refused)")
+	}
+	if !strings.Contains(get("smtp_reply_filter"), "hs_smtp_reply_filter") {
+		missing = append(missing, "rate-limit retry (550 Too many requests drops mail)")
+	}
+	if d := get("smtp_destination_rate_delay"); d == "" || d == "0s" || d == "0" {
+		missing = append(missing, "pacing (smtp_destination_rate_delay)")
+	}
+	if len(missing) == 0 {
+		return []Result{New(OK, "every sender goes out as the box address, one delivery per second, rate limits retried")}
+	}
+	return []Result{New(Warn, fmt.Sprintf("Resend relay without %d of 3 guards", len(missing))).Ev(missing...).
+		Because("Resend accepts only its verified domain in the sender and answers bursts with a permanent 550, so WordPress admin mail and alert bursts bounce and the bounce notices fail too.").
+		Fixed("hs op smtp-resend-guard")}
 }
