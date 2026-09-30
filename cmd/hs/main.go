@@ -64,6 +64,9 @@ Usage:
   hs firewall show|apply   rules Hestia does not make: IPv6 inbound, outbound filter, C2 blocks
   hs templates install     write and verify the web templates (needs the cache-headers drop-in)
   hs conf set|install|get  edit a config file, printing before → after, backup kept (hs conf)
+  hs robots show|write DOMAIN
+                           the hs-managed block in a WordPress site's robots.txt (sitemap, wp-admin,
+                           WooCommerce sort/filter/cart rules); show writes nothing
   hs version
 
 Sections: ` + "security, backups, sites, system, performance, web, mail, monitoring" + `
@@ -106,6 +109,8 @@ func main() {
 		os.Exit(cmdConf(os.Args[2:]))
 	case "apt":
 		os.Exit(cmdApt(os.Args[2:]))
+	case "robots":
+		os.Exit(cmdRobots(os.Args[2:]))
 	case "f2b":
 		os.Exit(cmdF2B(ctx, os.Args[2:]))
 	case "templates":

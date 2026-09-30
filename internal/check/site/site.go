@@ -21,6 +21,7 @@ import (
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/logcap"
+	"github.com/valolink/hestiascripts/internal/robots"
 	"github.com/valolink/hestiascripts/internal/sys"
 	"github.com/valolink/hestiascripts/internal/wpfiles"
 )
@@ -44,6 +45,9 @@ func All(env *Env) []Check {
 				Run: func(ctx context.Context, env *Env) []Result { return checkUpdates(ctx, env, d) }},
 			Check{ID: "site.debug", Section: "sites", Title: "WordPress debug mode", Subject: d.Name,
 				Run: func(ctx context.Context, env *Env) []Result { return checkDebug(env, d) }},
+			Check{ID: "site.robots", Section: "sites", Title: "robots.txt", Subject: d.Name, Heavy: true,
+				Timeout: 60 * time.Second, MinInterval: 6 * time.Hour,
+				Run: func(ctx context.Context, env *Env) []Result { return checkRobots(ctx, env, d) }},
 		)
 	}
 	return cs
@@ -416,4 +420,56 @@ func plural(n int, one, many string) string {
 		return "1 " + one
 	}
 	return strconv.Itoa(n) + " " + many
+}
+
+// robots.txt: a Sitemap line, wp-admin closed, and for WooCommerce shops the
+// sort/filter/cart URLs closed — soutuveneet.fi 2026-09-30, where a crawler
+// rendering every ?product_orderby= permutation (each one uncached) put the
+// box at load 15, behind Hestia's placeholder robots.txt.
+func checkRobots(ctx context.Context, env *Env, d hestia.Domain) []Result {
+	path := robots.Path(d)
+	exists := false
+	existing := ""
+	if fi, err := env.Sys.Lstat(path); err == nil {
+		if !fi.Mode().IsRegular() {
+			return []Result{New(Warn, "robots.txt is not a regular file").Ev(path).
+				Because("A symlink or directory in its place is not something hs writes over.").
+				Fixed("ls -la " + path)}
+		}
+		exists = true
+		b, _ := env.Sys.ReadFile(path)
+		existing = string(b)
+	}
+	f, err := robots.Gather(ctx, env.Sys, d, func(ctx context.Context, args ...string) (string, error) { return WP(ctx, env, d, args...) })
+	if err != nil {
+		return []Result{wpBootFailure(err, d)}
+	}
+	st := robots.Assess(existing, exists, f)
+	ev := []string{f.String()}
+	switch st.Kind {
+	case "virtual":
+		ev = append(ev, "no physical robots.txt: WordPress serves its own")
+	case "hestia":
+		ev = append(ev, "physical file is Hestia's placeholder (Crawl-delay only)")
+	}
+	r := New(OK, map[string]string{
+		"virtual": "WordPress's own robots.txt",
+		"hs":      "robots.txt with the hs block, current",
+		"custom":  "custom robots.txt with a sitemap",
+	}[st.Kind])
+	if len(st.Problems) > 0 {
+		r = New(Warn, st.Problems[0]).Ev(st.Problems[1:]...)
+		switch st.Route {
+		case "plugin":
+			r = r.Because("Crawlers follow every sort, filter and cart link, and every query string bypasses the page cache — each is a full PHP render. " + f.SEOPlugin + " serves the robots.txt rules on this site; a physical file would silently override it.").
+				Fixed("add these lines in " + f.SEOPlugin + "'s robots.txt editor: " + strings.Join(robots.Rules(f), " · "))
+		case "unshadow":
+			r = r.Because("Hestia's placeholder is served instead of the robots.txt " + f.SEOPlugin + " builds, so its rules and sitemap never reach crawlers.").
+				Fixed("hs fix robots-unshadow " + d.Name + "   # moves the placeholder to private/, " + f.SEOPlugin + " takes over")
+		default:
+			r = r.Because("Crawlers follow every sort, filter and cart link, and every query string bypasses the page cache — each one is a full PHP render (soutuveneet.fi 2026-09-30: load 15 on two cores). Without a Sitemap line they also find pages the slow way.").
+				Fixed("hs fix robots " + d.Name + "   # adds an hs-managed block, keeps everything else; --dry-run shows the file")
+		}
+	}
+	return []Result{r.Ev(ev...).With("route", st.Route).With("kind", st.Kind)}
 }
