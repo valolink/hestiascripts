@@ -317,6 +317,17 @@ Found but not hs's to fix: ucweb1's SSH host key changed; ucdemolink and five Di
 - **`debug-keep`** moved the log and then repointed `WP_DEBUG_LOG`; a request in between wrote a fresh public `wp-content/debug.log` (soutuveneet.fi). Repoint first, then move.
 - **`hs f2b reload|restart`** killed a healthy reload after 3 s (web1: eight jails, a long recidive list) and asked for status before the socket was up. 20 s bound, then up to 15 s of status polling.
 
+## Package repositories that stop delivering (2026-09-30)
+
+viona ran Hestia 1.10.2 for six weeks after 1.10.5 shipped: `/usr/share/keyrings/hestia-keyring.gpg` had been an empty file since install (the installer's hkp keyserver fetch fails silently), and the sury keyring held B188E2B695BD4743 with its old expiry (2026-02-04) while the vendor had since extended it to 2028. apt kept using stale lists, Apache was one `apt-get upgrade` away from switching to Debian's build, and `apt-daily.service` reported success every day — neither the journal nor `/var/lib/apt/periodic` stamps show a failing repository.
+
+`internal/aptrepo` checks every enabled `deb` source (one-line `.list` and deb822 `.sources`, inline `Signed-By` keys included) the way apt would, without `apt-get update`:
+
+1. **Offline:** a `signed-by` keyring that is missing or empty → failing ("delivers no updates"); every primary key past its expiry (`gpg --show-keys`, private GNUPGHOME) → failing with the date.
+2. **Network:** GET `URI/dists/SUITE/InRelease` (flat repos `URI/DIR/InRelease`), store it under `/var/lib/hs/apt-probe/` (never `/var/lib/apt`), `gpgv --status-fd 1` against the keyring (armoured `.asc` dearmored into the probe dir) — GOODSIG+VALIDSIG passes; EXPKEYSIG, NO_PUBKEY, BADSIG, ERRSIG, unreachable, non-200 fail with the reason; `Valid-Until` in the past = stale mirror.
+
+Surfaces: the check **`updates.repos`** (security, MinInterval 6 h, one Fail per failing repository with the fix), **`hs apt status [--json]`** (one JSON line: `repos{total,ok,failing[{url,suite,host,reason,fix}]}`, `securityPending`, `unattended{configured,scope,lastRun}`), and the **`updates`** field of `v-server-health` / `hs compat health`, which EngineLink stores and notifies on (`server_updates_failing`, once per episode, re-armed when every repository verifies again). `hs apt repos` stays the interactive view — it runs `apt-get update` and prints apt's own words.
+
 ## Redis object cache — the documented layout (2026-09-25)
 
 Read from the redis-cache plugin's README, FAQ and CHANGELOG and its 2.8.0 drop-in source, then checked on the live boxes. `internal/redisinfo` holds the model; checks and fixes share it.

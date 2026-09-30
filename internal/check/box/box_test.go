@@ -394,3 +394,20 @@ func TestVersionNewer(t *testing.T) {
 		}
 	}
 }
+
+// viona 2026-09-30: the Hestia keyring was an empty file since install.
+func TestReposEmptyKeyring(t *testing.T) {
+	t.Setenv("HS_STATE_DIR", t.TempDir())
+	f := &sys.Fake{Files: map[string]string{
+		"/etc/apt/sources.list.d/hestia.list":    "deb [arch=amd64 signed-by=/usr/share/keyrings/hestia-keyring.gpg] https://apt.hestiacp.com/ bookworm main\n",
+		"/usr/share/keyrings/hestia-keyring.gpg": "",
+	}}
+	rs := checkRepos(context.Background(), env(f))
+	if len(rs) != 1 || rs[0].State != Fail || !strings.Contains(strings.Join(rs[0].Evidence, " "), "is empty") {
+		t.Errorf("empty keyring: %+v", rs)
+	}
+	a := GetAptStatus(context.Background(), env(f))
+	if a.Repos.Total != 1 || len(a.Repos.Failing) != 1 || a.Repos.Failing[0].Host != "apt.hestiacp.com" {
+		t.Errorf("apt status: %+v", a)
+	}
+}

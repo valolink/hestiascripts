@@ -1,18 +1,28 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
+	"time"
+
 	"github.com/valolink/hestiascripts/internal/aptinfo"
+	"github.com/valolink/hestiascripts/internal/check"
+	"github.com/valolink/hestiascripts/internal/check/box"
+	"github.com/valolink/hestiascripts/internal/sys"
 )
 
 const aptUsage = `hs apt — read-only views of pending package updates
 
   hs apt preview [--refresh]   what apt-get upgrade would do, classified (refresh = apt-get update first)
   hs apt repos                 refresh package lists and explain every failing repository
+  hs apt status [--json]       every repository verified without apt-get update (signed InRelease,
+                               current key), pending security updates, unattended-upgrades —
+                               one JSON line with --json (v-server-health embeds it for EngineLink)
 `
 
 func aptUpdateOut() (string, error) {
@@ -26,6 +36,8 @@ func cmdApt(args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "status":
+		return cmdAptStatus(args[1:])
 	case "preview":
 		if len(args) > 1 && args[1] == "--refresh" {
 			fmt.Println("refreshing package lists …")
@@ -82,4 +94,30 @@ func cmdApt(args []string) int {
 	}
 	fmt.Print(aptUsage)
 	return 2
+}
+
+func cmdAptStatus(args []string) int {
+	asJSON := len(args) > 0 && args[0] == "--json"
+	env := &check.Env{Sys: sys.Real{}, RepoDir: repoDir()}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	a := box.GetAptStatus(ctx, env)
+	if asJSON {
+		b, _ := json.Marshal(a)
+		fmt.Println(string(b))
+		return 0
+	}
+	fmt.Printf("%d / %d repositories verified\n", a.Repos.OK, a.Repos.Total)
+	for _, f := range a.Repos.Failing {
+		fmt.Printf("\n✗ %s %s\n  %s\n  Fix  %s\n", f.Host, f.Suite, f.Reason, f.Fix)
+	}
+	fmt.Printf("\nsecurity updates pending: %d\nunattended-upgrades: %s", a.SecurityPending, a.Unattended.Scope)
+	if a.Unattended.LastRun != "" {
+		fmt.Printf(", last ran %s", a.Unattended.LastRun)
+	}
+	fmt.Println()
+	if len(a.Repos.Failing) > 0 {
+		return 1
+	}
+	return 0
 }

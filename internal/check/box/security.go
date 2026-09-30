@@ -25,6 +25,8 @@ func securityChecks() []Check {
 		{ID: "updates.unattended", Section: "security", Title: "Unattended upgrades", Run: checkUnattended},
 		{ID: "updates.pending", Section: "security", Title: "Security updates", Timeout: 30 * time.Second, Run: checkPendingUpdates},
 		{ID: "updates.reboot", Section: "security", Title: "Reboot", Run: checkReboot},
+		// A network probe per repository (a few KB each): not every 15 minutes.
+		{ID: "updates.repos", Section: "security", Title: "Package repositories", Timeout: 90 * time.Second, MinInterval: 6 * time.Hour, Run: checkRepos},
 		{ID: "hestia.version", Section: "security", Title: "HestiaCP version", Run: checkHestiaVersion},
 		{ID: "hestia.web-terminal", Section: "security", Title: "Hestia web terminal", Run: checkWebTerminal},
 		{ID: "hestia.advisories", Section: "security", Title: "Hestia security advisories", MinInterval: 12 * time.Hour, Run: checkAdvisories},

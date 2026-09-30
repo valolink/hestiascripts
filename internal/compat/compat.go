@@ -32,6 +32,8 @@ type Health struct {
 	Services  map[string]string `json:"services"`
 	MailQueue int               `json:"mailQueue"`
 	Disk      Disk              `json:"disk"`
+	// Updates: v-server-health embeds `hs apt status --json` (2026-09-30).
+	Updates *box.AptStatus `json:"updates,omitempty"`
 }
 
 func HealthReport(ctx context.Context, env *check.Env) Health {
@@ -57,6 +59,12 @@ func HealthReport(ctx context.Context, env *check.Env) Health {
 	}
 	h.MailQueue, _ = box.MailQueue(ctx, env)
 	h.Disk = rootDisk(ctx, env)
+	uctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	a := box.GetAptStatus(uctx, env)
+	cancel()
+	if a.Repos.Total > 0 {
+		h.Updates = &a
+	}
 	return h
 }
 

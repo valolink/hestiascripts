@@ -18,6 +18,18 @@ export PATH=$PATH:/usr/local/hestia/bin
 
 now_epoch=$(date +%s)
 
+# --- Package repositories (started first, collected last) ------------------
+# `hs apt status --json` verifies every apt repository's signed InRelease
+# against its keyring without touching apt's own state (viona 2026-09-30:
+# an empty Hestia keyring and an expired sury key failed silently for weeks).
+# A network probe per repository, so it runs in the background alongside the
+# restic probes, bounded to 20 s; on any failure the field is simply omitted.
+updates_tmp=$(mktemp)
+if command -v hs >/dev/null 2>&1; then
+  ( timeout 20 hs apt status --json > "$updates_tmp" 2>/dev/null || : > "$updates_tmp" ) &
+  updates_pid=$!
+fi
+
 # --- Backups: freshest artifact age per HestiaCP user ----------------------
 # Two backup backends coexist during the restic rollout, so we report whichever
 # is authoritative per user (restic first, then legacy tarball):
@@ -121,7 +133,17 @@ fi
 disk_pct=$(df / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
 disk_info=$(df -h / 2>/dev/null | awk 'NR==2 {print $3 " / " $2}')
 
-printf '{"backups":%s,"services":%s,"mailQueue":%s,"disk":{"usedPct":%s,"info":"%s"}}\n' \
-  "$backups_json" "$services_json" "$mail_queue" "${disk_pct:-0}" "${disk_info:-}"
+updates_field=""
+if [ -n "${updates_pid:-}" ]; then
+  wait "$updates_pid" 2>/dev/null
+  updates_line=$(tail -n 1 "$updates_tmp")
+  case "$updates_line" in
+    '{"repos":'*'}') updates_field=",\"updates\":${updates_line}" ;;
+  esac
+fi
+rm -f "$updates_tmp"
+
+printf '{"backups":%s,"services":%s,"mailQueue":%s,"disk":{"usedPct":%s,"info":"%s"}%s}\n' \
+  "$backups_json" "$services_json" "$mail_queue" "${disk_pct:-0}" "${disk_info:-}" "$updates_field"
 
 exit 0

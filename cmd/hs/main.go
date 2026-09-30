@@ -53,7 +53,9 @@ Usage:
   hs op --list             every operation and its fields
   hs logcap add KEY PATH OWNER SIZE | remove KEY | list
                            hourly size cap for chosen logs (/etc/hs/logcap.conf)
-  hs apt preview|repos     pending updates classified; failing repositories explained
+  hs apt preview|repos|status
+                           pending updates classified; failing repositories explained;
+                           status verifies every repository without apt-get update (--json)
   hs f2b repair|reload|restart
                            fail2ban: self-ban guard, quiet ban mails, jails without logs; bounded reload
   hs watch [--sweep] [--mail] [--full] [--quiet] | --baseline
