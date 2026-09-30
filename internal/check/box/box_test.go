@@ -411,3 +411,28 @@ func TestReposEmptyKeyring(t *testing.T) {
 		t.Errorf("apt status: %+v", a)
 	}
 }
+
+// soutuveneet 2026-09-30: timers enabled, 20auto-upgrades missing → the fix
+// is hs op unattended, not "enable the apt timers".
+func TestUnattendedCause(t *testing.T) {
+	f := &sys.Fake{Files: map[string]string{
+		"/etc/apt/apt.conf.d/50unattended-upgrades": "Unattended-Upgrade::Origins-Pattern {\n        \"origin=Debian,codename=${distro_codename},label=Debian-Security\";\n};\n",
+	}, Cmds: map[string]sys.FakeCmd{
+		"dpkg-query -W -f=${Status} unattended-upgrades": {Out: "install ok installed"},
+		"systemctl is-enabled apt-daily.timer":           {Out: "enabled\n"},
+		"systemctl is-enabled apt-daily-upgrade.timer":   {Out: "enabled\n"},
+	}}
+	rs := checkUnattended(context.Background(), env(f))
+	if rs[0].Data["cause"] != "periodic" || !strings.Contains(rs[0].Fix, "hs op unattended") {
+		t.Errorf("missing 20auto-upgrades: %+v", rs)
+	}
+	f.Files["/etc/apt/apt.conf.d/20auto-upgrades"] = "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n"
+	f.Cmds["systemctl is-enabled apt-daily-upgrade.timer"] = sys.FakeCmd{Out: "disabled\n", Code: 1}
+	if rs := checkUnattended(context.Background(), env(f)); rs[0].Data["cause"] != "timers" {
+		t.Errorf("timers off: %+v", rs)
+	}
+	f.Files["/etc/apt/apt.conf.d/99off"] = "APT::Periodic::Unattended-Upgrade \"0\";\n"
+	if rs := checkUnattended(context.Background(), env(f)); rs[0].Data["cause"] != "periodic" {
+		t.Errorf("a later file setting 0 wins: %+v", rs)
+	}
+}

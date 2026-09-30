@@ -621,12 +621,13 @@ func init() {
 
 	register(Fix{
 		ID: "apt-timers", Title: "Turn on automatic security updates", Check: "updates.unattended", Scope: "", Risk: Change,
-		Applies: func(r check.Result) bool {
-			return strings.Contains(r.Summary, "never run") || strings.Contains(r.Summary, "last run was")
-		},
-		Note: "soutuveneet 2026-09-24: unattended-upgrades installed and security-only, but it had never run — 49 security updates waiting.",
-		How:  "`systemctl enable --now` starts apt's two daily timers (refresh lists, then upgrade). The last step is unattended-upgrade's own --dry-run, which changes nothing and shows what the next run will install.",
-		Undo: "systemctl disable --now apt-daily.timer apt-daily-upgrade.timer.",
+		// Only when the timers are what is off: with APT::Periodic unset the
+		// timers were already on and did nothing (soutuveneet 2026-09-30) —
+		// that finding points at `hs op unattended` instead.
+		Applies: func(r check.Result) bool { return r.Data["cause"] == "timers" },
+		Note:    "soutuveneet 2026-09-24: unattended-upgrades installed and security-only, but it had never run — 49 security updates waiting.",
+		How:     "`systemctl enable --now` starts apt's two daily timers (refresh lists, then upgrade). The last step is unattended-upgrade's own --dry-run, which changes nothing and shows what the next run will install.",
+		Undo:    "systemctl disable --now apt-daily.timer apt-daily-upgrade.timer.",
 		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
 			return []Step{
 				{Why: "daily list refresh and upgrade", Argv: []string{"systemctl", "enable", "--now", "apt-daily.timer", "apt-daily-upgrade.timer"}},

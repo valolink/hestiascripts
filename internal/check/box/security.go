@@ -226,18 +226,78 @@ func checkUnattended(ctx context.Context, env *Env) []Result {
 	}
 	// Proof it runs: its log shows a completed run in the last 2 days.
 	last := lastUnattendedRun(env)
-	if last.IsZero() {
-		return []Result{New(Warn, "security-only, but it has never run").
-			Because("No completed run in its log: the apt timers are off or the package was never started, so patches wait for a person (soutuveneet: 49 pending).").
+	age := env.Sys.Now().Sub(last)
+	if !last.IsZero() && age <= 48*time.Hour {
+		return []Result{New(OK, "security-only, last ran "+last.Format("2006-01-02 15:04")).Valid(48 * time.Hour)}
+	}
+	summary := "security-only, but it has never run"
+	if !last.IsZero() {
+		summary = fmt.Sprintf("security-only, but the last run was %d days ago", int(age.Hours()/24))
+	}
+	// Why it does not run decides the fix. soutuveneet 2026-09-30: the timers
+	// were enabled all along, but 20auto-upgrades was missing, so apt-daily
+	// fired and apt.systemd.daily exited at once — no refresh, no upgrade, no
+	// /var/lib/apt/periodic stamps. Enabling timers would have changed nothing.
+	if off := periodicOff(env); len(off) > 0 {
+		return []Result{New(Warn, summary+": apt's daily runs are switched off").With("cause", "periodic").
+			Ev(off...).
+			Because("The apt timers fire, but without APT::Periodic::Update-Package-Lists and ::Unattended-Upgrade set to \"1\" apt.systemd.daily does nothing — no list refresh, no upgrade, and nothing logged as a failure.").
+			Fixed("hs op unattended   # writes /etc/apt/apt.conf.d/20auto-upgrades and enables the timers")}
+	}
+	if disabled := disabledTimers(ctx, env); len(disabled) > 0 {
+		return []Result{New(Warn, summary+": the apt timers are off").With("cause", "timers").
+			Ev(disabled...).
+			Because("unattended-upgrades is configured, but nothing starts it, so patches wait for a person (soutuveneet 2026-09-24: 49 pending).").
 			Fixed("enable the apt timers")}
 	}
-	age := env.Sys.Now().Sub(last)
-	if age > 48*time.Hour {
-		return []Result{New(Warn, fmt.Sprintf("security-only, but the last run was %d days ago", int(age.Hours()/24))).
-			Because("The apt timers are not firing, so patches are not applied.").
-			Fixed("systemctl status apt-daily-upgrade.timer")}
+	return []Result{New(Warn, summary+" although it is configured and its timers are on").With("cause", "unknown").
+		Because("Configured and scheduled, yet no completed run is logged — the run itself is failing.").
+		Fixed("journalctl -u apt-daily-upgrade.service --since -3d --no-pager | tail -40")}
+}
+
+// periodicOff: the APT::Periodic settings unattended-upgrades needs that are
+// missing or "0". apt reads apt.conf.d in lexical order, later files win.
+func periodicOff(env *Env) []string {
+	want := []string{"APT::Periodic::Update-Package-Lists", "APT::Periodic::Unattended-Upgrade"}
+	val := map[string]string{}
+	files := []string{"/etc/apt/apt.conf"}
+	if ents, err := env.Sys.ReadDir("/etc/apt/apt.conf.d"); err == nil {
+		for _, e := range ents {
+			if !e.IsDir() {
+				files = append(files, "/etc/apt/apt.conf.d/"+e.Name())
+			}
+		}
 	}
-	return []Result{New(OK, "security-only, last ran "+last.Format("2006-01-02 15:04")).Valid(48 * time.Hour)}
+	re := regexp.MustCompile(`(?m)^\s*(APT::Periodic::[A-Za-z-]+)\s+"([^"]*)"\s*;`)
+	for _, f := range files {
+		for _, m := range re.FindAllStringSubmatch(readString(env.Sys, f), -1) {
+			val[m[1]] = m[2]
+		}
+	}
+	var off []string
+	for _, k := range want {
+		switch v, ok := val[k]; {
+		case !ok:
+			off = append(off, k+" is not set (no /etc/apt/apt.conf.d/20auto-upgrades?)")
+		case v == "0" || v == "":
+			off = append(off, k+" is \""+v+"\"")
+		}
+	}
+	return off
+}
+
+func disabledTimers(ctx context.Context, env *Env) []string {
+	var off []string
+	for _, t := range []string{"apt-daily.timer", "apt-daily-upgrade.timer"} {
+		out, _ := env.Sys.Run(ctx, "systemctl", "is-enabled", t)
+		if st := strings.TrimSpace(out); st != "enabled" && st != "static" {
+			if st == "" {
+				st = "unknown"
+			}
+			off = append(off, t+" is "+st)
+		}
+	}
+	return off
 }
 
 func lastUnattendedRun(env *Env) time.Time {
