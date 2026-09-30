@@ -7,6 +7,7 @@ import (
 	"time"
 
 	. "github.com/valolink/hestiascripts/internal/check"
+	"github.com/valolink/hestiascripts/internal/copies"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/logcap"
 	"github.com/valolink/hestiascripts/internal/sys"
@@ -178,5 +179,26 @@ func TestCoreNoiseIsNotAFail(t *testing.T) {
 	rs := checkCore(context.Background(), e, dom)
 	if rs[0].State != Warn || !strings.Contains(rs[0].Summary, "1 PHP error logs") {
 		t.Errorf("got %+v", rs)
+	}
+}
+
+// soutuveneet / delicatessen 2026-09-30: the bind mount lost at a reboot.
+func TestStagingUploads(t *testing.T) {
+	c := copies.Copy{Kind: "staging", Domain: "staging.x.fi", User: "x", SourceDomain: "x.fi", SourceUser: "x", Origin: "registry"}
+	f := &sys.Fake{Files: map[string]string{"/proc/self/mountinfo": "25 1 8:1 / / rw - ext4 /dev/sda1 rw\n", "/etc/fstab": ""}}
+	if rs := checkStagingUploads(&Env{Sys: f}, c); rs[0].State != Fail {
+		t.Errorf("not mounted: %+v", rs)
+	}
+	f.Files["/proc/self/mountinfo"] += "90 25 8:1 " + c.SourceUploads() + " " + c.Uploads() + " ro,relatime - ext4 /dev/sda1 rw\n"
+	if rs := checkStagingUploads(&Env{Sys: f}, c); rs[0].State != Warn || !strings.Contains(rs[0].Summary, "reboot") {
+		t.Errorf("not persisted: %+v", rs)
+	}
+	f.Files["/etc/fstab"] = copies.WantFstab(c) + "\n"
+	if rs := checkStagingUploads(&Env{Sys: f}, c); rs[0].State != OK {
+		t.Errorf("mounted and persisted: %+v", rs)
+	}
+	f.Files["/proc/self/mountinfo"] = "90 25 8:1 " + c.SourceUploads() + " " + c.Uploads() + " rw,relatime - ext4 /dev/sda1 rw\n"
+	if rs := checkStagingUploads(&Env{Sys: f}, c); rs[0].State != Fail || !strings.Contains(rs[0].Summary, "writable") {
+		t.Errorf("writable: %+v", rs)
 	}
 }

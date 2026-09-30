@@ -19,6 +19,7 @@ import (
 	"time"
 
 	. "github.com/valolink/hestiascripts/internal/check"
+	"github.com/valolink/hestiascripts/internal/copies"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/logcap"
 	"github.com/valolink/hestiascripts/internal/robots"
@@ -29,6 +30,12 @@ import (
 // All builds the site checks for every domain on the box.
 func All(env *Env) []Check {
 	var cs []Check
+	staging := map[string]copies.Copy{}
+	for _, c := range copies.List(env.Sys) {
+		if c.Kind == "staging" {
+			staging[c.Domain] = c
+		}
+	}
 	for _, d := range hestia.WebDomains(env.Sys) {
 		d := d
 		cs = append(cs, Check{ID: "site.http", Section: "sites", Title: "Site answers", Subject: d.Name,
@@ -45,6 +52,12 @@ func All(env *Env) []Check {
 				Run: func(ctx context.Context, env *Env) []Result { return checkUpdates(ctx, env, d) }},
 			Check{ID: "site.debug", Section: "sites", Title: "WordPress debug mode", Subject: d.Name,
 				Run: func(ctx context.Context, env *Env) []Result { return checkDebug(env, d) }},
+		)
+		if c, ok := staging[d.Name]; ok {
+			cs = append(cs, Check{ID: "site.staging-uploads", Section: "sites", Title: "Staging uploads mount", Subject: d.Name,
+				Run: func(ctx context.Context, env *Env) []Result { return checkStagingUploads(env, c) }})
+		}
+		cs = append(cs,
 			Check{ID: "site.robots", Section: "sites", Title: "robots.txt", Subject: d.Name, Heavy: true,
 				Timeout: 60 * time.Second, MinInterval: 6 * time.Hour,
 				Run: func(ctx context.Context, env *Env) []Result { return checkRobots(ctx, env, d) }},
@@ -472,4 +485,48 @@ func checkRobots(ctx context.Context, env *Env, d hestia.Domain) []Result {
 		}
 	}
 	return []Result{r.Ev(ev...).With("route", st.Route).With("kind", st.Kind)}
+}
+
+// A staging copy sees live's media through a read-only bind mount of live's
+// uploads (v-wp-staging-create). Copies from before the 2026-09-25 fstab line
+// lost it at the next reboot — soutuveneet and delicatessen, 2026-09-30:
+// staging's uploads was its own 28 KB writable folder, no images.
+func checkStagingUploads(env *Env, c copies.Copy) []Result {
+	point := c.Uploads()
+	m := copies.MountAt(env.Sys, point)
+	fix := "hs fix staging-uploads " + c.Domain + "   # bind + remount ro + write probe, then the tagged fstab line"
+	if c.SourceDomain == "" {
+		if m.Mounted {
+			return []Result{New(Configured, "uploads mounted; the live site is unknown").Ev("mount from "+m.Root, "copy found by "+c.Origin).
+				Fixed("v-wp-copies --mark --domain=" + c.Domain + " --source-domain=LIVE")}
+		}
+		return []Result{New(Warn, "staging site without live's uploads, and its live site is unknown").Ev("copy found by "+c.Origin, point+" is not a mount point").
+			Because("A staging copy normally shows live's media through a read-only mount; without it pages render without images and uploads written here go nowhere.").
+			Fixed("v-wp-copies --mark --domain=" + c.Domain + " --source-domain=LIVE   # then hs fix staging-uploads")}
+	}
+	ev := []string{"live uploads " + c.SourceUploads(), "copy found by " + c.Origin}
+	switch {
+	case !m.Mounted:
+		return []Result{New(Fail, "live's uploads are not mounted: staging has its own writable uploads folder").Ev(append(ev, point+" is not a mount point")...).
+			Because("Staging shows no media, and whatever staging writes to uploads is not what live has — reviews of an update run look at a site without its images. Typically a reboot of a copy made before 2026-09-25, when the mount was not yet in /etc/fstab.").
+			Fixed(fix)}
+	case !m.ReadOnly:
+		return []Result{New(Fail, "live's uploads are mounted writable into staging").Ev(append(ev, "mounted rw from "+m.Root)...).
+			Because("Staging's plugins (feeds, sitemaps, image optimisers) can rewrite live's files.").
+			Fixed(fix)}
+	case m.Root != "" && m.Root != c.SourceUploads():
+		return []Result{New(Warn, "staging's uploads are mounted from somewhere else").Ev(append(ev, "mounted from "+m.Root)...).
+			Because("The mount does not come from the live site this copy belongs to.").
+			Fixed(fix)}
+	}
+	if line := copies.FstabLine(env.Sys, point); line != copies.WantFstab(c) {
+		why := "no tagged line in /etc/fstab"
+		if line != "" {
+			why = "the tagged /etc/fstab line differs: " + line
+		}
+		return []Result{New(Warn, "mounted read-only, but the next reboot loses it").Ev(append(ev, why)...).
+			Because("Without the tagged fstab line a reboot silently turns staging's uploads into its own empty folder (soutuveneet, delicatessen 2026-09-30).").
+			Fixed(fix)}
+	}
+	return []Result{New(OK, "live's uploads mounted read-only and persisted in /etc/fstab").Ev(ev...)}
 }

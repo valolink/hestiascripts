@@ -345,6 +345,14 @@ soutuveneet.fi: PerplexityBot walked every category × `?product_orderby=` / `pr
 
 **robots.txt is advisory.** Well-behaved crawlers obey it; the rest need enforcement in nginx — a per-domain `nginx.ssl.conf_<name>` (and `nginx.conf_<name>`) answering 429 by user agent, as done by hand on soutuveneet.fi. Hestia's default templates and our wp-rocket ones include `%home%/%user%/conf/web/%domain%/nginx.ssl.conf_*` at server level (default.stpl, wp-rocket.stpl line 164), so such a file needs no template change and survives rebuilds. hs does not write user-agent blocks yet.
 
+## Staging copies without live's uploads (2026-09-30)
+
+`v-wp-staging-create` bind-mounts live's `wp-content/uploads` read-only into the staging copy and, since 2026-09-25, persists it with a tagged `bind,ro,nofail` line in `/etc/fstab`. Copies made before that lost the mount at the next reboot — soutuveneet, and delicatessen (rebooted 12:54 on 2026-09-30): staging's uploads was its own 28 KB writable folder, pages without images, update-run reviews of a site that was not live's.
+
+`internal/copies` lists a box's copies the way `v-wp-copies` does (copy registry `/root/.hestia-site-copies/*.conf`, then the older URL store `/root/.hestia-staging-urls/<src-user>_<src-domain>` — split at the last `_`, users may contain one — then wp-configs setting `WP_ENVIRONMENT_TYPE` staging/development, source unknown). **`site.staging-uploads`** runs for every staging copy (clones keep their own uploads): Fail when staging's uploads is not a mount point (from `/proc/self/mountinfo`) or is mounted writable; Warn when it is mounted from another directory, or read-only but without the tagged fstab line (the next reboot breaks it); OK when mounted read-only from live's uploads and persisted. A copy with no known live site reads Warn/Configured and points at `v-wp-copies --mark`.
+
+**`hs fix staging-uploads DOMAIN`** runs exactly the script's two functions: `mount --bind`, `mount -o remount,ro,bind`, a root write probe that unmounts again if the mount is writable (bind_mount_uploads_ro); then the fstab backup under `/var/lib/hs/backups`, the tagged line (an earlier one for the mount point replaced), `systemctl daemon-reload`, `findmnt --verify` (persist_uploads_mount). Steps already true are left out. Every directory on both paths is refused if it is a symlink, at plan time and again right before mounting — root must not mount over a place a site user points it at. Staging's own files stay underneath the mount, hidden, not deleted.
+
 ## Redis object cache — the documented layout (2026-09-25)
 
 Read from the redis-cache plugin's README, FAQ and CHANGELOG and its 2.8.0 drop-in source, then checked on the live boxes. `internal/redisinfo` holds the model; checks and fixes share it.
