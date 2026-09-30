@@ -125,6 +125,47 @@ flush_site_caches() {
 # per-host config file and .htaccess, drops the old configs and clears the
 # cache. Must run on the published path: WP Rocket writes ABSPATH into
 # those files. Slug-agnostic (the fleet has both wp-rocket and wprocket).
+# Live's uploads are mounted read-only into staging, so files in them that
+# embed live's address — GeneratePress's fonts.css and style.min.css,
+# Elementor's post CSS, and WP Rocket's minified copies of them — point
+# staging back at live. Browsers refuse cross-origin fonts without a CORS
+# header, so staging renders in fallback fonts and the update-run checks see
+# CORS errors that live never has (cafepetris.fi, 2026-09-30). Rewrite live's
+# address to staging's in staging's nginx responses only; live and its files
+# are untouched. Skipped without nginx's sub module; removed again if
+# `nginx -t` rejects it, so staging never goes down over this.
+staging_url_rewrite() { # DEST_USER STAGING_DOMAIN LIVE_BARE_HOST
+  local user="$1" domain="$2" live="$3"
+  local dir="/home/$user/conf/web/$domain"
+  local conf="$dir/nginx.conf_staging_urls"
+  local sconf="$dir/nginx.ssl.conf_staging_urls"
+  if ! nginx -V 2>&1 | grep -q -- "--with-http_sub_module"; then
+    echo "       ⚠️  nginx has no sub module: files in uploads keep live's address (fonts may be blocked on staging)"
+    return 0
+  fi
+  [ -d "$dir" ] || return 0
+  {
+    echo "# v-wp-staging-create: live's address -> staging's in files served from"
+    echo "# live's read-only uploads (and caches built from them). Staging only."
+    echo "sub_filter_types text/css application/javascript text/javascript application/json image/svg+xml;"
+    echo "sub_filter_once off;"
+    local host scheme
+    for host in "www.$live" "$live"; do
+      for scheme in "https://" "http://" "//"; do
+        echo "sub_filter '${scheme}${host}' 'https://${domain}';"
+      done
+    done
+  } > "$conf"
+  ln -sf "$conf" "$sconf"
+  if nginx -t >/dev/null 2>&1; then
+    systemctl reload nginx
+    echo "       ✓ live's address rewritten to staging's in CSS/JS responses"
+  else
+    rm -f "$conf" "$sconf"
+    echo "       ⚠️  nginx rejected the URL rewrite — left out (fonts from uploads may be blocked on staging)"
+  fi
+}
+
 rocket_domain_moved() {
   local user="$1" path="$2"
   local out
@@ -964,6 +1005,7 @@ echo "       ✓ persisted in /etc/fstab (bind,ro,nofail) — survives reboots"
 # Redis database, every site's object cache.
 echo "[11/11] Reloading PHP-FPM and flushing caches..."
 reload_php_fpm
+staging_url_rewrite "$DEST_USER" "$NEW_WEB_DOMAIN" "$OLD_BARE"
 rocket_domain_moved "$DEST_USER" "$NEW_DIR"
 flush_site_caches "$DEST_USER" "$NEW_DIR"  "staging ($NEW_WEB_DOMAIN)"
 if [ "$FLUSH_LIVE" = true ]; then
