@@ -15,6 +15,38 @@ check_status() {
   fi
 }
 
+# Copies share the box with the live site and must yield to it (2026-09-30, after
+# kuumalahde's dev copies ran live-sized PHP pools, WP-cron and day-long Redis
+# keys beside production): the copy's PHP pool goes on the PHP-FPM profile
+# (default staging: 4 ondemand workers at nice 10, PHP memory capped at 512M),
+# its Redis keys expire within an hour (Redis cannot cap memory per database, and
+# its LRU evicts live's keys for the copy's), and its database user gets at most
+# 10 connections. The profile template comes from `hs op fpm-profile`; without it
+# the pool is left as it is and the command to create it is printed.
+apply_copy_limits() {  # user domain dir db_user profile
+  local user=$1 domain=$2 dir=$3 db_user=$4 profile=$5 pool ver tpl host
+  echo "       Copy limits: PHP profile '$profile', Redis keys ≤ 1 h, ≤ 10 DB connections..."
+  if [ "$profile" != "none" ]; then
+    pool=$(ls /etc/php/*/fpm/pool.d/"$domain".conf 2>/dev/null | head -1)
+    ver=$(echo "$pool" | cut -d/ -f4)
+    tpl="$profile-PHP-${ver//./_}"
+    if [ -z "$ver" ]; then
+      echo "       ⚠️  No PHP-FPM pool found for $domain — PHP profile not set."
+    elif [ -f "/usr/local/hestia/data/templates/web/php-fpm/$tpl.tpl" ]; then
+      v-change-web-domain-backend-tpl "$user" "$domain" "$tpl" > /dev/null \
+        && echo "       ✓ PHP pool on $tpl" \
+        || echo "       ⚠️  Could not switch $domain to $tpl."
+    else
+      echo "       ⚠️  No $tpl template — create it with: hs op fpm-profile version=$ver profile=$profile"
+    fi
+  fi
+  sudo -u "$user" wp --path="$dir" config set WP_REDIS_MAXTTL 3600 --type=constant --raw --quiet
+  for host in $(timeout 10 mariadb -N -B -e "SELECT Host FROM mysql.user WHERE User='$db_user'" 2>/dev/null); do
+    timeout 10 mariadb -e "ALTER USER '$db_user'@'$host' WITH MAX_USER_CONNECTIONS 10" 2>/dev/null \
+      || echo "       ⚠️  Could not limit connections of $db_user@$host."
+  done
+}
+
 show_help() {
   cat <<'EOF'
 USAGE: v-wp-clone-site [OPTIONS]
@@ -28,6 +60,9 @@ OPTIONS:
   --dest-user=USER     HestiaCP user for the new site (must already exist)
   --new-domain=DOMAIN  Domain name for the cloned site
   --force              Skip overwrite confirmation if destination domain exists
+  --php-profile=NAME   PHP-FPM profile for the copy (default staging; none = leave the pool)
+  --no-copy-limits     A real site, not a dev copy: keep WP-cron, Redis TTL, DB
+                       connections and the PHP pool as they are
   -h, --help           Show this help
 
 EXAMPLES:
@@ -45,6 +80,8 @@ OLD_WEB_DOMAIN=""
 DEST_USER=""
 NEW_DOMAIN=""
 FORCE=false
+PHP_PROFILE=staging
+COPY_LIMITS=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,6 +90,8 @@ while [[ $# -gt 0 ]]; do
     --dest-user=*)  DEST_USER="${1#*=}" ;;
     --new-domain=*) NEW_DOMAIN="${1#*=}" ;;
     --force)        FORCE=true ;;
+    --php-profile=*) PHP_PROFILE="${1#*=}" ;;
+    --no-copy-limits) COPY_LIMITS=false ;;
     -h|--help)      show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
@@ -415,6 +454,13 @@ NEW_HOME="/home/$DEST_USER/web/$NEW_WEB_DOMAIN"
 echo "    Replacing domain-root paths: $OLD_HOME -> $NEW_HOME (database and wp-config.php)"
 sudo -u "$DEST_USER" wp --path="$NEW_DIR" search-replace "$OLD_HOME" "$NEW_HOME" --all-tables --quiet
 sudo -u "$DEST_USER" sed -i "s#$OLD_HOME#$NEW_HOME#g" "$NEW_DIR/wp-config.php"
+
+# A dev copy yields to the live site: no WP-cron (no scheduled WooCommerce
+# actions, feed rebuilds or mails from a copy), and the copy limits.
+if [ "$COPY_LIMITS" = true ]; then
+  sudo -u "$DEST_USER" wp --path="$NEW_DIR" config set DISABLE_WP_CRON true --type=constant --raw --quiet
+  apply_copy_limits "$DEST_USER" "$NEW_WEB_DOMAIN" "$NEW_DIR" "$NEW_DB_USER" "$PHP_PROFILE"
+fi
 
 # 8. Flush Object Cache
 echo "[8/8] Flushing object cache..."

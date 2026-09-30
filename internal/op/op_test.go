@@ -24,6 +24,7 @@ func box8G() *sys.Fake {
 		"/etc/mysql/mariadb.conf.d/50-server.cnf": "[mysqld]\nuser = mysql\n",
 		hestia.FpmTpl + "/PHP-8_2.tpl":            "[%domain%]\npm = ondemand\npm.max_children = 8\n",
 		"/repo/templates/php-fpm/standard.conf":   "PROFILE_DESC=\"Standard\"\nPM_MODE=\"dynamic\"\nPM_MAX_CHILDREN=20\nPM_MAX_REQUESTS=500\nPM_START_SERVERS=4\nPM_MIN_SPARE=2\nPM_MAX_SPARE=6\n",
+		"/repo/templates/php-fpm/staging.conf":    "PROFILE_DESC=\"Staging\"\nPM_MODE=\"ondemand\"\nPM_MAX_CHILDREN=4\nPM_IDLE_TIMEOUT=\"10s\"\nPM_MAX_REQUESTS=500\nPROCESS_PRIORITY=10\nPHP_MEMORY_LIMIT=\"512M\"\n",
 	}, Dirs: []string{"/etc/php/8.2", "/etc/php/8.3"},
 		Commands: map[string]bool{"redis-server": true, "redis-cli": true, "mariadb": true, "wp": true},
 		Cmds: map[string]sys.FakeCmd{
@@ -136,6 +137,17 @@ func TestFPMProfileCopiesBaseAndSetsModeKeys(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Errorf("missing %q in\n%s", want, p)
 		}
+	}
+}
+
+func TestFPMProfileSetsCopyLimits(t *testing.T) {
+	p := text(planOf(t, "fpm-profile", box8G(), Values{"version": "8.2", "profile": "staging"}))
+	want := "process.priority 10 'php_admin_value[memory_limit]' 512M"
+	if !strings.Contains(p, want) {
+		t.Errorf("missing %q in\n%s", want, p)
+	}
+	if p := text(planOf(t, "fpm-profile", box8G(), Values{"version": "8.2", "profile": "standard"})); strings.Contains(p, "process.priority") {
+		t.Errorf("standard has no limits, plan sets one:\n%s", p)
 	}
 }
 

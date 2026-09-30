@@ -70,6 +70,38 @@ ensure_staging_httpauth() { # DEST_USER DOMAIN
 
 # Reload every installed PHP-FPM service so workers drop their cached wp-config.php
 # and pick up the new WP_REDIS_PREFIX / DB creds. Reload is graceful.
+# Copies share the box with the live site and must yield to it (2026-09-30, after
+# kuumalahde's dev copies ran live-sized PHP pools, WP-cron and day-long Redis
+# keys beside production): the copy's PHP pool goes on the PHP-FPM profile
+# (default staging: 4 ondemand workers at nice 10, PHP memory capped at 512M),
+# its Redis keys expire within an hour (Redis cannot cap memory per database, and
+# its LRU evicts live's keys for the copy's), and its database user gets at most
+# 10 connections. The profile template comes from `hs op fpm-profile`; without it
+# the pool is left as it is and the command to create it is printed.
+apply_copy_limits() {  # user domain dir db_user profile
+  local user=$1 domain=$2 dir=$3 db_user=$4 profile=$5 pool ver tpl host
+  echo "       Copy limits: PHP profile '$profile', Redis keys ≤ 1 h, ≤ 10 DB connections..."
+  if [ "$profile" != "none" ]; then
+    pool=$(ls /etc/php/*/fpm/pool.d/"$domain".conf 2>/dev/null | head -1)
+    ver=$(echo "$pool" | cut -d/ -f4)
+    tpl="$profile-PHP-${ver//./_}"
+    if [ -z "$ver" ]; then
+      echo "       ⚠️  No PHP-FPM pool found for $domain — PHP profile not set."
+    elif [ -f "/usr/local/hestia/data/templates/web/php-fpm/$tpl.tpl" ]; then
+      v-change-web-domain-backend-tpl "$user" "$domain" "$tpl" > /dev/null \
+        && echo "       ✓ PHP pool on $tpl" \
+        || echo "       ⚠️  Could not switch $domain to $tpl."
+    else
+      echo "       ⚠️  No $tpl template — create it with: hs op fpm-profile version=$ver profile=$profile"
+    fi
+  fi
+  sudo -u "$user" wp --path="$dir" config set WP_REDIS_MAXTTL 3600 --type=constant --raw --quiet
+  for host in $(timeout 10 mariadb -N -B -e "SELECT Host FROM mysql.user WHERE User='$db_user'" 2>/dev/null); do
+    timeout 10 mariadb -e "ALTER USER '$db_user'@'$host' WITH MAX_USER_CONNECTIONS 10" 2>/dev/null \
+      || echo "       ⚠️  Could not limit connections of $db_user@$host."
+  done
+}
+
 reload_php_fpm() {
   local reloaded=0
   shopt -s nullglob
@@ -329,6 +361,9 @@ OPTIONS:
                        staging is built isolated with its own Redis prefix and
                        database, so live's cache is not touched by it. Use it
                        when you suspect staging URLs in live's cache.
+  --php-profile=NAME   PHP-FPM profile for the staging pool (default staging:
+                       4 workers at nice 10, PHP memory 512M; none = leave the
+                       pool). Redis keys ≤ 1 h and ≤ 10 DB connections always.
   --teardown           Remove the staging site: unmounts uploads, deletes
                        the domain and database; pass --src-user/--src-domain
                        too to also forget the saved staging URL
@@ -357,6 +392,7 @@ TEARDOWN=false
 HTTPAUTH=true
 PRINT_AUTH=false
 FLUSH_LIVE=false
+PHP_PROFILE=staging
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -369,6 +405,7 @@ while [[ $# -gt 0 ]]; do
     --no-httpauth)  HTTPAUTH=false ;;
     --print-auth)   PRINT_AUTH=true ;;
     --flush-live)   FLUSH_LIVE=true ;;
+    --php-profile=*) PHP_PROFILE="${1#*=}" ;;
     -h|--help)      show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
@@ -1004,6 +1041,7 @@ echo "       ✓ persisted in /etc/fstab (bind,ro,nofail) — survives reboots"
 # transients and page cache on every refresh — on a box whose sites share a
 # Redis database, every site's object cache.
 echo "[11/11] Reloading PHP-FPM and flushing caches..."
+apply_copy_limits "$DEST_USER" "$NEW_WEB_DOMAIN" "$NEW_DIR" "$NEW_DB_USER" "$PHP_PROFILE"
 reload_php_fpm
 staging_url_rewrite "$DEST_USER" "$NEW_WEB_DOMAIN" "$OLD_BARE"
 rocket_domain_moved "$DEST_USER" "$NEW_DIR"

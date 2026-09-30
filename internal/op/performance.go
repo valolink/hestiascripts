@@ -155,6 +155,10 @@ type fpmProfile struct {
 	Name, Desc, Mode                       string
 	MaxChildren, MaxRequests               string
 	Start, MinSpare, MaxSpare, IdleTimeout string
+	// Optional, for copies that must yield to production on the same box:
+	// the workers' nice value and a hard PHP memory cap (php_admin_value, so a
+	// site's own ini_set or WP_MEMORY_LIMIT cannot raise it).
+	Priority, MemoryLimit string
 }
 
 func loadProfile(env *check.Env, name string) (fpmProfile, error) {
@@ -186,6 +190,10 @@ func loadProfile(env *check.Env, name string) (fpmProfile, error) {
 			p.MaxSpare = v
 		case "PM_IDLE_TIMEOUT":
 			p.IdleTimeout = v
+		case "PROCESS_PRIORITY":
+			p.Priority = v
+		case "PHP_MEMORY_LIMIT":
+			p.MemoryLimit = v
 		}
 	}
 	if p.Mode == "" || p.MaxChildren == "" {
@@ -201,6 +209,12 @@ func (p fpmProfile) summary() string {
 		s += fmt.Sprintf(", start %s, spare %s–%s", p.Start, p.MinSpare, p.MaxSpare)
 	case "ondemand":
 		s += ", idle timeout " + p.IdleTimeout
+	}
+	if p.Priority != "" {
+		s += ", nice " + p.Priority
+	}
+	if p.MemoryLimit != "" {
+		s += ", PHP memory " + p.MemoryLimit
 	}
 	return s
 }
@@ -224,10 +238,21 @@ func poolSteps(why string, p fpmProfile, dst string) []Step {
 	default:
 		off = []string{"pm.start_servers", "pm.min_spare_servers", "pm.max_spare_servers", "pm.process_idle_timeout"}
 	}
-	return []Step{
+	steps := []Step{
 		confSet(why, dst, o, kv...),
 		confUnset("keys pm = "+p.Mode+" does not use", dst, conf.Opts{Comment: ";"}, off...),
 	}
+	var limits []string
+	if p.Priority != "" {
+		limits = append(limits, "process.priority", p.Priority)
+	}
+	if p.MemoryLimit != "" {
+		limits = append(limits, "php_admin_value[memory_limit]", p.MemoryLimit)
+	}
+	if limits != nil {
+		steps = append(steps, confSet("the profile's limits: yield CPU to production, cap PHP memory", dst, o, limits...))
+	}
+	return steps
 }
 
 // profileSteps: copy Hestia's base pool template for the version and set the
