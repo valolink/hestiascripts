@@ -354,3 +354,43 @@ func TestNetdataAlarmsGreenOnlyWhenLoaded(t *testing.T) {
 		t.Errorf("a kernel without PSI caps at configured: %+v", rs)
 	}
 }
+
+// Fleet sweep 2026-09-30: nginx → Apache on the box's own public IP read as
+// "outbound to port 8443" on every box.
+func TestOutboundSkipsTheBoxToItself(t *testing.T) {
+	f := &sys.Fake{Cmds: map[string]sys.FakeCmd{
+		"ss -Htanl": {Out: "LISTEN 0 511 94.237.39.7:8443 0.0.0.0:*\nLISTEN 0 511 94.237.39.7:443 0.0.0.0:*\n"},
+		"ss -Htanp": {Out: "ESTAB 0 0 94.237.39.7:59318 94.237.39.7:8443 users:((\"nginx\",pid=1,fd=52))\n" +
+			"ESTAB 0 0 94.237.39.7:40000 195.72.61.165:8000 users:((\"ulibd\",pid=2,fd=3))\n"},
+	}}
+	rs := checkOutbound(context.Background(), env(f))
+	if len(rs) != 1 || rs[0].Subject != "195.72.61.165:8000" {
+		t.Errorf("want only the real outbound: %+v", rs)
+	}
+}
+
+func TestPkgIntegrityResticSelfUpdate(t *testing.T) {
+	f := &sys.Fake{Cmds: map[string]sys.FakeCmd{
+		"dpkg --verify":                      {Out: "??5??????   /usr/bin/restic\n"},
+		"/usr/bin/restic version":            {Out: "restic 0.19.1 compiled with go1.26.4 on linux/amd64\n"},
+		"dpkg-query -W -f=${Version} restic": {Out: "0.14.0-1+b5"},
+	}}
+	if rs := checkPkgIntegrity(context.Background(), env(f)); rs[0].State != OK {
+		t.Errorf("self-updated restic: %+v", rs)
+	}
+	f.Cmds["/usr/bin/restic version"] = sys.FakeCmd{Out: "restic 0.14.0 compiled with go1.19 on linux/amd64\n"}
+	if rs := checkPkgIntegrity(context.Background(), env(f)); rs[0].State != Warn {
+		t.Errorf("changed restic that is not newer: %+v", rs)
+	}
+}
+
+func TestVersionNewer(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{{"0.19.1", "0.14.0-1+b5", true}, {"0.14.0", "0.14.0-1+b5", false}, {"0.9.9", "0.14.0", false}, {"1.0", "1:0.9", true}, {"x", "0.1", false}} {
+		if got := versionNewer(c.a, c.b); got != c.want {
+			t.Errorf("versionNewer(%q, %q) = %v", c.a, c.b, got)
+		}
+	}
+}

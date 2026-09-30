@@ -142,6 +142,8 @@ func checkHTTP(ctx context.Context, env *Env, d hestia.Domain) []Result {
 		r = New(Fail, fmt.Sprintf("HTTP %d", code)).
 			Because("Visitors get an error page.").
 			Fixed("tail /var/log/" + webLog(d))
+	case code == 401 && httpAuth(env, d):
+		r = New(OK, "HTTP 401: behind an HTTP password, as set up")
 	case code >= 400:
 		r = New(Warn, fmt.Sprintf("HTTP %d on the front page", code)).
 			Because("The site answers but refuses or cannot find its own home page.")
@@ -159,6 +161,19 @@ func checkHTTP(ctx context.Context, env *Env, d hestia.Domain) []Result {
 		r = r.With("sslDays", strconv.Itoa(days))
 	}
 	return []Result{r}
+}
+
+// httpAuth: the domain is password-protected on purpose — a staging copy's
+// credentials from v-wp-staging-create, or Hestia's own web-domain HTTP auth
+// (v-add-web-domain-httpauth writes nginx.conf_htaccess). Five hzweb1 staging
+// copies read as "refuses its home page" on 2026-09-30.
+func httpAuth(env *Env, d hestia.Domain) bool {
+	for _, p := range []string{"/root/.hestia-staging-auth/" + d.Name, "/home/" + d.User + "/conf/web/" + d.Name + "/nginx.conf_htaccess"} {
+		if _, err := env.Sys.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // sameSite resolves loc against cur and reports whether it stays on one of

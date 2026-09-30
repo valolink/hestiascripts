@@ -25,13 +25,20 @@ var knownUploadsPHP = []struct{ prefix, plugin string }{
 	{"sucuri/", "Sucuri data files (exit-guarded)"},                 // aina.demolink.fi
 	{"wpallimport/functions.php", "WP All Import custom functions"}, // river*, renea*
 	{"wpallimport/uploads/", "WP All Import upload guard"},
+	// fleet sweep 2026-09-30
+	{"wpallexport/functions.php", "WP All Export custom functions"},      // soutuveneet.fi, kuumalahde.demolink.fi (empty files)
+	{"mailpoet/cache/", "MailPoet template cache"},                       // delicatessen.fi: 17 Twig files
+	{"code-execution.php", "Really Simple SSL uploads-execution probe"},  // operaria.fi
+	{"mailchimp-for-wp/debug-log.php", "MC4WP debug log (exit-guarded)"}, // kluuvi.fi
 }
 
 // KnownUploadsPHP names the plugin behind a PHP file in uploads (rel is
-// relative to wp-content/uploads/), or "" when it is not a known case.
+// relative to wp-content/uploads/), or "" when it is not a known case. An
+// entry ending in "/" covers its directory; any other entry is one exact file,
+// so "code-execution.php" does not also admit "code-execution.php.shell.php".
 func KnownUploadsPHP(rel string) string {
 	for _, k := range knownUploadsPHP {
-		if strings.HasPrefix(rel, k.prefix) {
+		if rel == k.prefix || strings.HasSuffix(k.prefix, "/") && strings.HasPrefix(rel, k.prefix) {
 			return k.plugin
 		}
 	}

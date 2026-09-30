@@ -81,7 +81,8 @@ func checkFail2ban(ctx context.Context, env *Env) []Result {
 	if !active(ctx, s, "fail2ban") {
 		return []Result{New(Fail, "installed but not running").
 			Because("Brute-force attempts against SSH, WordPress and FTP go unthrottled.").
-			Fixed("systemctl start fail2ban")}
+			// delicatessen, viona, soutuveneet 2026-09-30: a jail with no log file (exim on a box without exim) stops it starting at boot
+			Fixed("hs f2b repair && hs f2b restart   # repair disables jails whose log is missing, the usual reason it will not start")}
 	}
 	var rs []Result
 	// IPC to the daemon blocks when an action is stalled — bound it tightly.

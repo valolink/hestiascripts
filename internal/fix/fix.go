@@ -551,10 +551,15 @@ func debugKeepSteps(env *check.Env, subject string) ([]Step, error) {
 			Argv: []string{"ls", "-la", d.DocRoot() + "/wp-content/plugins/debug-log-config-tool"}})
 	}
 	logs, _ := env.Sys.Glob(d.DocRoot() + "/wp-content/debug*.log")
-	steps = append(steps, moveSteps(logs, d.DocRoot(), private(d), d.User)...)
+	// Repoint the log before moving the old one: in the other order a request
+	// between the two steps writes a fresh wp-content/debug.log (soutuveneet.fi
+	// 2026-09-30, 474 bytes, still served).
 	steps = append(steps,
 		Step{Why: "write the log to private/ from now on", Argv: wp(d, "config", "set", "WP_DEBUG_LOG", logPath)},
 		Step{Why: "never print errors to visitors", Argv: wp(d, "config", "set", "WP_DEBUG_DISPLAY", "false", "--raw")},
+	)
+	steps = append(steps, moveSteps(logs, d.DocRoot(), private(d), d.User)...)
+	steps = append(steps,
 		Step{Why: "rotate hourly at " + logcap.DefaultSize + " — adds to /etc/hs/logcap.conf:\n" +
 			strings.TrimRight(logcap.Block(d.Name, logPath, d.User, logcap.DefaultSize), "\n") +
 			"\nand /etc/cron.d/hs-logcap:\n" + strings.TrimRight(logcap.CronLine(), "\n"),
@@ -573,8 +578,8 @@ func selfExe() string {
 func init() {
 	fw := Fix{
 		ID: "firewall-restore", Title: "Install iptables and restore Hestia's firewall", Check: "firewall", Scope: "", Risk: Change,
-		Note: "soutuveneet 2026-09-24: no iptables binary — the firewall held no rules and every fail2ban ban failed.",
-		How:  "apt installs the iptables package if it is missing; restarting hestia-iptables re-applies Hestia's rules.conf (the rules shown in the panel); restarting fail2ban lets its jails re-create their chains. The last step prints how many rules are now loaded.",
+		Note: "soutuveneet 2026-09-24: no iptables binary — the firewall held no rules and every fail2ban ban failed. On 2026-09-30 its saved /etc/iptables.rules was empty too, so restarting hestia-iptables alone loaded nothing, and fail2ban then refused to start on an exim jail with no log.",
+		How:  "apt installs the iptables package if it is missing; v-update-firewall rebuilds the rules from Hestia's rules.conf (the rules shown in the panel), applies them and saves /etc/iptables.rules; restarting hestia-iptables clears its failed state from that file; `hs f2b repair` disables jails whose log does not exist, then fail2ban restarts and re-creates its chains. The last step prints how many rules are now loaded.",
 		Undo: "Nothing to undo — this restores the intended state. Firewall rules are edited in Hestia → Server → Firewall.",
 		Plan: func(ctx context.Context, env *check.Env, _ string) ([]Step, error) {
 			var steps []Step
@@ -582,8 +587,10 @@ func init() {
 				steps = append(steps, Step{Why: "the firewall binary is missing", Argv: []string{"apt-get", "install", "-y", "iptables"}})
 			}
 			return append(steps,
-				Step{Why: "re-apply Hestia's rules", Argv: []string{"systemctl", "restart", "hestia-iptables"}},
-				Step{Why: "let fail2ban re-create its chains", Argv: []string{"systemctl", "restart", "fail2ban"}},
+				Step{Why: "rebuild Hestia's rules and save them", Argv: []string{"/usr/local/hestia/bin/v-update-firewall"}},
+				Step{Why: "clear hestia-iptables' failed state (loads the saved rules)", Argv: []string{"systemctl", "restart", "hestia-iptables"}},
+				Step{Why: "disable fail2ban jails that have no log on this box", Argv: []string{selfExe(), "f2b", "repair"}},
+				Step{Why: "let fail2ban re-create its chains", Argv: []string{selfExe(), "f2b", "restart"}},
 				Step{Why: "how many rules are loaded now (expect dozens)", Argv: []string{"sh", "-c", "iptables -S | wc -l"}},
 			), nil
 		},

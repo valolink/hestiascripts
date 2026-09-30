@@ -324,10 +324,13 @@ func checkOutbound(ctx context.Context, env *Env) []Result {
 		if c.State != "ESTAB" && c.State != "SYN-SENT" {
 			continue
 		}
-		_, lport := splitHostPort(c.Local)
+		lip, lport := splitHostPort(c.Local)
 		rip, rport := splitHostPort(c.Remote)
 		if rip == nil || listen[lport] || rip.IsLoopback() || rip.IsPrivate() || rip.IsLinkLocalUnicast() || outboundPorts[rport] {
 			continue // inbound to a service, local, or an expected port
+		}
+		if rip.Equal(lip) && listen[rport] {
+			continue // the box to itself: nginx → Apache on the public IP (:8080/:8443), every Hestia box 2026-09-30
 		}
 		rs = append(rs, New(Warn, fmt.Sprintf("outbound to port %d", rport)).For(c.Remote).Ev(c.State+" "+c.Local+" → "+c.Remote+" "+c.Proc).
 			Because("The May 2026 implants called out on :8000 and :50051 and mined on :8444; web servers rarely need anything beyond web, mail and DNS ports.").
@@ -493,6 +496,8 @@ func checkUnowned(ctx context.Context, env *Env) []Result {
 func checkUnits(ctx context.Context, env *Env) []Result {
 	owned := dpkgOwned(env)
 	allow := append(allowPrefixes(env), "/etc/systemd/system/hestia-streamer.service", "/etc/systemd/system/hs-firewall.service",
+		// DigitalOcean's droplet image: VPC peering set up by cloud-init (web1, viona)
+		"/etc/systemd/system/vpc-peering.service",
 		"/lib/systemd/system/hestia-iptables.service", "/usr/lib/systemd/system/hestia-iptables.service", "/etc/systemd/system/hestia-streamer.service.d/")
 	var rs []Result
 	for _, dir := range []string{"/etc/systemd/system", "/usr/lib/systemd/system"} {
@@ -633,6 +638,9 @@ func checkPkgIntegrity(ctx context.Context, env *Env) []Result {
 		if len(f) >= 2 && allowed(f[len(f)-1], allow) {
 			continue
 		}
+		if len(f) >= 2 && f[len(f)-1] == "/usr/bin/restic" && resticSelfUpdated(ctx, env) {
+			continue
+		}
 		if len(f) >= 2 && strings.Contains(f[0], "5") {
 			bad = append(bad, strings.Join(f, " "))
 		}
@@ -644,4 +652,62 @@ func checkPkgIntegrity(ctx context.Context, env *Env) []Result {
 	return []Result{New(Warn, fmt.Sprintf("%d packaged files differ from their package", len(bad))).Ev(bad...).
 		Because("A modified binary or library outside a package upgrade is how a rootkit hides. Some are expected (files Hestia patches in place); anything in /usr/bin, /usr/sbin or /usr/lib is not.").
 		Fixed("dpkg -S FILE; apt-get install --reinstall PACKAGE restores it")}
+}
+
+// resticSelfUpdated: `restic self-update` replaces the packaged binary with a
+// signature-checked upstream release (every box on 2026-09-30: 0.19.1 over
+// Debian's 0.14.0). Accepted only while the binary reports a newer version
+// than the package; a same-or-older binary that differs is still reported.
+func resticSelfUpdated(ctx context.Context, env *Env) bool {
+	bin, err := env.Sys.Run(ctx, "/usr/bin/restic", "version")
+	if err != nil {
+		return false
+	}
+	pkg, err := env.Sys.Run(ctx, "dpkg-query", "-W", "-f=${Version}", "restic")
+	if err != nil {
+		return false
+	}
+	f := strings.Fields(bin) // "restic 0.19.1 compiled with …"
+	if len(f) < 2 || f[0] != "restic" {
+		return false
+	}
+	return versionNewer(f[1], pkg)
+}
+
+// versionNewer compares the leading dotted numbers ("0.19.1" vs "0.14.0-1+b5").
+func versionNewer(a, b string) bool {
+	nums := func(v string) []int {
+		if i := strings.IndexAny(v, "-+~ "); i >= 0 {
+			v = v[:i]
+		}
+		if i := strings.Index(v, ":"); i >= 0 {
+			v = v[i+1:] // epoch
+		}
+		var out []int
+		for _, p := range strings.Split(strings.TrimSpace(v), ".") {
+			n, err := strconv.Atoi(p)
+			if err != nil {
+				break
+			}
+			out = append(out, n)
+		}
+		return out
+	}
+	x, y := nums(a), nums(b)
+	if len(x) == 0 || len(y) == 0 {
+		return false
+	}
+	for i := 0; i < len(x) || i < len(y); i++ {
+		var p, q int
+		if i < len(x) {
+			p = x[i]
+		}
+		if i < len(y) {
+			q = y[i]
+		}
+		if p != q {
+			return p > q
+		}
+	}
+	return false
 }

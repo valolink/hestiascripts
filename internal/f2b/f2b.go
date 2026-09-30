@@ -120,33 +120,41 @@ func Repair(ctx context.Context, w io.Writer, run Runner, selfIPs string) error 
 }
 
 // Reload reloads, or restarts, fail2ban. A command that does not return in
-// 3 s means its queue is stuck (typically a mail action blocked on SMTP):
+// 20 s means its queue is stuck (typically a mail action blocked on SMTP):
 // the server is killed and started again — in-memory bans are lost, the
-// jails refill from the logs.
+// jails refill from the logs. (It was 3 s until 2026-09-30, when a healthy
+// reload of eight jails with a full recidive list took longer on web1 and
+// got killed.) After it, the server is given up to 15 s to open its socket.
 func Reload(ctx context.Context, w io.Writer, restart bool) error {
 	verb := []string{"fail2ban-client", "reload"}
 	if restart {
 		verb = []string{"systemctl", "restart", "fail2ban"}
 	}
-	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	tctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	err := exec.CommandContext(tctx, verb[0], verb[1:]...).Run()
 	cancel()
 	if err == nil {
 		fmt.Fprintf(w, "→ %s\n", strings.Join(verb, " "))
 	} else {
-		fmt.Fprintf(w, "! %s did not return in 3 s — killing fail2ban-server and starting it again (in-memory bans are lost; jails refill from the logs)\n", strings.Join(verb, " "))
+		fmt.Fprintf(w, "! %s did not return in 20 s — killing fail2ban-server and starting it again (in-memory bans are lost; jails refill from the logs)\n", strings.Join(verb, " "))
 		exec.Command("killall", "-9", "fail2ban-server").Run()
 		time.Sleep(time.Second)
 		if err := exec.CommandContext(ctx, "systemctl", "restart", "fail2ban").Run(); err != nil {
 			return fmt.Errorf("fail2ban did not come back: journalctl -u fail2ban")
 		}
 	}
-	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(sctx, "fail2ban-client", "status").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("fail2ban is not answering: journalctl -u fail2ban")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		out, err := exec.CommandContext(sctx, "fail2ban-client", "status").CombinedOutput()
+		cancel()
+		if err == nil {
+			fmt.Fprint(w, string(out))
+			return nil
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return fmt.Errorf("fail2ban is not answering: journalctl -u fail2ban")
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	fmt.Fprint(w, string(out))
-	return nil
 }

@@ -23,4 +23,10 @@ func TestKnownUploadsPHP(t *testing.T) {
 	if KnownUploadsPHP("cache/wpml/twig/fb/fb12.php") == "" || KnownUploadsPHP("2024/05/shell.php") != "" {
 		t.Error("known/unknown uploads PHP misclassified")
 	}
+	if KnownUploadsPHP("code-execution.php") == "" || KnownUploadsPHP("code-execution.php.shell.php") != "" || KnownUploadsPHP("wpallexport/functions.php.bak.php") != "" {
+		t.Error("a single-file entry must match that file only")
+	}
+	if KnownUploadsPHP("mailpoet/cache/f4/f4006dfb.php") == "" {
+		t.Error("MailPoet cache not known")
+	}
 }

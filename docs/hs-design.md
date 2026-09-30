@@ -304,6 +304,19 @@ A read-only pass over the live Hestia boxes (alavus, hzweb1, hzenergiatuote, kuu
 
 Found but not hs's to fix: ucweb1's SSH host key changed; ucdemolink and five DigitalOcean aliases time out (retired?); no box carries the alavus backdoor indicators.
 
+## Fleet sweep → false positives and fix-plan bugs (2026-09-30)
+
+`hs check --json --sites` on all nine boxes (502 non-OK), then the safe fixes applied. What hs got wrong, and the change:
+
+- **`persist.outbound`** listed nginx → Apache on the box's own public IP (:8443/:8080) on every box — 30 findings. A connection whose remote address equals its local address and whose remote port is a local listener is the box to itself and is skipped.
+- **`pkg.integrity`** flagged `/usr/bin/restic` on every box: `restic self-update` (0.19.1 over Debian's 0.14.0). Accepted only while the binary reports a newer version than the package; an equal or older binary that differs still warns.
+- **`persist.units`**: DigitalOcean's `vpc-peering.service` (cloud-init) is known.
+- **Uploads PHP**: MailPoet's Twig cache, Really Simple SSL's `code-execution.php` probe, MC4WP's exit-guarded debug log and WP All Export's (empty) `functions.php` are known. Entries without a trailing `/` now match one exact file, not a prefix.
+- **`site.http`**: a 401 from a domain with an HTTP password (`/root/.hestia-staging-auth/<domain>` or Hestia's `nginx.conf_htaccess`) is OK — five hzweb1 staging copies read as "refuses its home page".
+- **`firewall-restore`** restarted `hestia-iptables`, which only restores `/etc/iptables.rules` — empty on soutuveneet, so nothing loaded. The plan now runs `v-update-firewall` (rebuild, apply, save) first, and `hs f2b repair` before restarting fail2ban, which would not start on an exim jail with no log. The not-running fail2ban finding suggests the same pair instead of `systemctl start` (delicatessen, viona and soutuveneet all failed that way after a reboot).
+- **`debug-keep`** moved the log and then repointed `WP_DEBUG_LOG`; a request in between wrote a fresh public `wp-content/debug.log` (soutuveneet.fi). Repoint first, then move.
+- **`hs f2b reload|restart`** killed a healthy reload after 3 s (web1: eight jails, a long recidive list) and asked for status before the socket was up. 20 s bound, then up to 15 s of status polling.
+
 ## Redis object cache — the documented layout (2026-09-25)
 
 Read from the redis-cache plugin's README, FAQ and CHANGELOG and its 2.8.0 drop-in source, then checked on the live boxes. `internal/redisinfo` holds the model; checks and fixes share it.

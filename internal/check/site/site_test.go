@@ -123,6 +123,17 @@ func TestUpdatesReportsDatabaseFailure(t *testing.T) {
 }
 
 // boostwith.ai 2026-09-24: 301 to www in front of a dead database.
+func TestHTTPAuth(t *testing.T) {
+	f := &sys.Fake{Clock: now, HTTP: map[string]sys.FakeHTTP{"local https://alavusikkunat.fi/": {Status: 401}}, Files: map[string]string{}}
+	if rs := checkHTTP(context.Background(), &Env{Sys: f}, dom); rs[0].State != Warn {
+		t.Errorf("401 without a password set up: %+v", rs)
+	}
+	f.Files["/root/.hestia-staging-auth/alavusikkunat.fi"] = "staging secret"
+	if rs := checkHTTP(context.Background(), &Env{Sys: f}, dom); rs[0].State != OK {
+		t.Errorf("401 behind the staging password: %+v", rs)
+	}
+}
+
 func TestHTTPFollowsOwnRedirects(t *testing.T) {
 	d := dom
 	d.Aliases = []string{"www.alavusikkunat.fi"}
