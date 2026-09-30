@@ -106,8 +106,11 @@ func init() {
 		}
 		return append(steps, reload,
 			Step{Why: "loaded: the hs alarms, and used_swap gone", Argv: []string{"sh", "-c", "sleep 2; a=$(curl -fsS 'http://127.0.0.1:19999/api/v1/alarms?all') || exit 1; " +
-				"printf '%s' \"$a\" | grep -o '\"name\":\"hs_[a-z_]*\"' | sort -u | tr -d '\"' | sed 's/name://'; " +
-				"printf '%s' \"$a\" | grep -q '\"name\":\"used_swap\"' && echo 'used_swap: STILL LOADED' && exit 1; echo 'used_swap: off'"}},
+				// Netdata pretty-prints (`"name": "x"`), so allow spaces; at least
+				// hs_swap_io loads on any kernel, so none found is a failure.
+				"hs=$(printf '%s' \"$a\" | grep -oE '\"name\": *\"hs_[a-z_]+\"' | grep -oE 'hs_[a-z_]+' | sort -u); " +
+				"[ -n \"$hs\" ] || { echo 'no hs_ alarms loaded'; exit 1; }; echo \"$hs\"; " +
+				"printf '%s' \"$a\" | grep -qE '\"name\": *\"used_swap\"' && echo 'used_swap: STILL LOADED' && exit 1; echo 'used_swap: off'"}},
 		), nil
 	}
 	const alarmsHow = "`hs conf install` writes templates/netdata/health.d/swap.conf and hs-pressure.conf to " + box.NetdataHealthDir + " (previous files kept). A file there with a stock file's name takes its place, so swap.conf retires the stock used_swap (swap fill level — parked pages, not pressure) and defines hs_swap_io on mem.swapio: swap traffic in+out averaged over 3 minutes, warning at 1 MiB/s, critical at 8 MiB/s (parked swap moves nothing). hs-pressure.conf reads the kernel's pressure stall information: hs_ram_pressure = share of the last minute in which some task waited for memory (warn 20 %, critical 50 %), hs_ram_stall = share in which every task did (warn 5 %, critical 20 % — the box thrashing), hs_cpu_pressure = share of the last five minutes in which runnable tasks waited for a CPU (warn 30 %, critical 70 %). Each has hysteresis so it does not flap. Stock ram_available (MemAvailable under 10 %) and oom_kill stay as they are — they measure the right thing. `netdatacli reload-health` makes Netdata re-read health files without a restart; the last step lists the hs_ alarms it loaded (PSI ones need a kernel with /proc/pressure) and confirms used_swap is gone. EngineLink shows these names in its alarm list."
