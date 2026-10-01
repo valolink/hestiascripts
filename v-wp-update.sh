@@ -163,12 +163,12 @@ trap cleanup EXIT
 
 ERRORS=()
 
-# WordPress's upgraders remove .maintenance themselves when they finish, so the
-# site opened mid-run: right after `plugin update --all` on alavusikkunat.fi
-# (2026-10-01) the follow-ups below ran on a live site, and the first visitors,
-# EngineLink's probe and every plugin's post-update migration (as loopback
-# requests) arrived at once — six 500s from memory exhaustion in 9 s. Put it
-# back after each upgrader so the site stays closed until the summary.
+# WordPress's upgraders delete .maintenance when they finish, so the site is
+# open again before the steps that follow them. Re-close it only for steps that
+# migrate the database (core's update-db, a pending WooCommerce DB update):
+# those must not run under traffic. Everything else runs with the site open,
+# keeping the closed window as short as the updates themselves
+# (alavusikkunat.fi 2026-10-01: ~50 s for 25 plugins).
 hold_maintenance() { $WP maintenance-mode activate &>/dev/null; }
 
 # --- Maintenance Mode On ---
@@ -184,12 +184,12 @@ if [ -n "$CORE_UPDATE" ]; then
   WP_VERSION_BEFORE=$($WP core version 2>/dev/null)
   $WP core update 2>&1
   CORE_RC=$?
-  hold_maintenance
   if [ $CORE_RC -eq 0 ]; then
     WP_VERSION_AFTER=$($WP core version 2>/dev/null)
     echo "✅ Core updated: $WP_VERSION_BEFORE → $WP_VERSION_AFTER"
     echo ""
     echo "   Running database upgrade..."
+    hold_maintenance
     $WP core update-db 2>&1
   else
     ERRORS+=("Core update failed")
@@ -210,7 +210,6 @@ PLUGINS_DONE=0; THEMES_DONE=0
 if [ "$PLUGIN_UPDATES" -gt 0 ]; then
   echo "[ Plugin Updates ]"
   OUT=$($WP plugin update --all 2>&1); RC=$?
-  hold_maintenance
   printf '%s\n' "$OUT"
   PLUGINS_DONE=$(count_status "$OUT" Updated)
   FAILED=$(failed_names "$OUT")
@@ -222,6 +221,7 @@ if [ "$PLUGIN_UPDATES" -gt 0 ]; then
   if $WP plugin is-active woocommerce 2>/dev/null \
      && [ "$($WP eval 'echo (int) \WC_Install::needs_db_update();' 2>/dev/null)" = 1 ]; then
     echo "[ WooCommerce database update ]"
+    hold_maintenance
     $WP wc update 2>&1 || ERRORS+=("WooCommerce database update failed")
     echo ""
   fi
@@ -237,7 +237,6 @@ fi
 if [ "$THEME_UPDATES" -gt 0 ]; then
   echo "[ Theme Updates ]"
   OUT=$($WP theme update --all 2>&1); RC=$?
-  hold_maintenance
   printf '%s\n' "$OUT"
   THEMES_DONE=$(count_status "$OUT" Updated)
   FAILED=$(failed_names "$OUT")
