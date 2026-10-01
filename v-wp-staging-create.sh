@@ -980,6 +980,37 @@ while IFS= read -r -d '' link; do
 done < <(find "$SETUP_DIR" -path "$SETUP_DIR/wp-content/uploads" -prune -o -type l -lname "$LIVE_HOME/*" -print0)
 mkdir -p "$NEW_HOME/private" && chown "$DEST_USER:$DEST_USER" "$NEW_HOME/private"
 
+# Plugin Organizer keys its per-URL rules on the bare request host plus an
+# md5 of it ("www.alavusikkunat.fi/instagram/"), which the URL search-replace
+# above never sees. On the copy no rule matched, so plugins live enables per
+# page stayed off everywhere (Instagram Feed rendered its raw shortcode on
+# alavusikkunat.fi's staging front page, 2026-10-01). Repoint them at the
+# staging host; hashes are rewritten only where they were the plain md5.
+NEW_HOST="${NEW_WP_URL#*://}"; NEW_HOST="${NEW_HOST%%/*}"
+PO_TABLE="$($WP_STG db prefix --skip-plugins --skip-themes 2>/dev/null)po_plugins"
+if [ -n "$($WP_STG db query "SHOW TABLES LIKE '$PO_TABLE'" --skip-column-names --skip-plugins --skip-themes 2>/dev/null)" ]; then
+  for OLD_HOST in "www.$OLD_BARE" "$OLD_BARE"; do
+    NEW_LINK="CONCAT('$NEW_HOST/', SUBSTRING(permalink, LENGTH('$OLD_HOST/') + 1))"
+    # MySQL assigns left to right: the hashes read the old permalink first.
+    $WP_STG db query "UPDATE $PO_TABLE SET
+        permalink_hash      = IF(permalink_hash      = MD5(permalink), MD5($NEW_LINK), permalink_hash),
+        permalink_hash_args = IF(permalink_hash_args = MD5(permalink), MD5($NEW_LINK), permalink_hash_args),
+        permalink           = $NEW_LINK
+      WHERE permalink LIKE '$OLD_HOST/%'" --skip-plugins --skip-themes 2>/dev/null
+  done
+  echo "       Plugin Organizer rules repointed at $NEW_HOST"
+fi
+
+# Live's uploads are read-only here, so Elementor cannot rewrite its
+# uploads/elementor/css/post-*.css after an update and the copy keeps serving
+# live's old files: an Elementor update looked unchanged on staging while live
+# would regenerate (alavusikkunat.fi 2026-10-01). Inline CSS is built per
+# request from the copy's own Elementor.
+if $WP_STG plugin is-active elementor --skip-plugins --skip-themes 2>/dev/null; then
+  $WP_STG option update elementor_css_print_method internal --skip-plugins --skip-themes --quiet 2>/dev/null \
+    && echo "       Elementor CSS printed inline (uploads are read-only on the copy)"
+fi
+
 # valolink-plugin's Staging module (noindex, mail interception, live payment
 # gateways off, auto-updates off) — switched on in the copy only. Live keeps
 # whatever it had: enabling the module on live is unsafe, because its
@@ -1064,9 +1095,11 @@ fi
 
 # Drop old staging DB if we replaced one. Best-effort; non-fatal.
 if [ -n "$OLD_STAGING_DB" ] && [ "$OLD_STAGING_DB" != "$NEW_DB_NAME" ]; then
-  OLD_SUFFIX="${OLD_STAGING_DB#${DEST_USER}_}"
+  # v-delete-database takes the full name (user_ prefix included); the
+  # stripped suffix failed on every refresh and left the old copy's database
+  # behind (alavus_stg_5153bd, 2026-10-01).
   echo "       Removing prior staging DB ($OLD_STAGING_DB)..."
-  v-delete-database "$DEST_USER" "$OLD_SUFFIX" 2>/dev/null \
+  v-delete-database "$DEST_USER" "$OLD_STAGING_DB" 2>/dev/null \
     || echo "       ⚠ Could not auto-remove $OLD_STAGING_DB — delete manually."
 fi
 
