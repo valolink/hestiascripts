@@ -163,6 +163,14 @@ trap cleanup EXIT
 
 ERRORS=()
 
+# WordPress's upgraders remove .maintenance themselves when they finish, so the
+# site opened mid-run: right after `plugin update --all` on alavusikkunat.fi
+# (2026-10-01) the follow-ups below ran on a live site, and the first visitors,
+# EngineLink's probe and every plugin's post-update migration (as loopback
+# requests) arrived at once — six 500s from memory exhaustion in 9 s. Put it
+# back after each upgrader so the site stays closed until the summary.
+hold_maintenance() { $WP maintenance-mode activate &>/dev/null; }
+
 # --- Maintenance Mode On ---
 echo ""
 echo "---------------------------------------------------"
@@ -175,7 +183,9 @@ if [ -n "$CORE_UPDATE" ]; then
   echo "[ Core Update ]"
   WP_VERSION_BEFORE=$($WP core version 2>/dev/null)
   $WP core update 2>&1
-  if [ $? -eq 0 ]; then
+  CORE_RC=$?
+  hold_maintenance
+  if [ $CORE_RC -eq 0 ]; then
     WP_VERSION_AFTER=$($WP core version 2>/dev/null)
     echo "✅ Core updated: $WP_VERSION_BEFORE → $WP_VERSION_AFTER"
     echo ""
@@ -200,6 +210,7 @@ PLUGINS_DONE=0; THEMES_DONE=0
 if [ "$PLUGIN_UPDATES" -gt 0 ]; then
   echo "[ Plugin Updates ]"
   OUT=$($WP plugin update --all 2>&1); RC=$?
+  hold_maintenance
   printf '%s\n' "$OUT"
   PLUGINS_DONE=$(count_status "$OUT" Updated)
   FAILED=$(failed_names "$OUT")
@@ -226,6 +237,7 @@ fi
 if [ "$THEME_UPDATES" -gt 0 ]; then
   echo "[ Theme Updates ]"
   OUT=$($WP theme update --all 2>&1); RC=$?
+  hold_maintenance
   printf '%s\n' "$OUT"
   THEMES_DONE=$(count_status "$OUT" Updated)
   FAILED=$(failed_names "$OUT")
