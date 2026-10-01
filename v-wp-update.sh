@@ -188,19 +188,49 @@ if [ -n "$CORE_UPDATE" ]; then
   echo ""
 fi
 
+# WP-CLI ends `plugin update --all` / `theme update --all` with a table whose
+# rows end in a tab and Updated or Error. The summary counts those rows: the
+# number available before the run says nothing about what landed (on a staging
+# copy licence-bound packages fail, 2026-10-01).
+count_status() { printf '%s\n' "$1" | grep -cP "\t$2\s*$"; }
+failed_names() { printf '%s\n' "$1" | grep -P '\tError\s*$' | cut -f1 | paste -sd ' '; }
+PLUGINS_DONE=0; THEMES_DONE=0
+
 # --- Plugin Updates ---
 if [ "$PLUGIN_UPDATES" -gt 0 ]; then
   echo "[ Plugin Updates ]"
-  $WP plugin update --all 2>&1
-  [ $? -ne 0 ] && ERRORS+=("One or more plugin updates failed")
+  OUT=$($WP plugin update --all 2>&1); RC=$?
+  printf '%s\n' "$OUT"
+  PLUGINS_DONE=$(count_status "$OUT" Updated)
+  FAILED=$(failed_names "$OUT")
+  if [ -n "$FAILED" ]; then ERRORS+=("Plugins not updated: $FAILED")
+  elif [ $RC -ne 0 ]; then ERRORS+=("One or more plugin updates failed"); fi
   echo ""
+
+  # Follow-ups the plugin update itself does not do.
+  if $WP plugin is-active woocommerce 2>/dev/null \
+     && [ "$($WP eval 'echo (int) \WC_Install::needs_db_update();' 2>/dev/null)" = 1 ]; then
+    echo "[ WooCommerce database update ]"
+    $WP wc update 2>&1 || ERRORS+=("WooCommerce database update failed")
+    echo ""
+  fi
+  if $WP plugin is-active redis-cache 2>/dev/null \
+     && $WP redis status 2>/dev/null | grep -q "Drop-in is outdated"; then
+    echo "[ Redis object-cache drop-in ]"
+    $WP redis update-dropin 2>&1 || ERRORS+=("Redis drop-in update failed")
+    echo ""
+  fi
 fi
 
 # --- Theme Updates ---
 if [ "$THEME_UPDATES" -gt 0 ]; then
   echo "[ Theme Updates ]"
-  $WP theme update --all 2>&1
-  [ $? -ne 0 ] && ERRORS+=("One or more theme updates failed")
+  OUT=$($WP theme update --all 2>&1); RC=$?
+  printf '%s\n' "$OUT"
+  THEMES_DONE=$(count_status "$OUT" Updated)
+  FAILED=$(failed_names "$OUT")
+  if [ -n "$FAILED" ]; then ERRORS+=("Themes not updated: $FAILED")
+  elif [ $RC -ne 0 ]; then ERRORS+=("One or more theme updates failed"); fi
   echo ""
 fi
 
@@ -221,8 +251,8 @@ echo "======================================================"
 echo "  Summary: $DOMAIN"
 echo "======================================================"
 [ -n "$CORE_UPDATE" ] && [ ! " ${ERRORS[*]} " =~ "Core" ] && echo "  ✅ Core updated to $($WP core version 2>/dev/null)"
-[ "$PLUGIN_UPDATES" -gt 0 ] && echo "  ✅ $PLUGIN_UPDATES plugin(s) updated"
-[ "$THEME_UPDATES" -gt 0 ] && echo "  ✅ $THEME_UPDATES theme(s) updated"
+[ "$PLUGIN_UPDATES" -gt 0 ] && echo "  ✅ $PLUGINS_DONE of $PLUGIN_UPDATES plugin update(s) applied"
+[ "$THEME_UPDATES" -gt 0 ] && echo "  ✅ $THEMES_DONE of $THEME_UPDATES theme update(s) applied"
 [ -n "$BACKUP_FILE" ] && echo "  💾 Backup: $BACKUP_FILE"
 
 if [ ${#ERRORS[@]} -gt 0 ]; then

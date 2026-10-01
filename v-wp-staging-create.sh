@@ -904,6 +904,15 @@ $WP_STG config set WP_ENVIRONMENT_TYPE "staging" --type=constant --quiet
 $WP_STG config set DISABLE_WP_CRON     "true"    --type=constant --raw --quiet
 $WP_STG config set DISALLOW_FILE_MODS  "true"    --type=constant --raw --quiet
 
+# Live's uploads are mounted read-only here, so a WP_TEMP_DIR inside them (live
+# kuumalahde.fi sets it to wp-content/uploads) makes every update download fail
+# on the copy (2026-10-01). The copy's own tmp is in its open_basedir.
+case "$($WP_STG config get WP_TEMP_DIR 2>/dev/null || true)" in
+  *uploads*)
+    echo "       WP_TEMP_DIR pointed into the (read-only) uploads — now /home/$DEST_USER/tmp"
+    $WP_STG config set WP_TEMP_DIR "/home/$DEST_USER/tmp" --type=constant --quiet ;;
+esac
+
 # PHP errors go to a log, never onto the page: EngineLink's update run
 # empties it before updating staging and reads it after the page checks
 # (v-wp-debug-log). private/ is outside the docroot, inside open_basedir.
