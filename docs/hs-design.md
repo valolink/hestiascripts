@@ -343,7 +343,42 @@ soutuveneet.fi: PerplexityBot walked every category × `?product_orderby=` / `pr
 
 **`hs fix robots DOMAIN`** → `hs robots write DOMAIN --sum S`: everything outside `# hs:robots begin` / `# hs:robots end` stays (Hestia's placeholder comment is dropped, its User-agent/Crawl-delay kept); the block adds whatever the rest of the file lacks — `Disallow: /wp-admin/` + `Allow: /wp-admin/admin-ajax.php`, the first sitemap that answers 200 (the SEO plugin's index, else `wp-sitemap.xml`, on the WordPress home URL's host), and for WooCommerce `Disallow` for `orderby`, `product_orderby`, `product_order`, `product_view`, `product_count`, `add-to-cart`, `filter_`, `min_price`, `max_price` query strings plus the cart/checkout/my-account pages at the permalinks of `woocommerce_*_page_id` (localised — `/ostoskori/`, never a hardcoded `/cart/`; a page on the front page is never disallowed). The plan shows the whole resulting file and its sum; the write re-reads the site and refuses anything else, refuses when an SEO plugin should own robots.txt, and does every docroot read and write as the site's user (644, owned by it) so a symlink in robots.txt's place cannot become a root write. Previous file: `private/hs-backup-<date>/robots.txt.<time>` and `/var/lib/hs/backups`. `hs robots show DOMAIN` prints the result and writes nothing.
 
-**robots.txt is advisory.** Well-behaved crawlers obey it; the rest need enforcement in nginx — a per-domain `nginx.ssl.conf_<name>` (and `nginx.conf_<name>`) answering 429 by user agent, as done by hand on soutuveneet.fi. Hestia's default templates and our wp-rocket ones include `%home%/%user%/conf/web/%domain%/nginx.ssl.conf_*` at server level (default.stpl, wp-rocket.stpl line 164), so such a file needs no template change and survives rebuilds. hs does not write user-agent blocks yet.
+**robots.txt is advisory.** Well-behaved crawlers obey it; the rest need enforcement in nginx through a per-domain `nginx.ssl.conf_<name>` (and `nginx.conf_<name>`). Hestia's default templates and our wp-rocket ones include `%home%/%user%/conf/web/%domain%/nginx.ssl.conf_*` at server level (default.stpl, wp-rocket.stpl line 164), so such a file needs no template change and survives rebuilds. What soutuveneet got, and what hs should make of it: next section.
+
+## Crawlers that ignore robots.txt (2026-10-01)
+
+The day after the robots block, Meta's AI crawler did the same walk on soutuveneet.fi, 12:00–14:31 UTC: ~20 000 requests at ~2.4/s (Crawl-delay 10 ignored). 57.141.0.0–57.149.255.255 is RIPE `FB-BLOCK`, so the crawler is genuinely Meta's. It fetched 7 872 Disallowed sort/count/view URLs ~20 h after Meta had fetched the new robots.txt. (That fetch came from Meta's `facebookexternalhit`; `meta-externalagent` itself never requested robots.txt in the logs since 2026-09-05.) The crawler drives a headless browser, so each page view also POSTs Complianz's `/wp-json/complianz/v1/track` and `?wc-ajax=get_refreshed_fragments`. Measured cost: 0.02 s for a cached listing; ~0.86 CPU-s for the same listing with a query string, 0.47 s for the cart refresh and 0.57 s for the consent tracker. That is ~1.7 CPU-s per rendered view, on 2 vCPUs.
+
+Reima's constraints: the customer is on a budget (no upsizing), and crawlers must not be blocked outright, only slowed, with the trap closed. The PerplexityBot 429 block from 2026-09-30 was removed in favour of the following.
+
+**Live on soutuveneet** (soutuveneet.fi + ykiveneet.fi; moottoriveneet.fi is an `.htaccess` redirect and never reaches PHP; backups `/root/hs-moved/20261001-crawlers/`):
+
+- `templates/nginx/valolink-crawlers.conf` → `/etc/nginx/conf.d/` (http level, maps and zones only). The crawler family is the UA token ending in bot/agent/crawler/spider/externalhit/catalog followed by `/`. The `/` keeps phones like `CUBOT X30` out, and in-app browsers (`FBAN/…`) have no such token.
+- `templates/nginx/crawlers-domain.conf` → `nginx.ssl.conf_crawlers` per opted-in domain:
+  - Crawler + sort/count/view/per_page/add-to-cart argument → 301 to the plain path, served from cache.
+  - Crawler + Complianz REST or cart refresh → 204.
+  - Uncached requests (any query string or non-GET, static files excluded) are limited to 30/min per crawler family (burst 20) and 2/s per IP (burst 40), with 429 above that. The family is the unit because Meta crawls from dozens of IPs. Logged-in users and the box's own address are exempt from the per-IP limit.
+  - `return` runs in the rewrite phase, before `limit_req`, so 301s and 204s never count against a limit.
+- `templates/fail2ban/vl-hammer-jail.conf`: stock `nginx-limit-req` filter on zone `vl_ip` only. 20 rejections in 60 s → 1 h ban, and recidive escalates. Crawler IPs are never jailed: banning Meta's addresses one by one would amount to blocking it.
+- Sort links get `rel="nofollow"` in the theme:
+  - Avada (soutuveneet.fi): child-theme copy of `templates/wc-catalog-ordering.php`. Avada loads it with `get_template_part`.
+  - Zuka (ykiveneet.fi): the child theme is installed but **not active**, so overrides there never load. Instead the mu-plugin `valolink-sort-nofollow.php` points `wc_get_template` at patched copies of `loop/toolbar.php` and `loop/orderby.php`.
+  - Both are copies of the parent and need a diff after theme updates.
+- FPM: `soutuveneet.tpl` (both pools; a box-specific copy of Hestia's default) went from `max_children 20`/spare 5–10 to 8/2–4. Measured PSS: 69 MB (soutuveneet.fi) and 50 MB (ykiveneet.fi) per worker. On 2 vCPUs, more workers than that only queue in memory instead of in nginx.
+
+Gotchas from the rollout:
+- WP Rocket's cache purge is not visible for up to `open_file_cache_valid` (60 s), because nginx keeps serving the deleted `index-https.html` from its descriptor cache.
+- `memory.fpm-ceiling` should already have flagged 2 × 20 workers on a 3.9 GB box; check why the 2026-09-30 sweep did not.
+
+**hs backlog**
+- [ ] `nginx.crawlers` (box) + `site.crawlers` (per WooCommerce site) checks, and a `crawler-guard` op:
+  - Install `valolink-crawlers.conf` (ordering like `valolink-cache-headers.conf`) and the per-domain include.
+  - `nginx -t` before reload; restore on failure.
+  - Plan shows the domain list. Warn on a shop whose access log shows crawlers on permutation URLs and has no include.
+- [ ] The jail as part of `setup/fail2ban.sh` / `internal/f2b`, reloaded when a domain opts in.
+- [ ] One list of WooCommerce permutation arguments shared by `site.robots` and the nginx trap map. robots lacks Zuka's `per_page`; the trap map lacks `filter_`/`min_price`/`max_price` (WooCommerce layered nav; it should 301 them too).
+- [ ] `site.sort-links`: fetch one shop listing (cache-busting argument) and count sort/count links without `rel="nofollow"`. The fix depends on the active theme: a child template where `get_template_part` loads it and the child is active; otherwise the `wc_get_template` mu-plugin. hs should name which applies and diff the copy against the parent after theme updates.
+- [ ] `memory.fpm-ceiling`: also weigh vCPUs. On soutuveneet ~0.9 CPU-s per uncached request means more than ~4 × vCPU workers only adds queueing. Count box-specific copies of Hestia's default (`soutuveneet.tpl`) as hs-unmanaged in the per-template list.
 
 ## Staging copies without live's uploads (2026-09-30)
 
