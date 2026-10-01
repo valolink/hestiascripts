@@ -4,7 +4,8 @@
 # Layers, in order:
 #   1. WordPress object cache (Redis via the drop-in) — wp cache flush
 #   2. Transients                                     — wp transient delete --expired
-#   3. WP Rocket page cache (if active)               — wp rocket clean --confirm
+#   3. WP Rocket page cache + minified files (if active) — rocket_clean_domain()
+#      and rocket_clean_minify() through wp eval
 #   4. nginx FastCGI/proxy cache                      — v-purge-nginx-cache
 #
 # Safe to run any time; each layer is best-effort so a missing plugin or
@@ -92,8 +93,13 @@ echo "→ Expired transients..."
 wp_cmd transient delete --expired || echo "  (transient cleanup failed)"
 
 if wp_cmd plugin is-active wp-rocket > /dev/null; then
-  echo "→ WP Rocket page cache..."
-  wp_cmd rocket clean --confirm || echo "  (rocket clean failed)"
+  echo "→ WP Rocket page cache + minified CSS/JS..."
+  # WP Rocket's own functions, not `wp rocket clean`: that subcommand comes
+  # from the wp-rocket-cli package, which hs installs for root only, so the
+  # site user never had it (alavusikkunat.fi 2026-10-01). clean_domain keeps
+  # the minified files, hence clean_minify too.
+  wp_cmd eval 'rocket_clean_domain(); rocket_clean_minify(); echo "ok\n";' | grep -qx ok \
+    || echo "  (WP Rocket clean failed)"
 else
   echo "→ WP Rocket not active — skipping."
 fi

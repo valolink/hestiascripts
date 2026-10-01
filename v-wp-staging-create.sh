@@ -138,7 +138,8 @@ flush_site_caches() {
     || echo "        ⚠ transient delete failed"
 
   if sudo -u "$user" wp --path="$path" plugin is-active wp-rocket --quiet 2>/dev/null; then
-    sudo -u "$user" wp --path="$path" rocket clean --confirm --quiet 2>/dev/null \
+    # WP Rocket's functions: `wp rocket clean` is a root-only WP-CLI package.
+    sudo -u "$user" wp --path="$path" eval 'rocket_clean_domain(); rocket_clean_minify(); echo "ok\n";' 2>/dev/null | grep -qx ok \
       && echo "        ✓ WP Rocket" \
       || echo "        ⚠ WP Rocket clean failed"
   fi

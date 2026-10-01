@@ -238,6 +238,14 @@ fi
 echo "Flushing cache..."
 $WP cache flush --quiet 2>/dev/null
 echo "✅ Cache flushed"
+# Cached pages still name the CSS/JS the updated plugins just replaced
+# (Elementor regenerates its post CSS), so WP Rocket's page cache and its
+# minified files go too (alavusikkunat.fi 2026-10-01).
+if $WP plugin is-active wp-rocket 2>/dev/null; then
+  $WP eval 'rocket_clean_domain(); rocket_clean_minify(); echo "ok\n";' 2>/dev/null | grep -qx ok \
+    && echo "✅ WP Rocket page cache and minified files cleared" \
+    || echo "⚠️  WP Rocket cache clear failed"
+fi
 
 # --- Maintenance Mode Off (also called by trap) ---
 echo ""
