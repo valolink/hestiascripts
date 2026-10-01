@@ -156,10 +156,22 @@ if [ "$SKIP_BACKUP" = false ]; then
 fi
 
 # Ensure maintenance mode is always disabled on exit
+UPDATE_LOG=$(mktemp)
 cleanup() {
   $WP maintenance-mode deactivate &>/dev/null
+  rm -f "$UPDATE_LOG"
 }
 trap cleanup EXIT
+
+# Runs one WP-CLI update with its output on screen as it happens — EngineLink
+# streams this script over SSE, and capturing into a variable held the whole
+# plugin step back until it ended (~50 s on alavusikkunat.fi) — while keeping
+# a copy in $OUT for the counts. $RC is WP-CLI's exit code, not tee's.
+run_live() {
+  "$@" 2>&1 | tee "$UPDATE_LOG"
+  RC=${PIPESTATUS[0]}
+  OUT=$(<"$UPDATE_LOG")
+}
 
 ERRORS=()
 
@@ -209,8 +221,7 @@ PLUGINS_DONE=0; THEMES_DONE=0
 # --- Plugin Updates ---
 if [ "$PLUGIN_UPDATES" -gt 0 ]; then
   echo "[ Plugin Updates ]"
-  OUT=$($WP plugin update --all 2>&1); RC=$?
-  printf '%s\n' "$OUT"
+  run_live $WP plugin update --all
   PLUGINS_DONE=$(count_status "$OUT" Updated)
   FAILED=$(failed_names "$OUT")
   if [ -n "$FAILED" ]; then ERRORS+=("Plugins not updated: $FAILED")
@@ -236,8 +247,7 @@ fi
 # --- Theme Updates ---
 if [ "$THEME_UPDATES" -gt 0 ]; then
   echo "[ Theme Updates ]"
-  OUT=$($WP theme update --all 2>&1); RC=$?
-  printf '%s\n' "$OUT"
+  run_live $WP theme update --all
   THEMES_DONE=$(count_status "$OUT" Updated)
   FAILED=$(failed_names "$OUT")
   if [ -n "$FAILED" ]; then ERRORS+=("Themes not updated: $FAILED")
@@ -270,8 +280,9 @@ echo "======================================================"
 echo "  Summary: $DOMAIN"
 echo "======================================================"
 [ -n "$CORE_UPDATE" ] && [ ! " ${ERRORS[*]} " =~ "Core" ] && echo "  ✅ Core updated to $($WP core version 2>/dev/null)"
-[ "$PLUGIN_UPDATES" -gt 0 ] && echo "  ✅ $PLUGINS_DONE of $PLUGIN_UPDATES plugin update(s) applied"
-[ "$THEME_UPDATES" -gt 0 ] && echo "  ✅ $THEMES_DONE of $THEME_UPDATES theme update(s) applied"
+mark() { [ "$1" -ge "$2" ] && echo "✅" || echo "⚠️ "; }
+[ "$PLUGIN_UPDATES" -gt 0 ] && echo "  $(mark "$PLUGINS_DONE" "$PLUGIN_UPDATES") $PLUGINS_DONE of $PLUGIN_UPDATES plugin update(s) applied"
+[ "$THEME_UPDATES" -gt 0 ] && echo "  $(mark "$THEMES_DONE" "$THEME_UPDATES") $THEMES_DONE of $THEME_UPDATES theme update(s) applied"
 [ -n "$BACKUP_FILE" ] && echo "  💾 Backup: $BACKUP_FILE"
 
 if [ ${#ERRORS[@]} -gt 0 ]; then
