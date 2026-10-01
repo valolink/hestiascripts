@@ -30,6 +30,7 @@ show_help() {
 USAGE: v-wp-copies [json]
        v-wp-copies --mark --domain=COPY --source-domain=LIVE [--kind=staging|clone]
        v-wp-copies --forget --domain=COPY
+       v-wp-copies --auth --domain=COPY
 
 Without options: lists every copy on this box, one line each; with the
 argument "json" as one JSON document (EngineLink's format).
@@ -38,6 +39,13 @@ argument "json" as one JSON document (EngineLink's format).
                     hand). Users are looked up from the domains. Default kind:
                     staging if the copy's WP_ENVIRONMENT_TYPE is staging, else clone.
   --forget          Remove a copy's registry entry (the site itself is untouched).
+  --auth            The HTTP basic-auth pair of one copy this box lists, for
+                    EngineLink's Credentials button: one line,
+                    STAGING_AUTH=<user>:<password> (stored by
+                    v-wp-staging-create), STAGING_AUTH_NONE (no password on the
+                    domain) or STAGING_AUTH_UNKNOWN (protected, but the
+                    password was set elsewhere and only its hash exists).
+                    Treat the output as secret.
   -h, --help        Show this help
 EOF
 }
@@ -48,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     json)              FORMAT="json" ;;
     --mark)            MODE="mark" ;;
     --forget)          MODE="forget" ;;
+    --auth)            MODE="auth" ;;
     --domain=*)        DOMAIN="${1#*=}" ;;
     --source-domain=*) SOURCE_DOMAIN="${1#*=}" ;;
     --kind=*)          KIND="${1#*=}" ;;
@@ -76,6 +85,30 @@ env_type() {
 reg_get() {
   grep -m1 "^$2=" "$1" 2>/dev/null | cut -d= -f2- | tr -d '\r'
 }
+
+if [ "$MODE" = "auth" ]; then
+  [[ "$DOMAIN" =~ $DOMAIN_RE ]] || { echo "ERROR: --domain is required and must be a hostname."; exit 1; }
+  COPY_USER=$(owner_of "$DOMAIN") || { echo "ERROR: $DOMAIN is not a web domain on this box."; exit 1; }
+  # Only copies: a registered one, or a WordPress whose wp-config says
+  # staging/development — never an arbitrary live site's settings.
+  if [ ! -f "$REGISTRY/$DOMAIN.conf" ]; then
+    case "$(env_type "/home/$COPY_USER/web/$DOMAIN/public_html/wp-config.php")" in
+      staging|development) ;;
+      *) echo "ERROR: $DOMAIN is not a known copy on this box."; exit 1 ;;
+    esac
+  fi
+  AUTH_FILE="/root/.hestia-staging-auth/$DOMAIN"
+  if [ -s "$AUTH_FILE" ]; then
+    read -r AUTH_U AUTH_P < "$AUTH_FILE"
+    echo "STAGING_AUTH=${AUTH_U}:${AUTH_P}"
+  elif grep "DOMAIN='$DOMAIN'" "/usr/local/hestia/data/users/$COPY_USER/web.conf" 2>/dev/null \
+      | grep -q "AUTH_USER='[^']"; then
+    echo "STAGING_AUTH_UNKNOWN"
+  else
+    echo "STAGING_AUTH_NONE"
+  fi
+  exit 0
+fi
 
 if [ "$MODE" = "mark" ] || [ "$MODE" = "forget" ]; then
   [[ "$DOMAIN" =~ $DOMAIN_RE ]] || { echo "ERROR: --domain is required and must be a hostname."; exit 1; }
