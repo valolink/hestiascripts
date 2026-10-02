@@ -15,11 +15,11 @@ func init() {
 	register(Fix{
 		ID: "staging-uploads", Title: "Mount live's uploads read-only into staging", Check: "site.staging-uploads", Scope: "site", Risk: Change,
 		Applies: func(r check.Result) bool {
-			return r.State == check.Fail || r.State == check.Warn && strings.Contains(r.Summary, "reboot")
+			return r.State == check.Fail || r.State == check.Warn && (strings.Contains(r.Summary, "reboot") || strings.Contains(r.Summary, "shared"))
 		},
 		Note: "soutuveneet and delicatessen 2026-09-30: staging copies from before the 2026-09-25 fstab line lost the mount at a reboot — staging had its own empty uploads.",
 		How: "The same two steps v-wp-staging-create runs (bind_mount_uploads_ro, persist_uploads_mount): `mount --bind` live's wp-content/uploads onto staging's, `mount -o remount,ro,bind`, and a write probe as root that unmounts again if the mount is writable; " +
-			"then the tagged `bind,ro,nofail` line in /etc/fstab (an earlier line for the same mount point replaced, the previous fstab kept under /var/lib/hs/backups), `systemctl daemon-reload` and `findmnt --verify`. " +
+			"`mount --make-private` (a shared bind would carry mounts made inside it to live's uploads); then the tagged `bind,ro,private,nofail` line in /etc/fstab (an earlier line for the same mount point replaced, the previous fstab kept under /var/lib/hs/backups), `systemctl daemon-reload` and `findmnt --verify`. " +
 			"Whatever staging's own uploads folder holds stays underneath the mount, hidden, not deleted. Every path on the way is refused if it is a symlink — root must not mount over a place a site user points it at.",
 		Undo: "umount the staging uploads path and delete its `# hestia-staging-uploads` line from /etc/fstab (or restore the fstab backup shown in the plan).",
 		Plan: func(ctx context.Context, env *check.Env, subject string) ([]Step, error) {
@@ -69,12 +69,15 @@ func init() {
 						Argv: []string{"sh", "-c", `p="$1/.hestia-ro-probe-$$"; if touch "$p" 2>/dev/null; then rm -f "$p"; umount -l "$1"; echo "writable — unmounted again"; exit 1; fi; echo "read-only: a root write was refused"`, "sh", dst}},
 				)
 			}
+			if !m.Mounted || !m.ReadOnly || m.Shared || (m.Root != "" && m.Root != src) {
+				steps = append(steps, Step{Why: "make it private: mounts made inside it must not reach live's uploads", Argv: []string{"mount", "--make-private", dst}})
+			}
 			if copies.FstabLine(env.Sys, dst) != copies.WantFstab(c) {
 				bak := conf.BackupPath("/etc/fstab", time.Now())
 				steps = append(steps,
 					Step{Why: "keep the current /etc/fstab", Argv: []string{"install", "-D", "-m", "600", "/etc/fstab", bak}},
 					Step{Why: "the tagged line, replacing any earlier one for this mount point:\n    " + copies.WantFstab(c),
-						Argv: []string{"sh", "-c", `sed -i "\#[[:space:]]$2[[:space:]]#d" /etc/fstab && printf '%s %s none bind,ro,nofail 0 0 %s %s\n' "$1" "$2" "` + copies.FstabTag + `" "$2" >> /etc/fstab`, "sh", src, dst}},
+						Argv: []string{"sh", "-c", `sed -i "\#[[:space:]]$2[[:space:]]#d" /etc/fstab && printf '%s %s none bind,ro,private,nofail 0 0 %s %s\n' "$1" "$2" "` + copies.FstabTag + `" "$2" >> /etc/fstab`, "sh", src, dst}},
 					Step{Why: "let systemd read the new fstab", Argv: []string{"systemctl", "daemon-reload"}},
 					Step{Why: "check /etc/fstab before the next reboot", Argv: []string{"findmnt", "--verify", "--tab-file", "/etc/fstab"}},
 				)

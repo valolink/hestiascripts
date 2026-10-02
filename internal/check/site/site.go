@@ -519,6 +519,11 @@ func checkStagingUploads(env *Env, c copies.Copy) []Result {
 			Because("The mount does not come from the live site this copy belongs to.").
 			Fixed(fix)}
 	}
+	if m.Shared {
+		return []Result{New(Warn, "mounted read-only, but shared: a mount inside it would reach live's uploads").Ev(append(ev, point+" is in a shared peer group")...).
+			Because("A bind of a path on / joins its peer group; anything mounted inside staging's uploads (the writable generated-asset folders of v-wp-staging-create) would then also appear in live's uploads. The mount has to be private.").
+			Fixed(fix)}
+	}
 	if line := copies.FstabLine(env.Sys, point); line != copies.WantFstab(c) {
 		why := "no tagged line in /etc/fstab"
 		if line != "" {

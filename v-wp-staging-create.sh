@@ -294,11 +294,14 @@ redis_next_free_db() {
 # `nofail` keeps a missing directory from blocking boot; util-linux applies the
 # `ro` to a bind mount itself. Without this a reboot silently turns staging's
 # uploads into its own writable, nearly empty folder (kuumalahde, 2026-09-25).
+# `private`: a bind of a path on / joins /'s shared peer group, so a mount made
+# *inside* staging's uploads (the writable folders below) would also appear at
+# the same place in live's uploads. Private keeps mounts beneath it in the copy.
 FSTAB_TAG="# hestia-staging-uploads"
 persist_uploads_mount() {
   local src="$1" dst="$2"
   sed -i "\#[[:space:]]$dst[[:space:]]#d" /etc/fstab
-  printf '%s %s none bind,ro,nofail 0 0 %s %s\n' "$src" "$dst" "$FSTAB_TAG" "$dst" >> /etc/fstab
+  printf '%s %s none bind,ro,private,nofail 0 0 %s %s\n' "$src" "$dst" "$FSTAB_TAG" "$dst" >> /etc/fstab
   systemctl daemon-reload 2>/dev/null || true
   findmnt --verify --tab-file /etc/fstab >/dev/null 2>&1 \
     || echo "       ⚠ findmnt --verify reports a problem in /etc/fstab — check it before the next reboot."
@@ -315,6 +318,8 @@ bind_mount_uploads_ro() {
   check_status "Failed to bind-mount $src → $dst"
   mount -o remount,ro,bind "$dst"
   check_status "Failed to remount $dst as read-only"
+  mount --make-private "$dst"
+  check_status "Failed to make $dst a private mount"
   local probe="$dst/.hestia-ro-probe-$$"
   if touch "$probe" 2>/dev/null; then
     rm -f "$probe"
@@ -322,6 +327,53 @@ bind_mount_uploads_ro() {
     umount -l "$dst" 2>/dev/null
     exit 1
   fi
+}
+
+# Folders plugins write generated assets into (Avada's local Google fonts and
+# compiled CSS, GenerateBlocks' and Elementor's CSS files). With live's uploads
+# read-only in the copy, a plugin that needs a new file there cannot save it —
+# on kuumalahde's dev1 the brand fonts 404'd after a font change (2026-10-01).
+# So each of these that live has gets a writable folder of the copy's own
+# (DOMAIN_ROOT/copy-writable/<dir>, seeded from live), bind-mounted over the
+# read-only one. Live's files stay untouchable; systemd mounts the nested path
+# after its parent whatever the fstab order. A folder live does not have yet
+# cannot be added (its mount point would be inside the read-only mount).
+WRITABLE_UPLOAD_DIRS=(fusion-gfonts fusion-styles generateblocks elementor/css)
+WRITABLE_TAG="# hestia-staging-writable"
+mount_writable_dirs() {
+  local live="$1" uploads="$2" root="$3" user="$4" d src dst
+  # Never mount inside a shared uploads mount: it would land in live's uploads too.
+  mount --make-private "$uploads"
+  check_status "Failed to make $uploads a private mount"
+  [ "$(findmnt -n -o PROPAGATION "$uploads")" = private ] || { echo "❌ ERROR: $uploads is not a private mount; not mounting inside it."; exit 1; }
+  persist_uploads_mount "$live" "$uploads"
+  for d in "${WRITABLE_UPLOAD_DIRS[@]}"; do
+    [ -d "$live/$d" ] || continue
+    src="$root/copy-writable/$d"
+    dst="$uploads/$d"
+    mountpoint -q "$dst" 2>/dev/null && umount -l "$dst"
+    mkdir -p "$src"
+    rsync -a "$live/$d/" "$src/"
+    chown -R "$user:$user" "$root/copy-writable"
+    mount --bind "$src" "$dst"
+    check_status "Failed to bind-mount $src → $dst"
+    mount --make-private "$dst"
+    sed -i "\#[[:space:]]$dst[[:space:]]#d" /etc/fstab
+    printf '%s %s none bind,private,nofail 0 0 %s %s\n' "$src" "$dst" "$WRITABLE_TAG" "$dst" >> /etc/fstab
+    echo "       ✓ writable $d (the copy's own, seeded from live)"
+  done
+  systemctl daemon-reload 2>/dev/null || true
+}
+# Unmount and forget every writable folder under an uploads path; before the
+# uploads mount itself goes.
+unmount_writable_dirs() {
+  local uploads="$1" mp
+  while read -r mp; do
+    [ -n "$mp" ] || continue
+    umount -l "$mp" 2>/dev/null
+    sed -i "\#[[:space:]]$mp[[:space:]]#d" /etc/fstab
+  done < <(grep -F "$WRITABLE_TAG $uploads/" /etc/fstab | awk '{print $2}')
+  systemctl daemon-reload 2>/dev/null || true
 }
 
 show_help() {
@@ -336,7 +388,8 @@ Hardening (vs naive clone):
     The staging URL therefore returns 404 until everything is correct.
   * Live uploads are bind-mounted READ-ONLY into staging; a write probe
     confirms RO before publish, so staging physically cannot rewrite live
-    files (feeds, sitemaps, etc.).
+    files (feeds, sitemaps, etc.). Generated-asset folders (fonts, compiled
+    CSS) are the copy's own writable folders mounted over them.
   * PHP-FPM is reloaded on both staging and live after wp-config edits so
     no opcache'd worker keeps running under the old Redis prefix / DB.
   * Object cache, transients and WP Rocket are flushed on both sides at
@@ -365,6 +418,10 @@ OPTIONS:
   --php-profile=NAME   PHP-FPM profile for the staging pool (default staging:
                        4 workers at nice 10, PHP memory 512M; none = leave the
                        pool). Redis keys ≤ 1 h and ≤ 10 DB connections always.
+  --writable-only      On an existing copy, only (re)create the writable
+                       generated-asset folders over the read-only uploads
+                       (fusion-gfonts, fusion-styles, generateblocks,
+                       elementor/css); nothing else is touched
   --teardown           Remove the staging site: unmounts uploads, deletes
                        the domain and database; pass --src-user/--src-domain
                        too to also forget the saved staging URL
@@ -394,6 +451,7 @@ HTTPAUTH=true
 PRINT_AUTH=false
 FLUSH_LIVE=false
 PHP_PROFILE=staging
+WRITABLE_ONLY=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -403,6 +461,7 @@ while [[ $# -gt 0 ]]; do
     --new-domain=*) NEW_DOMAIN="${1#*=}" ;;
     --force)        FORCE=true ;;
     --teardown)     TEARDOWN=true ;;
+    --writable-only) WRITABLE_ONLY=true ;;
     --no-httpauth)  HTTPAUTH=false ;;
     --print-auth)   PRINT_AUTH=true ;;
     --flush-live)   FLUSH_LIVE=true ;;
@@ -472,6 +531,7 @@ if [ "$TEARDOWN" = true ]; then
 
   # Unmount in both possible locations (setup dir may exist from a failed run).
   for mp in "$STAGING_UPLOADS" "$SETUP_DIR/wp-content/uploads"; do
+    unmount_writable_dirs "$mp"
     if mountpoint -q "$mp" 2>/dev/null; then
       echo "Unmounting $mp ..."
       umount -l "$mp"
@@ -652,6 +712,16 @@ NEW_DIR="$DOMAIN_ROOT/public_html"
 NEW_UPLOADS="$NEW_DIR/wp-content/uploads"
 SETUP_DIR="$DOMAIN_ROOT/public_html.setup"
 SETUP_UPLOADS="$SETUP_DIR/wp-content/uploads"
+if [ "$WRITABLE_ONLY" = true ]; then
+  if ! mountpoint -q "$NEW_UPLOADS" 2>/dev/null; then
+    echo "❌ ERROR: $NEW_UPLOADS is not a mounted copy of live's uploads."
+    exit 1
+  fi
+  echo "Writable generated-asset folders for $NEW_WEB_DOMAIN:"
+  mount_writable_dirs "$LIVE_UPLOADS" "$NEW_UPLOADS" "$DOMAIN_ROOT" "$DEST_USER"
+  exit 0
+fi
+
 RAND_STR=$(openssl rand -hex 3)
 DB_DUMP="/tmp/${OLD_WEB_DOMAIN}_staging_${RAND_STR}.sql"
 NEW_WP_URL="https://$NEW_WEB_DOMAIN"
@@ -798,6 +868,7 @@ if v-list-web-domain "$DEST_USER" "$NEW_WEB_DOMAIN" &>/dev/null; then
   fi
 
   # Unmount existing uploads before we touch public_html.
+  unmount_writable_dirs "$NEW_UPLOADS"
   if mountpoint -q "$NEW_UPLOADS" 2>/dev/null; then
     echo "      Unmounting existing uploads..."
     umount -l "$NEW_UPLOADS"
@@ -1071,7 +1142,8 @@ chown "$DEST_USER:$DEST_USER" "$NEW_UPLOADS"
 bind_mount_uploads_ro "$LIVE_UPLOADS" "$NEW_UPLOADS"
 echo "       ✓ $LIVE_UPLOADS mounted RO at $NEW_UPLOADS (write probe confirmed)"
 persist_uploads_mount "$LIVE_UPLOADS" "$NEW_UPLOADS"
-echo "       ✓ persisted in /etc/fstab (bind,ro,nofail) — survives reboots"
+echo "       ✓ persisted in /etc/fstab (bind,ro,private,nofail) — survives reboots"
+mount_writable_dirs "$LIVE_UPLOADS" "$NEW_UPLOADS" "$DOMAIN_ROOT" "$DEST_USER"
 
 # [11/11] Reload PHP-FPM (so workers drop stale wp-config) and flush staging's
 # caches: its workers may have cached the empty disarmed wp-config. Live's

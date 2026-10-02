@@ -38,14 +38,20 @@ func TestStagingUploadsPlan(t *testing.T) {
 			t.Errorf("plan lacks %q:\n%s", want, all)
 		}
 	}
-	// Mounted read-only but not persisted → only the fstab steps.
+	// Mounted read-only but shared and not persisted → make it private, then the fstab steps; no new mount.
 	f.Files["/proc/self/mountinfo"] += "90 25 8:1 /home/sv/web/soutuveneet.fi/public_html/wp-content/uploads /home/sv/web/staging.soutuveneet.fi/public_html/wp-content/uploads ro,relatime shared:1 - ext4 /dev/sda1 rw\n"
+	steps, err = fx.Plan(context.Background(), &check.Env{Sys: f}, "staging.soutuveneet.fi")
+	if err != nil || strings.Join(steps[0].Argv, " ") != "mount --make-private /home/sv/web/staging.soutuveneet.fi/public_html/wp-content/uploads" || strings.Contains(steps[1].Argv[0], "mount") {
+		t.Errorf("private + persist: %v %+v", err, steps)
+	}
+	// Private, not persisted → only the fstab steps.
+	f.Files["/proc/self/mountinfo"] = strings.Replace(f.Files["/proc/self/mountinfo"], "ro,relatime shared:1", "ro,relatime", 1)
 	steps, err = fx.Plan(context.Background(), &check.Env{Sys: f}, "staging.soutuveneet.fi")
 	if err != nil || strings.Contains(steps[0].Argv[0]+steps[1].Argv[0], "mount") {
 		t.Errorf("persist only: %v %+v", err, steps)
 	}
-	// Mounted and persisted → nothing to do.
-	f.Files["/etc/fstab"] += "/home/sv/web/soutuveneet.fi/public_html/wp-content/uploads /home/sv/web/staging.soutuveneet.fi/public_html/wp-content/uploads none bind,ro,nofail 0 0 # hestia-staging-uploads /home/sv/web/staging.soutuveneet.fi/public_html/wp-content/uploads\n"
+	// Mounted, private and persisted → nothing to do.
+	f.Files["/etc/fstab"] += "/home/sv/web/soutuveneet.fi/public_html/wp-content/uploads /home/sv/web/staging.soutuveneet.fi/public_html/wp-content/uploads none bind,ro,private,nofail 0 0 # hestia-staging-uploads /home/sv/web/staging.soutuveneet.fi/public_html/wp-content/uploads\n"
 	if _, err := fx.Plan(context.Background(), &check.Env{Sys: f}, "staging.soutuveneet.fi"); err == nil {
 		t.Error("nothing to do should refuse")
 	}

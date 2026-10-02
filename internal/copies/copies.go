@@ -125,6 +125,7 @@ func List(s sys.Sys) []Copy {
 type Mount struct {
 	Mounted  bool
 	ReadOnly bool
+	Shared   bool   // in a peer group: mounts made beneath it propagate to the peers (live's uploads)
 	Root     string // the mounted directory within its filesystem (the bind source)
 }
 
@@ -141,6 +142,14 @@ func MountAt(s sys.Sys, point string) Mount {
 		for _, o := range strings.Split(f[5], ",") {
 			if o == "ro" {
 				m.ReadOnly = true
+			}
+		}
+		for _, o := range f[6:] { // optional fields up to the "-" separator
+			if o == "-" {
+				break
+			}
+			if strings.HasPrefix(o, "shared:") {
+				m.Shared = true
 			}
 		}
 	}
@@ -166,5 +175,5 @@ func FstabLine(s sys.Sys, point string) string {
 
 // WantFstab is the line persist_uploads_mount writes.
 func WantFstab(c Copy) string {
-	return c.SourceUploads() + " " + c.Uploads() + " none bind,ro,nofail 0 0 " + FstabTag + " " + c.Uploads()
+	return c.SourceUploads() + " " + c.Uploads() + " none bind,ro,private,nofail 0 0 " + FstabTag + " " + c.Uploads()
 }
