@@ -286,94 +286,111 @@ redis_next_free_db() {
   return 1
 }
 
-# Two-step bind mount to RO, with a write probe to PROVE the mount is RO.
-# Bind + remount,ro is the historically-portable way; a single mount -o ro,bind
-# is silently ignored on older util-linux. The probe runs as root so the test
-# is meaningful even when POSIX perms would already block writes for DEST_USER.
-# Persist the read-only uploads mount across reboots with a tagged fstab line.
-# `nofail` keeps a missing directory from blocking boot; util-linux applies the
-# `ro` to a bind mount itself. Without this a reboot silently turns staging's
-# uploads into its own writable, nearly empty folder (kuumalahde, 2026-09-25).
-# `private`: a bind of a path on / joins /'s shared peer group, so a mount made
-# *inside* staging's uploads (the writable folders below) would also appear at
-# the same place in live's uploads. Private keeps mounts beneath it in the copy.
+# A copy's uploads (since 2026-10-02) are its own folder. Only live's media
+# is bound in, read-only: the past years, the current year's past months and
+# ShortpixelBackups — the folders that hold the gigabytes and that live no
+# longer writes to (WordPress files an upload under the month it happens in).
+# Everything else is copied and belongs to the copy: the current month, feeds,
+# invoices, fonts and compiled CSS (Avada's fusion-gfonts could not be saved
+# when the whole of uploads was live's, read-only — kuumalahde dev1,
+# 2026-10-01). Log folders are skipped. Media uploaded on the copy goes into
+# its own current-month folder; next month's folder is created in its own year
+# folder.
+#
+# Every bind sits in a folder of the copy's own, never inside another bind, so
+# nothing mounted here can show up in live's uploads; each is still made
+# private. Each is proved read-only by a root write probe, and persisted with a
+# tagged fstab line (`nofail` keeps a missing directory from blocking boot;
+# without the lines a reboot silently empties the copy's media, kuumalahde
+# 2026-09-25). Bind + remount,ro is the portable way: a single mount -o ro,bind
+# is ignored on older util-linux.
 FSTAB_TAG="# hestia-staging-uploads"
-persist_uploads_mount() {
-  local src="$1" dst="$2"
-  sed -i "\#[[:space:]]$dst[[:space:]]#d" /etc/fstab
-  printf '%s %s none bind,ro,private,nofail 0 0 %s %s\n' "$src" "$dst" "$FSTAB_TAG" "$dst" >> /etc/fstab
-  systemctl daemon-reload 2>/dev/null || true
-  findmnt --verify --tab-file /etc/fstab >/dev/null 2>&1 \
-    || echo "       ⚠ findmnt --verify reports a problem in /etc/fstab — check it before the next reboot."
-}
-forget_uploads_mount() {
-  local dst="$1"
-  sed -i "\#[[:space:]]$dst[[:space:]]#d" /etc/fstab
-  systemctl daemon-reload 2>/dev/null || true
+UPLOADS_SKIP=(wppfm-logs wc-logs)
+
+# live's folders bound into a copy, relative to uploads, one per line
+media_binds() {
+  local live="$1" cy cm y m
+  cy=$(date +%Y); cm=$(date +%m)
+  for y in "$live"/[0-9][0-9][0-9][0-9]; do
+    [ -d "$y" ] || continue
+    y=${y##*/}
+    if [ "$y" -lt "$cy" ]; then
+      echo "$y"
+    elif [ "$y" = "$cy" ]; then
+      for m in "$live/$y"/[01][0-9]; do
+        [ -d "$m" ] || continue
+        m=${m##*/}
+        [ "$m" -lt "$cm" ] && echo "$y/$m"
+      done
+    fi
+  done
+  [ -d "$live/ShortpixelBackups" ] && echo ShortpixelBackups
+  return 0
 }
 
-bind_mount_uploads_ro() {
-  local src="$1" dst="$2"
-  mount --bind "$src" "$dst"
-  check_status "Failed to bind-mount $src → $dst"
-  mount -o remount,ro,bind "$dst"
-  check_status "Failed to remount $dst as read-only"
-  mount --make-private "$dst"
-  check_status "Failed to make $dst a private mount"
-  local probe="$dst/.hestia-ro-probe-$$"
-  if touch "$probe" 2>/dev/null; then
-    rm -f "$probe"
-    echo "❌ ERROR: Uploads mount at $dst is writable. Refusing to publish staging."
-    umount -l "$dst" 2>/dev/null
+# Every mount at or under a path, deepest first.
+mounts_under() {
+  findmnt -rn -o TARGET | awk -v p="$1" '$0 == p || index($0, p "/") == 1' | sort -r
+}
+
+# Unmount and forget everything mounted at or under a path (a copy's uploads,
+# or its whole domain folder), and prove nothing is left. Call before any rm -rf
+# of a copy's files: deleting through a bind that failed to unmount would reach
+# live's media.
+unmount_copy() {
+  local path="${1:?unmount_copy needs a path}" mp
+  while read -r mp; do
+    [ -n "$mp" ] || continue
+    umount -l "$mp" 2>/dev/null || umount "$mp" 2>/dev/null
+  done < <(mounts_under "$path")
+  # fstab lines of this layout and the two before it (one bind of the whole
+  # uploads; writable folders over it)
+  local re
+  re=$(printf '%s' "$path" | sed 's/[.[\*^$]/\\&/g')
+  sed -i "\%[[:space:]]$re\(/[^[:space:]]*\)\?[[:space:]].*\(# hestia-staging-uploads\|# hestia-staging-writable\)%d" /etc/fstab
+  systemctl daemon-reload 2>/dev/null || true
+  if [ -n "$(mounts_under "$path")" ]; then
+    echo "❌ ERROR: still mounted under $path — not deleting anything:"
+    mounts_under "$path" | sed 's/^/     /'
     exit 1
   fi
 }
 
-# Folders plugins write generated assets into (Avada's local Google fonts and
-# compiled CSS, GenerateBlocks' and Elementor's CSS files). With live's uploads
-# read-only in the copy, a plugin that needs a new file there cannot save it —
-# on kuumalahde's dev1 the brand fonts 404'd after a font change (2026-10-01).
-# So each of these that live has gets a writable folder of the copy's own
-# (DOMAIN_ROOT/copy-writable/<dir>, seeded from live), bind-mounted over the
-# read-only one. Live's files stay untouchable; systemd mounts the nested path
-# after its parent whatever the fstab order. A folder live does not have yet
-# cannot be added (its mount point would be inside the read-only mount).
-WRITABLE_UPLOAD_DIRS=(fusion-gfonts fusion-styles generateblocks elementor/css)
-WRITABLE_TAG="# hestia-staging-writable"
-mount_writable_dirs() {
-  local live="$1" uploads="$2" root="$3" user="$4" d src dst
-  # Never mount inside a shared uploads mount: it would land in live's uploads too.
-  mount --make-private "$uploads"
-  check_status "Failed to make $uploads a private mount"
-  [ "$(findmnt -n -o PROPAGATION "$uploads")" = private ] || { echo "❌ ERROR: $uploads is not a private mount; not mounting inside it."; exit 1; }
-  persist_uploads_mount "$live" "$uploads"
-  for d in "${WRITABLE_UPLOAD_DIRS[@]}"; do
-    [ -d "$live/$d" ] || continue
-    src="$root/copy-writable/$d"
-    dst="$uploads/$d"
-    mountpoint -q "$dst" 2>/dev/null && umount -l "$dst"
-    mkdir -p "$src"
-    rsync -a "$live/$d/" "$src/"
-    chown -R "$user:$user" "$root/copy-writable"
-    mount --bind "$src" "$dst"
-    check_status "Failed to bind-mount $src → $dst"
-    mount --make-private "$dst"
-    sed -i "\#[[:space:]]$dst[[:space:]]#d" /etc/fstab
-    printf '%s %s none bind,private,nofail 0 0 %s %s\n' "$src" "$dst" "$WRITABLE_TAG" "$dst" >> /etc/fstab
-    echo "       ✓ writable $d (the copy's own, seeded from live)"
+# Build a copy's uploads: copy what is the copy's own, bind live's media read-only.
+setup_copy_uploads() {
+  local live="${1:?}" uploads="${2:?}" user="${3:?}" rel probe n=0 mb
+  local -a binds excl=()
+  mapfile -t binds < <(media_binds "$live")
+  for rel in "${binds[@]}" "${UPLOADS_SKIP[@]}"; do excl+=(--exclude "/$rel/"); done
+  mkdir -p "$uploads"
+  rsync -a --chown="$user:$user" "${excl[@]}" "$live/" "$uploads/"
+  check_status "Failed to copy uploads into $uploads"
+  chown "$user:$user" "$uploads"
+  mb=$(du -sm "$uploads" 2>/dev/null | cut -f1)
+  echo "       ✓ the copy's own uploads: ${mb} MB copied (current month, feeds, fonts, CSS…; logs skipped)"
+  for rel in "${binds[@]}"; do
+    install -d -o "$user" -g "$user" "$uploads/$rel"
+    mount --bind "$live/$rel" "$uploads/$rel"
+    check_status "Failed to bind-mount $live/$rel"
+    mount -o remount,ro,bind "$uploads/$rel"
+    check_status "Failed to remount $uploads/$rel read-only"
+    mount --make-private "$uploads/$rel"
+    check_status "Failed to make $uploads/$rel private"
+    probe="$uploads/$rel/.hestia-ro-probe-$$"
+    if touch "$probe" 2>/dev/null; then
+      unlink "$probe"
+      echo "❌ ERROR: $uploads/$rel is writable. Unmounting the copy's media and stopping."
+      unmount_copy "$uploads"
+      exit 1
+    fi
+    sed -i "\#[[:space:]]$uploads/$rel[[:space:]]#d" /etc/fstab
+    printf '%s %s none bind,ro,private,nofail 0 0 %s %s\n' "$live/$rel" "$uploads/$rel" "$FSTAB_TAG" "$uploads/$rel" >> /etc/fstab
+    n=$((n + 1))
   done
   systemctl daemon-reload 2>/dev/null || true
-}
-# Unmount and forget every writable folder under an uploads path; before the
-# uploads mount itself goes.
-unmount_writable_dirs() {
-  local uploads="$1" mp
-  while read -r mp; do
-    [ -n "$mp" ] || continue
-    umount -l "$mp" 2>/dev/null
-    sed -i "\#[[:space:]]$mp[[:space:]]#d" /etc/fstab
-  done < <(grep -F "$WRITABLE_TAG $uploads/" /etc/fstab | awk '{print $2}')
-  systemctl daemon-reload 2>/dev/null || true
+  findmnt --verify --tab-file /etc/fstab >/dev/null 2>&1 \
+    || echo "       ⚠ findmnt --verify reports a problem in /etc/fstab — check it before the next reboot."
+  echo "       ✓ $n media folders of live bound read-only (write probe on each), persisted in /etc/fstab"
 }
 
 show_help() {
@@ -386,10 +403,10 @@ Hardening (vs naive clone):
   * Staging is built in public_html.setup; only swapped into public_html
     after wp-config, DB import, search-replace, and verification all pass.
     The staging URL therefore returns 404 until everything is correct.
-  * Live uploads are bind-mounted READ-ONLY into staging; a write probe
-    confirms RO before publish, so staging physically cannot rewrite live
-    files (feeds, sitemaps, etc.). Generated-asset folders (fonts, compiled
-    CSS) are the copy's own writable folders mounted over them.
+  * Live's media (past years, the current year's past months,
+    ShortpixelBackups) is bind-mounted READ-ONLY into staging, each folder
+    proved read-only by a write probe; the rest of uploads (current month,
+    feeds, fonts, compiled CSS) is copied and is staging's own.
   * PHP-FPM is reloaded on both staging and live after wp-config edits so
     no opcache'd worker keeps running under the old Redis prefix / DB.
   * Object cache, transients and WP Rocket are flushed on both sides at
@@ -418,11 +435,10 @@ OPTIONS:
   --php-profile=NAME   PHP-FPM profile for the staging pool (default staging:
                        4 workers at nice 10, PHP memory 512M; none = leave the
                        pool). Redis keys ≤ 1 h and ≤ 10 DB connections always.
-  --writable-only      On an existing copy, only (re)create the writable
-                       generated-asset folders over the read-only uploads
-                       (fusion-gfonts, fusion-styles, generateblocks,
-                       elementor/css); nothing else is touched
-  --teardown           Remove the staging site: unmounts uploads, deletes
+  --uploads-only       On an existing copy, only rebuild its uploads in the
+                       current layout (own folder + live's media read-only);
+                       the database and the rest of the files are untouched
+  --teardown           Remove the staging site: unmounts live's media, deletes
                        the domain and database; pass --src-user/--src-domain
                        too to also forget the saved staging URL
   -h, --help           Show this help
@@ -451,7 +467,7 @@ HTTPAUTH=true
 PRINT_AUTH=false
 FLUSH_LIVE=false
 PHP_PROFILE=staging
-WRITABLE_ONLY=false
+UPLOADS_ONLY=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -461,7 +477,7 @@ while [[ $# -gt 0 ]]; do
     --new-domain=*) NEW_DOMAIN="${1#*=}" ;;
     --force)        FORCE=true ;;
     --teardown)     TEARDOWN=true ;;
-    --writable-only) WRITABLE_ONLY=true ;;
+    --uploads-only) UPLOADS_ONLY=true ;;
     --no-httpauth)  HTTPAUTH=false ;;
     --print-auth)   PRINT_AUTH=true ;;
     --flush-live)   FLUSH_LIVE=true ;;
@@ -529,16 +545,10 @@ if [ "$TEARDOWN" = true ]; then
 
   echo ""
 
-  # Unmount in both possible locations (setup dir may exist from a failed run).
-  for mp in "$STAGING_UPLOADS" "$SETUP_DIR/wp-content/uploads"; do
-    unmount_writable_dirs "$mp"
-    if mountpoint -q "$mp" 2>/dev/null; then
-      echo "Unmounting $mp ..."
-      umount -l "$mp"
-      check_status "Failed to unmount $mp — run manually: umount -l $mp"
-    fi
-    forget_uploads_mount "$mp"
-  done
+  # Everything mounted anywhere in the domain folder (live's media), and
+  # proof that nothing is left before the folder is deleted.
+  echo "Unmounting live's media from $NEW_DOMAIN ..."
+  unmount_copy "/home/$DEST_USER/web/$NEW_DOMAIN"
 
   # Capture DB name from whichever directory has a wp-config.
   STAGING_DB=""
@@ -712,13 +722,16 @@ NEW_DIR="$DOMAIN_ROOT/public_html"
 NEW_UPLOADS="$NEW_DIR/wp-content/uploads"
 SETUP_DIR="$DOMAIN_ROOT/public_html.setup"
 SETUP_UPLOADS="$SETUP_DIR/wp-content/uploads"
-if [ "$WRITABLE_ONLY" = true ]; then
-  if ! mountpoint -q "$NEW_UPLOADS" 2>/dev/null; then
-    echo "❌ ERROR: $NEW_UPLOADS is not a mounted copy of live's uploads."
+if [ "$UPLOADS_ONLY" = true ]; then
+  if [ ! -f "$NEW_DIR/wp-config.php" ]; then
+    echo "❌ ERROR: no copy at $NEW_DIR."
     exit 1
   fi
-  echo "Writable generated-asset folders for $NEW_WEB_DOMAIN:"
-  mount_writable_dirs "$LIVE_UPLOADS" "$NEW_UPLOADS" "$DOMAIN_ROOT" "$DEST_USER"
+  echo "Rebuilding the uploads of $NEW_WEB_DOMAIN (live's media read-only, the rest its own):"
+  unmount_copy "$DOMAIN_ROOT"
+  # the writable folders of the layout before (nothing is mounted any more)
+  [ -d "${DOMAIN_ROOT:?}/copy-writable" ] && rm -rf "${DOMAIN_ROOT:?}/copy-writable"
+  setup_copy_uploads "$LIVE_UPLOADS" "$NEW_UPLOADS" "$DEST_USER"
   exit 0
 fi
 
@@ -743,12 +756,12 @@ cleanup() {
   echo "─── failure cleanup (exit $rc) ─────────────────────────"
 
   if [ "$PUBLISHED" = false ] && [ -d "$SETUP_DIR" ]; then
-    if mountpoint -q "$SETUP_UPLOADS" 2>/dev/null; then
-      echo "  unmounting setup uploads"
-      umount -l "$SETUP_UPLOADS" 2>/dev/null
+    if [ -n "$(mounts_under "$SETUP_DIR")" ]; then
+      echo "  unmounting under $SETUP_DIR"
+      ( unmount_copy "$SETUP_DIR" ) || { echo "  left $SETUP_DIR in place: something is still mounted in it"; return; }
     fi
     echo "  removing $SETUP_DIR"
-    rm -rf "$SETUP_DIR" 2>/dev/null
+    rm -rf "${SETUP_DIR:?}" 2>/dev/null
   fi
 
   echo ""
@@ -825,10 +838,8 @@ if [ -d "$SETUP_DIR" ]; then
     read -p "Remove it and continue? Type 'yes': " CONFIRM
     [ "$CONFIRM" = "yes" ] || { echo "Aborting."; exit 0; }
   fi
-  if mountpoint -q "$SETUP_UPLOADS" 2>/dev/null; then
-    umount -l "$SETUP_UPLOADS"
-  fi
-  rm -rf "$SETUP_DIR"
+  unmount_copy "$SETUP_DIR"
+  rm -rf "${SETUP_DIR:?}"
 fi
 
 echo "Pre-flight checks passed."
@@ -867,13 +878,9 @@ if v-list-web-domain "$DEST_USER" "$NEW_WEB_DOMAIN" &>/dev/null; then
     OLD_STAGING_DB=$(sudo -u "$DEST_USER" wp --path="$NEW_DIR" config get DB_NAME 2>/dev/null)
   fi
 
-  # Unmount existing uploads before we touch public_html.
-  unmount_writable_dirs "$NEW_UPLOADS"
-  if mountpoint -q "$NEW_UPLOADS" 2>/dev/null; then
-    echo "      Unmounting existing uploads..."
-    umount -l "$NEW_UPLOADS"
-    check_status "Failed to unmount $NEW_UPLOADS."
-  fi
+  # Unmount live's media before we touch public_html.
+  echo "      Unmounting live's media from the old copy..."
+  unmount_copy "$DOMAIN_ROOT"
 fi
 
 echo "---------------------------------------------------"
@@ -1129,21 +1136,16 @@ if [ "$HTTPAUTH" = true ]; then
   check_status "Failed to set HTTP auth on $NEW_WEB_DOMAIN."
 fi
 echo "[9/11] Publishing: swap $SETUP_DIR → $NEW_DIR ..."
-rm -rf "$NEW_DIR"
+unmount_copy "$DOMAIN_ROOT"   # proof: nothing of live's is mounted in what goes
+rm -rf "${NEW_DIR:?}"
 mv "$SETUP_DIR" "$NEW_DIR"
 check_status "Failed to publish staging directory."
 PUBLISHED=true
 
-# [10/11] Bind-mount live uploads RO into the now-published path,
-# and PROVE staging cannot write into it before declaring success.
-echo "[10/11] Bind-mounting live uploads read-only..."
-mkdir -p "$NEW_UPLOADS"
-chown "$DEST_USER:$DEST_USER" "$NEW_UPLOADS"
-bind_mount_uploads_ro "$LIVE_UPLOADS" "$NEW_UPLOADS"
-echo "       ✓ $LIVE_UPLOADS mounted RO at $NEW_UPLOADS (write probe confirmed)"
-persist_uploads_mount "$LIVE_UPLOADS" "$NEW_UPLOADS"
-echo "       ✓ persisted in /etc/fstab (bind,ro,private,nofail) — survives reboots"
-mount_writable_dirs "$LIVE_UPLOADS" "$NEW_UPLOADS" "$DOMAIN_ROOT" "$DEST_USER"
+# [10/11] Uploads into the now-published path: the copy's own folder, live's
+# media bound read-only and PROVED read-only before declaring success.
+echo "[10/11] Uploads: own folder, live's media read-only..."
+setup_copy_uploads "$LIVE_UPLOADS" "$NEW_UPLOADS" "$DEST_USER"
 
 # [11/11] Reload PHP-FPM (so workers drop stale wp-config) and flush staging's
 # caches: its workers may have cached the empty disarmed wp-config. Live's

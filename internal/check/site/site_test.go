@@ -182,23 +182,40 @@ func TestCoreNoiseIsNotAFail(t *testing.T) {
 	}
 }
 
-// soutuveneet / delicatessen 2026-09-30: the bind mount lost at a reboot.
+// soutuveneet / delicatessen 2026-09-30: the bind mount lost at a reboot;
+// kuumalahde dev1 2026-10-01: the old one-bind layout could not save fonts.
 func TestStagingUploads(t *testing.T) {
 	c := copies.Copy{Kind: "staging", Domain: "staging.x.fi", User: "x", SourceDomain: "x.fi", SourceUser: "x", Origin: "registry"}
-	f := &sys.Fake{Files: map[string]string{"/proc/self/mountinfo": "25 1 8:1 / / rw - ext4 /dev/sda1 rw\n", "/etc/fstab": ""}}
-	if rs := checkStagingUploads(&Env{Sys: f}, c); rs[0].State != Fail {
-		t.Errorf("not mounted: %+v", rs)
+	live, up := c.SourceUploads(), c.Uploads()
+	f := &sys.Fake{Clock: time.Date(2026, 10, 2, 9, 0, 0, 0, time.UTC),
+		Files: map[string]string{"/proc/self/mountinfo": "25 1 8:1 / / rw shared:1 - ext4 /dev/sda1 rw\n", "/etc/fstab": "", live + "/2026/10/a.jpg": "x"},
+		Dirs:  []string{live, live + "/2025", live + "/2026", live + "/2026/09", live + "/2026/10", up}}
+	run := func() Result { return checkStagingUploads(&Env{Sys: f}, c)[0] }
+	if r := run(); r.State != Fail || !strings.Contains(r.Summary, "2 of 2") {
+		t.Errorf("nothing mounted: %+v", r)
 	}
-	f.Files["/proc/self/mountinfo"] += "90 25 8:1 " + c.SourceUploads() + " " + c.Uploads() + " ro,relatime - ext4 /dev/sda1 rw\n"
-	if rs := checkStagingUploads(&Env{Sys: f}, c); rs[0].State != Warn || !strings.Contains(rs[0].Summary, "reboot") {
-		t.Errorf("not persisted: %+v", rs)
+	mi := f.Files["/proc/self/mountinfo"]
+	f.Files["/proc/self/mountinfo"] = mi + "90 25 8:1 " + live + "/2025 " + up + "/2025 ro,relatime - ext4 /dev/sda1 rw\n" +
+		"91 25 8:1 " + live + "/2026/09 " + up + "/2026/09 ro,relatime - ext4 /dev/sda1 rw\n"
+	if r := run(); r.State != Warn || !strings.Contains(r.Summary, "reboot") {
+		t.Errorf("not persisted: %+v", r)
 	}
-	f.Files["/etc/fstab"] = copies.WantFstab(c) + "\n"
-	if rs := checkStagingUploads(&Env{Sys: f}, c); rs[0].State != OK {
-		t.Errorf("mounted and persisted: %+v", rs)
+	f.Files["/etc/fstab"] = copies.WantBindFstab(c, "2025") + "\n" + copies.WantBindFstab(c, "2026/09") + "\n"
+	if r := run(); r.State != OK {
+		t.Errorf("mounted and persisted: %+v", r)
 	}
-	f.Files["/proc/self/mountinfo"] = "90 25 8:1 " + c.SourceUploads() + " " + c.Uploads() + " rw,relatime - ext4 /dev/sda1 rw\n"
-	if rs := checkStagingUploads(&Env{Sys: f}, c); rs[0].State != Fail || !strings.Contains(rs[0].Summary, "writable") {
-		t.Errorf("writable: %+v", rs)
+	// A past month the copy holds its own files in (copied while current) is fine unbound.
+	f.Files["/proc/self/mountinfo"] = mi + "90 25 8:1 " + live + "/2025 " + up + "/2025 ro,relatime - ext4 /dev/sda1 rw\n"
+	f.Files[up+"/2026/09/own.jpg"] = "x"
+	if r := run(); r.State != OK {
+		t.Errorf("own month: %+v", r)
+	}
+	f.Files["/proc/self/mountinfo"] = mi + "90 25 8:1 " + live + "/2025 " + up + "/2025 rw,relatime - ext4 /dev/sda1 rw\n"
+	if r := run(); r.State != Fail || !strings.Contains(r.Summary, "writable") {
+		t.Errorf("writable: %+v", r)
+	}
+	f.Files["/proc/self/mountinfo"] = mi + "92 25 8:1 " + live + " " + up + " ro,relatime shared:1 - ext4 /dev/sda1 rw\n"
+	if r := run(); r.State != Warn || !strings.Contains(r.Summary, "old uploads layout") {
+		t.Errorf("old layout: %+v", r)
 	}
 }

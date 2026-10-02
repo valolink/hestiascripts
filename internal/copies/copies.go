@@ -1,7 +1,12 @@
 // Package copies knows the WordPress site copies on a box and whether a
-// staging copy still has live's uploads mounted read-only — the Go side of
-// v-wp-copies and of v-wp-staging-create's bind_mount_uploads_ro /
-// persist_uploads_mount.
+// staging copy still has live's media mounted read-only — the Go side of
+// v-wp-copies and of v-wp-staging-create's media_binds / setup_copy_uploads.
+//
+// Layout since 2026-10-02: a copy's uploads are its own folder; live's media
+// folders (past years, the current year's past months, ShortpixelBackups) are
+// bound in read-only, one private bind each. Before it the whole of live's
+// uploads was one read-only bind, so a copy could not save the font and CSS
+// files plugins generate (kuumalahde dev1, 2026-10-01).
 //
 // Why the mount check exists (2026-09-30): staging copies made before the
 // 2026-09-25 fstab persistence lost their bind mount at the next reboot
@@ -14,7 +19,9 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/sys"
@@ -173,7 +180,40 @@ func FstabLine(s sys.Sys, point string) string {
 	return ""
 }
 
-// WantFstab is the line persist_uploads_mount writes.
-func WantFstab(c Copy) string {
-	return c.SourceUploads() + " " + c.Uploads() + " none bind,ro,private,nofail 0 0 " + FstabTag + " " + c.Uploads()
+// MediaBinds is the list v-wp-staging-create's media_binds makes: live's
+// uploads folders bound read-only into a copy, relative to uploads — the past
+// years, the current year's past months, ShortpixelBackups.
+func MediaBinds(s sys.Sys, live string, now time.Time) []string {
+	var out []string
+	cy, cm := now.Year(), int(now.Month())
+	years, _ := s.ReadDir(live)
+	for _, y := range years {
+		n, err := strconv.Atoi(y.Name())
+		if !y.IsDir() || len(y.Name()) != 4 || err != nil {
+			continue
+		}
+		switch {
+		case n < cy:
+			out = append(out, y.Name())
+		case n == cy:
+			months, _ := s.ReadDir(live + "/" + y.Name())
+			for _, m := range months {
+				k, err := strconv.Atoi(m.Name())
+				if m.IsDir() && len(m.Name()) == 2 && err == nil && k < cm {
+					out = append(out, y.Name()+"/"+m.Name())
+				}
+			}
+		}
+	}
+	if fi, err := s.Stat(live + "/ShortpixelBackups"); err == nil && fi.IsDir() {
+		out = append(out, "ShortpixelBackups")
+	}
+	sort.Strings(out)
+	return out
+}
+
+// WantBindFstab is the tagged line setup_copy_uploads writes for one bind.
+func WantBindFstab(c Copy, rel string) string {
+	dst := c.Uploads() + "/" + rel
+	return c.SourceUploads() + "/" + rel + " " + dst + " none bind,ro,private,nofail 0 0 " + FstabTag + " " + dst
 }

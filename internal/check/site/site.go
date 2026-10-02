@@ -487,51 +487,64 @@ func checkRobots(ctx context.Context, env *Env, d hestia.Domain) []Result {
 	return []Result{r.Ev(ev...).With("route", st.Route).With("kind", st.Kind)}
 }
 
-// A staging copy sees live's media through a read-only bind mount of live's
-// uploads (v-wp-staging-create). Copies from before the 2026-09-25 fstab line
-// lost it at the next reboot — soutuveneet and delicatessen, 2026-09-30:
-// staging's uploads was its own 28 KB writable folder, no images.
+// A staging copy sees live's media through read-only binds of live's media
+// folders into its own uploads (v-wp-staging-create, layout since 2026-10-02;
+// copies.MediaBinds). Copies from before the 2026-09-25 fstab lines lost their
+// mount at the next reboot — soutuveneet and delicatessen, 2026-09-30: no
+// images on staging.
 func checkStagingUploads(env *Env, c copies.Copy) []Result {
 	point := c.Uploads()
 	m := copies.MountAt(env.Sys, point)
-	fix := "hs fix staging-uploads " + c.Domain + "   # bind + remount ro + write probe, then the tagged fstab line"
+	fix := "hs fix staging-uploads " + c.Domain + "   # bind + remount ro + private + write probe, then the tagged fstab lines"
+	rebuild := "v-wp-staging-create --uploads-only --src-user=" + c.SourceUser + " --src-domain=" + c.SourceDomain + " --dest-user=" + c.User + " --new-domain=" + c.Domain
 	if c.SourceDomain == "" {
-		if m.Mounted {
-			return []Result{New(Configured, "uploads mounted; the live site is unknown").Ev("mount from "+m.Root, "copy found by "+c.Origin).
-				Fixed("v-wp-copies --mark --domain=" + c.Domain + " --source-domain=LIVE")}
-		}
-		return []Result{New(Warn, "staging site without live's uploads, and its live site is unknown").Ev("copy found by "+c.Origin, point+" is not a mount point").
-			Because("A staging copy normally shows live's media through a read-only mount; without it pages render without images and uploads written here go nowhere.").
+		return []Result{New(Configured, "staging copy whose live site is unknown").Ev("copy found by " + c.Origin).
 			Fixed("v-wp-copies --mark --domain=" + c.Domain + " --source-domain=LIVE   # then hs fix staging-uploads")}
 	}
 	ev := []string{"live uploads " + c.SourceUploads(), "copy found by " + c.Origin}
-	switch {
-	case !m.Mounted:
-		return []Result{New(Fail, "live's uploads are not mounted: staging has its own writable uploads folder").Ev(append(ev, point+" is not a mount point")...).
-			Because("Staging shows no media, and whatever staging writes to uploads is not what live has — reviews of an update run look at a site without its images. Typically a reboot of a copy made before 2026-09-25, when the mount was not yet in /etc/fstab.").
-			Fixed(fix)}
-	case !m.ReadOnly:
-		return []Result{New(Fail, "live's uploads are mounted writable into staging").Ev(append(ev, "mounted rw from "+m.Root)...).
-			Because("Staging's plugins (feeds, sitemaps, image optimisers) can rewrite live's files.").
-			Fixed(fix)}
-	case m.Root != "" && m.Root != c.SourceUploads():
-		return []Result{New(Warn, "staging's uploads are mounted from somewhere else").Ev(append(ev, "mounted from "+m.Root)...).
-			Because("The mount does not come from the live site this copy belongs to.").
-			Fixed(fix)}
-	}
-	if m.Shared {
-		return []Result{New(Warn, "mounted read-only, but shared: a mount inside it would reach live's uploads").Ev(append(ev, point+" is in a shared peer group")...).
-			Because("A bind of a path on / joins its peer group; anything mounted inside staging's uploads (the writable generated-asset folders of v-wp-staging-create) would then also appear in live's uploads. The mount has to be private.").
-			Fixed(fix)}
-	}
-	if line := copies.FstabLine(env.Sys, point); line != copies.WantFstab(c) {
-		why := "no tagged line in /etc/fstab"
-		if line != "" {
-			why = "the tagged /etc/fstab line differs: " + line
+	if m.Mounted {
+		if !m.ReadOnly {
+			return []Result{New(Fail, "live's uploads are mounted writable into staging").Ev(append(ev, "mounted rw from "+m.Root)...).
+				Because("Staging's plugins (feeds, sitemaps, image optimisers) can rewrite live's files.").
+				Fixed(rebuild)}
 		}
-		return []Result{New(Warn, "mounted read-only, but the next reboot loses it").Ev(append(ev, why)...).
-			Because("Without the tagged fstab line a reboot silently turns staging's uploads into its own empty folder (soutuveneet, delicatessen 2026-09-30).").
+		return []Result{New(Warn, "old uploads layout: all of live's uploads bound read-only").Ev(append(ev, point+" is one bind of "+m.Root)...).
+			Because("The copy cannot save files plugins generate into uploads — fonts, compiled CSS, feeds (kuumalahde dev1 2026-10-01: Avada's brand fonts 404'd). The current layout binds only live's media and gives the copy the rest as its own.").
+			Fixed(rebuild)}
+	}
+	binds := copies.MediaBinds(env.Sys, c.SourceUploads(), env.Sys.Now())
+	var missing, writable, other []string
+	for _, rel := range binds {
+		dst := point + "/" + rel
+		b := copies.MountAt(env.Sys, dst)
+		switch {
+		case !b.Mounted:
+			// A folder the copy holds files in was copied when it was the current month.
+			if es, _ := env.Sys.ReadDir(dst); len(es) == 0 {
+				missing = append(missing, rel)
+			}
+		case !b.ReadOnly:
+			writable = append(writable, rel)
+		case b.Root != c.SourceUploads()+"/"+rel:
+			other = append(other, rel+" mounted from "+b.Root)
+		case b.Shared:
+			other = append(other, rel+" is shared (mounts inside it would reach live)")
+		case copies.FstabLine(env.Sys, dst) != copies.WantBindFstab(c, rel):
+			other = append(other, rel+" has no current fstab line (the next reboot loses it)")
+		}
+	}
+	switch {
+	case len(writable) > 0:
+		return []Result{New(Fail, "live's media is mounted writable into staging").Ev(append(ev, writable...)...).
+			Because("Staging can rewrite or delete live's media.").Fixed(fix)}
+	case len(missing) > 0:
+		return []Result{New(Fail, fmt.Sprintf("%d of %d media folders of live not mounted: staging shows no images there", len(missing), len(binds))).Ev(append(ev, missing...)...).
+			Because("Reviews of an update run look at a site without its images. Typically a reboot of a copy whose mounts were not in /etc/fstab.").
+			Fixed(fix)}
+	case len(other) > 0:
+		return []Result{New(Warn, "media mounted read-only, but not as v-wp-staging-create leaves it (reboot, shared or source)").Ev(append(ev, other...)...).
+			Because("A mount without its fstab line is gone after the next reboot; a shared one would carry mounts made inside it to live's uploads.").
 			Fixed(fix)}
 	}
-	return []Result{New(OK, "live's uploads mounted read-only and persisted in /etc/fstab").Ev(ev...)}
+	return []Result{New(OK, fmt.Sprintf("live's media mounted read-only (%d folders) and persisted; the rest of uploads is the copy's own", len(binds))).Ev(ev...)}
 }
