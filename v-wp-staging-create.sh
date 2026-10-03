@@ -1089,6 +1089,31 @@ if $WP_STG plugin is-active elementor --skip-plugins --skip-themes 2>/dev/null; 
     && echo "       Elementor CSS printed inline (uploads are read-only on the copy)"
 fi
 
+# Paytrail in test mode in the copy: the live merchant ID and secret key are
+# blanked (the copy should not hold them) and test mode put on, which makes the
+# gateway use Paytrail's public test merchant. valolink-plugin's Staging module
+# lets a test-mode Paytrail through, so checkouts can be paid end to end.
+if $WP_STG option get woocommerce_paytrail_settings --skip-plugins --skip-themes >/dev/null 2>&1; then
+  $WP_STG eval --skip-plugins --skip-themes '
+    $s = get_option("woocommerce_paytrail_settings");
+    if (!is_array($s)) { echo "skip"; return; }
+    $s["merchant_id"] = ""; $s["secret_key"] = ""; $s["enable_test_mode"] = "yes";
+    update_option("woocommerce_paytrail_settings", $s);
+    $c = get_option("woocommerce_paytrail_settings");
+    if ($c["merchant_id"] !== "" || $c["secret_key"] !== "" || $c["enable_test_mode"] !== "yes") { echo "fail"; return; }
+    // Safe now, so off the Staging module'"'"'s disable-on-staging list (live'"'"'s settings carry it).
+    $v = get_option("valolink_settings");
+    $list = $v["modules"]["staging"]["settings"]["disabled_plugins"] ?? null;
+    if (is_array($list)) {
+      $v["modules"]["staging"]["settings"]["disabled_plugins"] = array_values(array_diff($list, ["paytrail-for-woocommerce/plugin.php"]));
+      update_option("valolink_settings", $v);
+    }
+    echo "ok";
+  ' 2>/dev/null | grep -qx ok \
+    && echo "       Paytrail in test mode (live credentials blanked in the copy; not on the disable-on-staging list)" \
+    || echo "       ⚠️  Paytrail settings found but not switched to test mode — check before testing payments."
+fi
+
 # valolink-plugin's Staging module (noindex, mail interception, live payment
 # gateways off, auto-updates off) — switched on in the copy only. Live keeps
 # whatever it had: enabling the module on live is unsafe, because its
