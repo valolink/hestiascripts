@@ -253,6 +253,23 @@ if [ "$THEME_UPDATES" -gt 0 ]; then
   if [ -n "$FAILED" ]; then ERRORS+=("Themes not updated: $FAILED")
   elif [ $RC -ne 0 ]; then ERRORS+=("One or more theme updates failed"); fi
   echo ""
+
+  # Themes that bundle plugins (Avada → Fusion Core / Fusion Builder) only
+  # offer those updates once the theme itself is updated, so the plugin step
+  # above never saw them (logscale + operaria, 2026-10-06). Look again.
+  if [ "$THEMES_DONE" -gt 0 ]; then
+    MORE=$($WP plugin list --update=available --format=count 2>/dev/null); MORE=${MORE:-0}
+    if [ "$MORE" -gt 0 ]; then
+      echo "[ Plugin Updates ] (offered after the theme update)"
+      PLUGIN_UPDATES=$((PLUGIN_UPDATES + MORE))
+      run_live $WP plugin update --all
+      PLUGINS_DONE=$((PLUGINS_DONE + $(count_status "$OUT" Updated)))
+      FAILED=$(failed_names "$OUT")
+      if [ -n "$FAILED" ]; then ERRORS+=("Plugins not updated: $FAILED")
+      elif [ $RC -ne 0 ]; then ERRORS+=("One or more plugin updates failed"); fi
+      echo ""
+    fi
+  fi
 fi
 
 # --- Flush Cache ---
