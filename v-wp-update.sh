@@ -12,7 +12,8 @@ show_help() {
 USAGE: v-wp-update [OPTIONS]
 
 Run all available WordPress updates (core, plugins, themes).
-Backs up the database to ~/backup/ before updating unless --skip-backup is set.
+Backs up the database to /root/pre-update/USER/ before updating unless
+--skip-backup is set (the newest 5 dumps per domain are kept).
 Enables maintenance mode for the duration and disables it on exit.
 
 OPTIONS:
@@ -95,6 +96,15 @@ echo "======================================================"
 echo ""
 echo "Checking for available updates..."
 
+# Elementor Pro keeps its own copy of the update data, download token
+# included, in elementor_pro_remote_info_api_data_* options. One held a token
+# that had expired 29 h earlier (2026-10-01), so the update would have failed
+# with a 401. Clear it with Elementor Pro's own function so the check below
+# fetches a fresh one.
+if $WP plugin is-active elementor-pro 2>/dev/null; then
+  $WP eval 'if (class_exists("\\ElementorPro\\Core\\Upgrade\\Upgrades")) { \ElementorPro\Core\Upgrade\Upgrades::_remove_remote_info_api_data(); }' &>/dev/null
+fi
+
 CORE_UPDATE=$($WP core check-update --format=csv --fields=version 2>/dev/null | tail -n +2 | head -n1)
 PLUGIN_UPDATES=$($WP plugin list --update=available --format=count 2>/dev/null); PLUGIN_UPDATES=${PLUGIN_UPDATES:-0}
 THEME_UPDATES=$($WP theme list --update=available --format=count 2>/dev/null); THEME_UPDATES=${THEME_UPDATES:-0}
@@ -135,18 +145,22 @@ BACKUP_FILE=""
 if [ "$SKIP_BACKUP" = false ]; then
   echo ""
   echo "---------------------------------------------------"
-  BACKUP_DIR="/home/$HESTIA_USER/backup"
+  # Not /home/USER/backup: the nightly v-backup-user-config starts with
+  # `rm -fr /home/$user/backup/`, so a dump there was gone by the next
+  # morning. Root-only, outside the web tree, untouched by Hestia.
+  BACKUP_DIR="/root/pre-update/$HESTIA_USER"
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   BACKUP_FILE="$BACKUP_DIR/${DOMAIN}_pre_update_${TIMESTAMP}.sql.gz"
 
   mkdir -p "$BACKUP_DIR"
-  chown "$HESTIA_USER:$HESTIA_USER" "$BACKUP_DIR"
+  chmod 700 /root/pre-update
 
   echo "Backing up database to $BACKUP_FILE ..."
   $WP db export - 2>/dev/null | gzip > "$BACKUP_FILE"
   if [ "${PIPESTATUS[0]}" -eq 0 ] && [ -s "$BACKUP_FILE" ]; then
     BACKUP_SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
     echo "✅ Backup complete ($BACKUP_SIZE)"
+    ls -1t "$BACKUP_DIR/${DOMAIN}_pre_update_"*.sql.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
   else
     echo "❌ ERROR: Database backup failed. Aborting."
     echo "   Use --skip-backup to proceed without a backup."
