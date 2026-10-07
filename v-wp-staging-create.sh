@@ -1120,18 +1120,37 @@ fi
 # subdomain heuristic would flip a live site served on a subdomain into
 # staging mode. WP_ENVIRONMENT_TYPE=staging (above) is what the module's
 # detector treats as authoritative, so it activates here and nowhere else.
+#
+# Behind basic auth (the default) the copy already has its gate, so the
+# module's own visitor gates come off: require_login and coming-soon are
+# copied over from live's settings, and with either on every page of the
+# copy answers with wp-login or the coming-soon page (and require_login also
+# refuses the REST API) — EngineLink's update-run checks then compared login
+# screens and tested nothing (delicatessen.fi, 2026-10-07). With
+# --no-httpauth they stay as live has them.
 if $WP_STG plugin is-active valolink-plugin --skip-plugins --skip-themes 2>/dev/null; then
   echo "       Enabling valolink-plugin's Staging module in the copy..."
+  OPEN_GATES=$([ "$HTTPAUTH" = true ] && echo 1 || echo 0)
   $WP_STG eval --skip-plugins --skip-themes '
     $s = get_option("valolink_settings");
     if (!is_array($s)) { $s = []; }
     $s["modules"]["staging"]["enabled"] = true;
+    if ('"$OPEN_GATES"') {
+      $s["modules"]["staging"]["settings"]["require_login"] = false;
+      $s["modules"]["staging"]["settings"]["coming_soon_enabled"] = false;
+    }
     update_option("valolink_settings", $s);
     $check = get_option("valolink_settings");
-    echo empty($check["modules"]["staging"]["enabled"]) ? "fail" : "ok";
+    $st = $check["modules"]["staging"] ?? [];
+    $gated = !empty($st["settings"]["require_login"]) || !empty($st["settings"]["coming_soon_enabled"]);
+    echo (empty($st["enabled"]) || ('"$OPEN_GATES"' && $gated)) ? "fail" : "ok";
   ' 2>/dev/null | grep -qx ok
   check_status "Failed to enable the Staging module in the copy."
-  echo "       ✓ Staging module on (copy only)"
+  if [ "$HTTPAUTH" = true ]; then
+    echo "       ✓ Staging module on (copy only); its login and coming-soon gates off — basic auth is the gate"
+  else
+    echo "       ✓ Staging module on (copy only)"
+  fi
 else
   echo "       ⚠️  valolink-plugin not active — no Staging module: mail and payment gateways are NOT intercepted on staging."
 fi
