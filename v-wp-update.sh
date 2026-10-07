@@ -169,10 +169,47 @@ if [ "$SKIP_BACKUP" = false ]; then
   fi
 fi
 
+# While .maintenance exists WordPress answers 503 with "Briefly unavailable",
+# and a visitor who arrives in those seconds leaves. Cached pages never reach
+# PHP, but the wp-rocket template sends every query string past the cache, so
+# the visitors who do are paid clicks (?gclid=…): a Google Ads visitor hit it
+# on delicatessen.fi, 2026-10-07. For the run, wp-content/maintenance.php
+# (which WordPress loads instead of its own page) still says 503 but reloads
+# itself after a few seconds, so the click lands. A site's own
+# maintenance.php is left alone; ours goes when the run ends.
+MAINT_PAGE="$WP_PATH/wp-content/maintenance.php"
+MAINT_MARK="valolink v-wp-update maintenance page"
+install_maintenance_page() {
+  [ -e "$MAINT_PAGE" ] && return
+  cat > "$MAINT_PAGE" <<'PHP'
+<?php
+// valolink v-wp-update maintenance page — removed when the update run ends.
+http_response_code(503);
+header('Retry-After: 10');
+header('Cache-Control: no-store');
+header('Content-Type: text/html; charset=utf-8');
+?><!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><meta http-equiv="refresh" content="8">
+<title>Hetki vain · One moment</title>
+<style>body{font:17px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#222;text-align:center}p{margin:.4em}</style>
+</head><body><div>
+<p>Päivitämme sivustoa. Sivu latautuu hetken kuluttua.</p>
+<p>We are updating the site. This page reloads in a moment.</p>
+</div></body></html>
+PHP
+  chown "$HESTIA_USER:$HESTIA_USER" "$MAINT_PAGE"
+  chmod 644 "$MAINT_PAGE"
+}
+remove_maintenance_page() {
+  grep -q "$MAINT_MARK" "$MAINT_PAGE" 2>/dev/null && rm -f "$MAINT_PAGE"
+}
+
 # Ensure maintenance mode is always disabled on exit
 UPDATE_LOG=$(mktemp)
 cleanup() {
   $WP maintenance-mode deactivate &>/dev/null
+  remove_maintenance_page
   rm -f "$UPDATE_LOG"
 }
 trap cleanup EXIT
@@ -201,6 +238,7 @@ hold_maintenance() { $WP maintenance-mode activate &>/dev/null; }
 echo ""
 echo "---------------------------------------------------"
 echo "Enabling maintenance mode..."
+install_maintenance_page
 $WP maintenance-mode activate 2>/dev/null
 echo ""
 
@@ -303,6 +341,8 @@ fi
 echo ""
 echo "Disabling maintenance mode..."
 $WP maintenance-mode deactivate 2>/dev/null
+remove_maintenance_page
+rm -f "$UPDATE_LOG"
 trap - EXIT
 
 # --- Summary ---
