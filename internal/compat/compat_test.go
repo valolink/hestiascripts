@@ -61,9 +61,15 @@ func TestHealthShape(t *testing.T) {
 	if !reflect.DeepEqual(got, wantHealth) {
 		t.Errorf("health keys\n got %v\nwant %v", got, wantHealth)
 	}
-	b, _ := json.Marshal(BackupEntry{User: "u", AgeHours: 3, Newest: "2026-09-24 03:00"})
-	if string(b) != `{"user":"u","ageHours":3,"newest":"2026-09-24 03:00"}` {
+	three := 3
+	b, _ := json.Marshal(BackupEntry{User: "u", AgeHours: &three, Newest: "2026-09-24 03:00", Source: "restic"})
+	if string(b) != `{"user":"u","ageHours":3,"newest":"2026-09-24 03:00","source":"restic"}` {
 		t.Errorf("backup entry = %s", b)
+	}
+	// No snapshot: ageHours is null (EngineLink treats it as stale), the reason rides along.
+	b, _ = json.Marshal(BackupEntry{User: "u", Source: "restic", Error: "restic is not set up on this box"})
+	if string(b) != `{"user":"u","ageHours":null,"newest":"","source":"restic","error":"restic is not set up on this box"}` {
+		t.Errorf("missing entry = %s", b)
 	}
 }
 

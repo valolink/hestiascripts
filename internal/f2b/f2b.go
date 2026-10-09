@@ -18,12 +18,14 @@ import (
 )
 
 var (
-	Dir      = "/etc/fail2ban"
-	Jail     = "jail.d/wordpress.conf"
-	Filter   = "filter.d/wordpress.conf"
-	missing  = regexp.MustCompile(`any log file for (\S+) jail`)
-	mailAct  = regexp.MustCompile(`%\(action_mwl?\)s`)
-	sectionH = func(j string) *regexp.Regexp { return regexp.MustCompile(`(?m)^\[` + regexp.QuoteMeta(j) + `\]`) }
+	Dir    = "/etc/fail2ban"
+	Jail   = "jail.d/wordpress.conf"
+	Filter = "filter.d/wordpress.conf"
+	// ScannerJail is hs op f2b-scanner-jail's (templates/fail2ban/vl-scanner-jail.conf).
+	ScannerJail = "jail.d/vl-scanner.conf"
+	missing     = regexp.MustCompile(`any log file for (\S+) jail`)
+	mailAct     = regexp.MustCompile(`%\(action_mwl?\)s`)
+	sectionH    = func(j string) *regexp.Regexp { return regexp.MustCompile(`(?m)^\[` + regexp.QuoteMeta(j) + `\]`) }
 )
 
 func path(rel string) string { return Dir + "/" + rel }
@@ -71,17 +73,24 @@ func Repair(ctx context.Context, w io.Writer, run Runner, selfIPs string) error 
 	}
 	// 3. Never ban the box itself: the nginx→apache hop is logged with the
 	// host's own address, so a wp-login flood banned the server's IP and
-	// 502'd every site (2026-07-05, 8dmeditaatiot + web1).
-	if b, err := os.ReadFile(path(Jail)); err == nil {
-		if _, ok := conf.Get(string(b), conf.Opts{Section: "wordpress"}, "ignoreip"); !ok {
-			ch, bak, err := conf.SetFile(path(Jail), conf.Opts{Section: "wordpress", Style: conf.INI}, "ignoreip", strings.TrimSpace("127.0.0.1/8 ::1 "+selfIPs))
-			what := Jail + ": never ban this box's own addresses"
-			if err == nil && len(ch) > 0 {
-				what += " (" + ch[0].New + ")"
-			}
-			if report(w, what, bak, err) != nil {
-				return err
-			}
+	// 502'd every site (2026-07-05, 8dmeditaatiot + web1). The scanner jail
+	// reads the same logs, and the box's own loopback requests (wp-cron,
+	// REST) can 404 too.
+	for _, j := range []struct{ file, section string }{{Jail, "wordpress"}, {ScannerJail, "vl-scanner"}} {
+		b, err := os.ReadFile(path(j.file))
+		if err != nil {
+			continue
+		}
+		if _, ok := conf.Get(string(b), conf.Opts{Section: j.section}, "ignoreip"); ok {
+			continue
+		}
+		ch, bak, err := conf.SetFile(path(j.file), conf.Opts{Section: j.section, Style: conf.INI}, "ignoreip", strings.TrimSpace("127.0.0.1/8 ::1 "+selfIPs))
+		what := j.file + ": never ban this box's own addresses"
+		if err == nil && len(ch) > 0 {
+			what += " (" + ch[0].New + ")"
+		}
+		if report(w, what, bak, err) != nil {
+			return err
 		}
 	}
 	// 4. Test; disable each jail whose log files are missing.

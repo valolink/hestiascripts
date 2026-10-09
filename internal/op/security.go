@@ -19,6 +19,8 @@ import (
 const (
 	f2bJail     = "/etc/fail2ban/jail.d/wordpress.conf"
 	f2bFilter   = "/etc/fail2ban/filter.d/wordpress.conf"
+	f2bScanJail = "/etc/fail2ban/jail.d/vl-scanner.conf"
+	f2bScanFilt = "/etc/fail2ban/filter.d/vl-scanner.conf"
 	maldetConf  = "/usr/local/maldetect/conf.maldet"
 	uuFile      = "/etc/apt/apt.conf.d/50unattended-upgrades"
 	sshDropIn   = "/etc/ssh/sshd_config.d/00-hs-keys-only.conf"
@@ -88,6 +90,31 @@ func init() {
 				{Why: "self-ban guard, quiet ban mails, jails without logs; config test", Argv: []string{self(), "f2b", "repair"}},
 				{Why: "apply", Argv: []string{self(), "f2b", "reload"}},
 				{Why: "the jail is live", Argv: []string{"timeout", "5", "fail2ban-client", "status", "wordpress"}},
+			}, nil
+		},
+	})
+	register(Op{
+		ID: "f2b-scanner-jail", Title: "Fail2ban scanner jail", Section: "security", Risk: Change,
+		Resolves: "fail2ban", Applies: summaryHas("no scanner jail"),
+		Note:    "Bans addresses that hammer the sites with vulnerability probes: 40 non-asset 404s within 5 minutes → web ports closed to them for an hour, doubling on repeats up to a week. SSH and the panel are never part of the ban, and these bans never escalate through recidive.",
+		How:     "`hs conf install` writes the filter and jail from templates/fail2ban/vl-scanner-*.conf (printing what changes, keeping previous files). The filter counts 403/404/444 answers to anything that is not a static asset, from the per-domain access logs in /var/log/apache2/domains (nginx and Apache both log the client there); Googlebot, bingbot, Applebot and Uptime Kuma are ignored. The jail bans on http,https only, and its [recidive] stanza keeps scanner bans out of the all-ports recidive jail, so a false positive can cost a visitor an hour of the websites but never anyone's SSH. `hs f2b repair` adds this box's own addresses to ignoreip and runs the config test; `hs f2b reload` applies.",
+		Undo:    "rm " + f2bScanJail + " " + f2bScanFilt + " && hs f2b reload",
+		Recheck: []string{"fail2ban"},
+		Plan: func(_ context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
+			if !have(env, "fail2ban-client") {
+				return nil, fmt.Errorf("fail2ban is not installed (Hestia installs it; check whether it was skipped)")
+			}
+			filter, err := repoFile(env, "templates/fail2ban/vl-scanner-filter.conf")
+			if err != nil {
+				return nil, err
+			}
+			jail, _ := repoFile(env, "templates/fail2ban/vl-scanner-jail.conf")
+			return []Step{
+				confInstall("the filter: non-asset 403/404/444 answers", filter, f2bScanFilt),
+				confInstall("the jail: 40 in 5 min → web ports banned 1 h, doubling", jail, f2bScanJail),
+				{Why: "self-ban guard, jails without logs; config test", Argv: []string{self(), "f2b", "repair"}},
+				{Why: "apply", Argv: []string{self(), "f2b", "reload"}},
+				{Why: "the jail is live", Argv: []string{"timeout", "5", "fail2ban-client", "status", "vl-scanner"}},
 			}, nil
 		},
 	})

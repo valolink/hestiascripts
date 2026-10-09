@@ -11,6 +11,7 @@ import (
 	"time"
 
 	. "github.com/valolink/hestiascripts/internal/check"
+	"github.com/valolink/hestiascripts/internal/fwgen"
 	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/wpfiles"
 )
@@ -41,6 +42,13 @@ func securityChecks() []Check {
 
 // kuumalahde 2026-08-28: fail2ban green, every ban failing — no iptables
 // binary, so the firewall held zero rules and nothing said so anywhere.
+//
+// kuumalahde 2026-10-09: 45 rules loaded and this said OK, but they were all
+// fail2ban and hs chains. v-update-firewall had saved an empty
+// /etc/iptables.rules on 2026-08-27 (iptables was installed the next day), the
+// 2026-09-25 reboot restored that, and INPUT stayed ACCEPT: the Apache backend
+// (staging without its basic auth), Netdata and the streamer answered everyone
+// for two weeks. Counting lines proves nothing; the policy and the saved file do.
 func checkFirewall(ctx context.Context, env *Env) []Result {
 	s := env.Sys
 	if !s.Have("iptables") {
@@ -53,21 +61,132 @@ func checkFirewall(ctx context.Context, env *Env) []Result {
 		return []Result{New(Unknown, "iptables -S failed: "+err.Error())}
 	}
 	rules := len(strings.Split(strings.TrimSpace(out), "\n"))
+	sshPorts := sshdPorts(ctx, env)
 	var rs []Result
 	if rules < 5 {
 		rs = append(rs, New(Fail, fmt.Sprintf("loaded but empty (%d rules)", rules)).
 			Because("Hestia's rules.conf is not applied, so every port is reachable regardless of what the panel shows.").
-			Fixed("systemctl start hestia-iptables   # or: v-update-firewall"))
+			Fixed("v-update-firewall   # rebuilds from rules.conf"))
+	} else if policy, closed := inputClosed(out); !closed {
+		rs = append(rs, New(Fail, "INPUT policy is "+policy+" — every port is open").
+			Ev(fmt.Sprintf("iptables -S: -P INPUT %s, %d INPUT rules, no final DROP", policy, countPrefix(out, "-A INPUT "))).
+			Because("Only fail2ban and hs chains are loaded, not Hestia's rules.conf: the Apache backend (:8080/:8443, which skips nginx's basic auth), Netdata and the streamer answer the whole internet.").
+			Fixed("v-update-firewall   # rebuilds INPUT from rules.conf, then saves it for boot"))
 	}
-	if unitExists(ctx, s, "hestia-iptables") && !active(ctx, s, "hestia-iptables") {
-		rs = append(rs, New(Fail, "hestia-iptables.service is not active").
-			Because("Firewall rules are not reapplied at boot, so a reboot silently drops the firewall.").
-			Fixed("systemctl status hestia-iptables"))
+	if unitExists(ctx, s, "hestia-iptables") {
+		saved := readString(s, savedRules)
+		if !savedClosed(saved) {
+			ev := savedRules + ": " + strconv.Itoa(len(saved)) + " bytes, no \":INPUT DROP\""
+			rs = append(rs, New(Fail, "the saved firewall opens every port at the next reboot").Ev(ev).
+				Because("hestia-iptables.service restores "+savedRules+" at boot; without a DROP policy in it a reboot silently removes the firewall.").
+				Fixed("v-update-firewall   # writes "+savedRules+" from the rebuilt rules"))
+		}
+		if !active(ctx, s, "hestia-iptables") {
+			rs = append(rs, New(Fail, "hestia-iptables.service is not active").
+				Because("Firewall rules are not reapplied at boot, so a reboot silently drops the firewall.").
+				Fixed("systemctl status hestia-iptables"))
+		}
+	}
+	// Lockout guard: every fix above is v-update-firewall, which rebuilds
+	// INPUT from rules.conf and ends with policy DROP. Without an ACCEPT for
+	// sshd's port there, that command closes SSH for everyone.
+	if conf := rulesConf(env); len(conf) > 0 {
+		for _, p := range sshPorts {
+			if !rulesAccept(conf, p) {
+				rs = append(rs, New(Fail, "rules.conf does not accept SSH (port "+p+") — v-update-firewall would lock everyone out").
+					Ev(fwgen.RulesConf+": no ACCEPT rule for tcp/"+p).
+					Because("v-update-firewall applies rules.conf and then sets INPUT to DROP; the only way back in would be the provider's console.").
+					Fixed("v-add-firewall-rule ACCEPT 0.0.0.0/0 "+p+" TCP SSH   # before any v-update-firewall"))
+			}
+		}
 	}
 	if len(rs) > 0 {
 		return rs
 	}
-	return []Result{New(OK, fmt.Sprintf("%d rules loaded", rules)).Ev("iptables -S: " + strconv.Itoa(rules) + " lines")}
+	return []Result{New(OK, fmt.Sprintf("%d rules loaded, INPUT drops by default, saved for boot", rules)).
+		Ev("iptables -S: " + strconv.Itoa(rules) + " lines")}
+}
+
+const savedRules = "/etc/iptables.rules"
+
+// inputClosed: the INPUT policy, and whether unmatched traffic is dropped —
+// by the policy, or by an unconditional DROP/REJECT as the last rule.
+func inputClosed(iptablesS string) (policy string, closed bool) {
+	policy = "unknown"
+	var last string
+	for _, l := range strings.Split(iptablesS, "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "-P INPUT ") {
+			policy = strings.TrimPrefix(l, "-P INPUT ")
+		}
+		if strings.HasPrefix(l, "-A INPUT ") {
+			last = l
+		}
+	}
+	return policy, policy == "DROP" || policy == "REJECT" ||
+		last == "-A INPUT -j DROP" || strings.HasPrefix(last, "-A INPUT -j REJECT")
+}
+
+// savedClosed: iptables-save output whose INPUT chain drops by default.
+func savedClosed(saved string) bool {
+	for _, l := range strings.Split(saved, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), ":INPUT DROP") {
+			return true
+		}
+	}
+	return false
+}
+
+func countPrefix(text, prefix string) int {
+	n := 0
+	for _, l := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// sshdPorts from the effective sshd config; 22 when sshd -T cannot tell.
+func sshdPorts(ctx context.Context, env *Env) []string {
+	out, err := env.Sys.Run(ctx, "sshd", "-T")
+	var ports []string
+	if err == nil {
+		for _, l := range strings.Split(out, "\n") {
+			if f := strings.Fields(l); len(f) == 2 && f[0] == "port" {
+				ports = append(ports, f[1])
+			}
+		}
+	}
+	if len(ports) == 0 {
+		return []string{"22"}
+	}
+	return ports
+}
+
+// rulesAccept: an active ACCEPT rule in rules.conf covers tcp/port (from any
+// address — a rule limited to listed addresses still counts: who is listed is
+// the operator's call, not a lockout).
+func rulesAccept(rules []fwgen.Rule, port string) bool {
+	want, _ := strconv.Atoi(port)
+	for _, r := range rules {
+		if r.Action != "ACCEPT" || r.Suspended || (r.Protocol != "TCP" && r.Protocol != "") {
+			continue
+		}
+		for _, p := range strings.Split(r.Port, ",") {
+			p = strings.TrimSpace(p)
+			if lo, hi, ok := strings.Cut(strings.ReplaceAll(p, ":", "-"), "-"); ok {
+				a, _ := strconv.Atoi(lo)
+				b, _ := strconv.Atoi(hi)
+				if want >= a && want <= b {
+					return true
+				}
+			} else if p == port {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Green needs a ban that went through since the daemon started: "running" is
@@ -102,12 +221,29 @@ func checkFail2ban(ctx context.Context, env *Env) []Result {
 			Because("wp-login.php and xmlrpc.php brute force is not throttled.").
 			Fixed("hs op f2b-wp-jail"))
 	}
+	if !stalled {
+		sctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		_, serr := s.Run(sctx, "fail2ban-client", "status", "vl-scanner")
+		cancel()
+		if serr != nil {
+			// hzweb1 2026-10-09: two addresses kept four php-fpm workers busy
+			// rendering 404s for vulnerability probes; nothing was watching.
+			rs = append(rs, New(Warn, "no scanner jail").
+				Because("Vulnerability scanners can hammer the sites indefinitely: every probe is a WordPress 404 rendered in PHP.").
+				Fixed("hs op f2b-scanner-jail"))
+		}
+	}
 	// The self-ban guard: the nginx→apache hop is logged with the box's own
 	// address, so a wp-login flood without ignoreip bans the server itself
 	// and every site 502s (2026-07-05). hzdemolink's jail lacked it.
 	if jail := readString(s, "/etc/fail2ban/jail.d/wordpress.conf"); jail != "" && !regexp.MustCompile(`(?m)^\s*ignoreip\s*=`).MatchString(jail) {
 		rs = append(rs, New(Warn, "WordPress jail can ban this box's own addresses").For("wordpress jail").
 			Because("Proxied requests are logged with the server's own IP; a login flood bans it and every site on the box answers 502 (2026-07-05).").
+			Fixed("hs op f2b-restart (adds ignoreip for this box's addresses)"))
+	}
+	if jail := readString(s, "/etc/fail2ban/jail.d/vl-scanner.conf"); jail != "" && !regexp.MustCompile(`(?m)^\s*ignoreip\s*=`).MatchString(jail) {
+		rs = append(rs, New(Warn, "scanner jail can ban this box's own addresses").For("vl-scanner jail").
+			Because("The box's own loopback requests (wp-cron, REST) are in the same logs; banning itself breaks them.").
 			Fixed("hs op f2b-restart (adds ignoreip for this box's addresses)"))
 	}
 

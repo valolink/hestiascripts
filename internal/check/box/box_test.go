@@ -48,8 +48,8 @@ func TestFail2banOnlyCountsSinceStart(t *testing.T) {
 			Commands: map[string]bool{"fail2ban-client": true},
 			Files:    map[string]string{"/var/log/fail2ban.log": log},
 			Cmds: map[string]sys.FakeCmd{
-				"systemctl is-active --quiet fail2ban":                                     {},
-				"fail2ban-client status wordpress":                                         {},
+				"systemctl is-active --quiet fail2ban": {},
+				"fail2ban-client status wordpress":     {}, "fail2ban-client status vl-scanner": {},
 				"systemctl show fail2ban -p ActiveEnterTimestamp --value --timestamp=unix": {Out: fmt.Sprintf("@%d\n", started.Unix())},
 			},
 		}

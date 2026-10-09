@@ -534,6 +534,12 @@ Not exercised on a box: hzdemolink has not run the new operations (the resize's 
 the health files' loading are the two things to watch there first: `hs op swap --dry-run`, then
 `hs op netdata-alarms` and `hs check --section monitoring`).
 
+## 2026-10-09: firewall truth, restic-only health, scanner jail
+
+- **`firewall` counted lines.** kuumalahde showed "45 rules loaded" while INPUT was ACCEPT: `v-update-firewall` had saved an empty `/etc/iptables.rules` on 2026-08-27 (iptables was installed a day later) and the 2026-09-25 reboot restored it. The Apache backend (staging without nginx's basic auth), Netdata and the streamer were public for two weeks. The check now fails on an INPUT policy that is not DROP (or a final unconditional DROP), on a saved file without `:INPUT DROP` when `hestia-iptables` restores it at boot, and — the lockout guard — on a rules.conf with no ACCEPT for sshd's port, because every fix it suggests is `v-update-firewall`, which ends with policy DROP.
+- **`v-server-health` is now `exec hs compat health`.** The bash script's `${REPO}${user}` join (above) meant EngineLink never saw a restic age: it reported tarballs, and nothing at all for kuumalahde. `compat health` counts restic only: every user is listed, `ageHours` is null with an `error` when there is no readable snapshot, `hourlyAgeHours` comes along, `source` is always `restic`. The apt probe runs beside the restic probes so the report stays inside EngineLink's 30 s.
+- **`hs op f2b-scanner-jail`** (`vl-scanner`): 40 non-asset 403/404/444 answers in 5 min from one address → http/https banned for 1 h, doubling up to a week. Web ports only, and its `[recidive]` stanza keeps scanner bans out of recidive's all-port ban, so a false positive never closes SSH. Tuned against two days of logs on six boxes. `hs f2b repair` adds the self-ban guard to it; `fail2ban` warns "no scanner jail".
+
 ## Open questions
 
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.

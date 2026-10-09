@@ -16,10 +16,18 @@ import (
 	"github.com/valolink/hestiascripts/internal/hestia"
 )
 
+// BackupEntry is one Hestia user's newest RESTIC snapshot (2026-10-09: the
+// off-site backup is what EngineLink watches; a local tarball on the same disk
+// is not a backup it counts). Every user is listed: AgeHours is null when the
+// user has no readable restic snapshot, and Error says why.
 type BackupEntry struct {
 	User     string `json:"user"`
-	AgeHours int    `json:"ageHours"`
+	AgeHours *int   `json:"ageHours"`
 	Newest   string `json:"newest"`
+	Source   string `json:"source"`
+	// Hours since the newest db-hourly snapshot, when the user has one.
+	HourlyAgeHours *int   `json:"hourlyAgeHours,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type Disk struct {
@@ -39,16 +47,16 @@ type Health struct {
 func HealthReport(ctx context.Context, env *check.Env) Health {
 	now := env.Sys.Now()
 	h := Health{Backups: []BackupEntry{}, Services: map[string]string{}}
-	for _, bi := range box.BackupAges(ctx, env) {
-		if bi.Nightly.IsZero() {
-			continue // the bash script omits users with no artifact
-		}
-		h.Backups = append(h.Backups, BackupEntry{
-			User:     bi.User,
-			AgeHours: int(now.Sub(bi.Nightly) / time.Hour),
-			Newest:   bi.Nightly.Local().Format("2006-01-02 15:04"),
-		})
-	}
+	// The apt probe and the restic probes are both network-bound; EngineLink
+	// gives the whole report 30 s, so they run side by side (as the bash
+	// script did), not one after the other.
+	aptDone := make(chan box.AptStatus, 1)
+	go func() {
+		uctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		aptDone <- box.GetAptStatus(uctx, env)
+	}()
+	h.Backups = resticBackups(ctx, env, now)
 	for _, svc := range box.CoreServices(ctx, env) {
 		out, _ := env.Sys.Run(ctx, "systemctl", "is-active", svc)
 		state := strings.TrimSpace(out)
@@ -59,13 +67,48 @@ func HealthReport(ctx context.Context, env *check.Env) Health {
 	}
 	h.MailQueue, _ = box.MailQueue(ctx, env)
 	h.Disk = rootDisk(ctx, env)
-	uctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	a := box.GetAptStatus(uctx, env)
-	cancel()
-	if a.Repos.Total > 0 {
+	if a := <-aptDone; a.Repos.Total > 0 {
 		h.Updates = &a
 	}
 	return h
+}
+
+// resticBackups: one entry per Hestia user from restic alone. BackupAges
+// falls back to tarballs for hs check's own view; those are dropped here.
+func resticBackups(ctx context.Context, env *check.Env, now time.Time) []BackupEntry {
+	repo := hestia.ResticRepo(env.Sys)
+	out := []BackupEntry{}
+	for _, bi := range box.BackupAges(ctx, env) {
+		e := BackupEntry{User: bi.User, Source: "restic"}
+		switch {
+		case bi.Source == "restic":
+			age := int(now.Sub(bi.Nightly) / time.Hour)
+			e.AgeHours = &age
+			e.Newest = bi.Nightly.Local().Format("2006-01-02 15:04")
+			if !bi.Hourly.IsZero() {
+				hourly := int(now.Sub(bi.Hourly) / time.Hour)
+				e.HourlyAgeHours = &hourly
+			}
+		case repo == "":
+			e.Error = "restic is not set up on this box"
+		case !bi.Keyed:
+			e.Error = "not enrolled in restic yet (no key; the nightly creates it)"
+		case bi.Err != "":
+			e.Error = clip(bi.Err, 200)
+		default:
+			e.Error = "no restic snapshot yet"
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func clip(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 func rootDisk(ctx context.Context, env *check.Env) Disk {
