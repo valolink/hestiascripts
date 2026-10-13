@@ -545,3 +545,7 @@ the health files' loading are the two things to watch there first: `hs op swap -
 - **Security-sensitive actions in `hs serve`**: the streamer allowlist today is name-based (`v-*`). Under one binary, keep the rule that root-shell-only operations (restore, reboot, DR script) are **not** reachable over HTTP — enforce it with an explicit per-action `Remote: false` flag, checked in `serve`, rather than the name prefix.
 - **Per-site integrity checks** call `wp core verify-checksums`, which fetches checksums from api.wordpress.org — cache per WP version to keep the hourly run cheap.
 - **Exemptions**: some sites legitimately fail a check (no Redis on a tiny site). Exemptions live in `/etc/hs/exemptions.yaml` with a reason and date, and render as NA with the reason — never silently green.
+
+## 2026-10-13: scanner jail spares a page's own broken requests
+
+After the 2026-10-08 updates WooCommerce's checkout on energiatuote.fi asked for `/kassa/undefinedwc/store/v1/cart` (its Store API root missing, resolved relative to the page) about 40 times in minutes, and `vl-scanner` banned 20 shoppers — mostly DNA/Telia mobile CGNAT addresses — mid-checkout. The filter now ignores a request whose https Referer is a non-root, slash-ended page path that the request strictly extends. Replayed on all nine boxes' logs: only those shoppers stopped being banned; a plain "any https Referer" exemption would have freed 123 scanners on hzweb1 alone (they send the probed URL as Referer).
