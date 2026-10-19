@@ -75,17 +75,22 @@ func init() {
 	})
 
 	netdataTune := func(env *check.Env) ([]Step, error) {
-		src := env.RepoDir + "/templates/netdata/netdata.conf"
-		if env.RepoDir == "" || !exists(env, src) {
-			return nil, fmt.Errorf("templates/netdata/netdata.conf not found — is the hestiascripts checkout next to hs?")
+		src, err := repoFile(env, "templates/netdata/netdata.conf")
+		if err != nil {
+			return nil, err
+		}
+		god, err := repoFile(env, "templates/netdata/go.d.conf")
+		if err != nil {
+			return nil, err
 		}
 		return []Step{
 			confInstall("the low-footprint profile (previous file kept)", src, "/etc/netdata/netdata.conf"),
+			confInstall("go.d collectors only when named: no service discovery", god, box.NetdataGoDConf),
 			{Why: "apply", Argv: []string{"systemctl", "restart", "netdata"}},
 			{Why: "running, and the alarms API EngineLink polls answers", Argv: []string{"sh", "-c", "sleep 3; systemctl is-active netdata && curl -fsS -o /dev/null -w 'alarms API: HTTP %{http_code}\\n' http://127.0.0.1:19999/api/v1/alarms"}},
 		}, nil
 	}
-	const tuneHow = "`hs conf install` writes templates/netdata/netdata.conf over /etc/netdata/netdata.conf, printing the lines that change and keeping the previous file under /var/lib/hs/backups: collection every 2 s instead of 1, machine-learning anomaly training off (its periodic CPU/RAM spikes caused the web1 OOM, 2026-07-06), one storage tier, 32 MB page cache, 512 MB on disk. The health engine stays on — EngineLink's alarm polling reads it. Netdata restarts (a few seconds of metrics missing)."
+	const tuneHow = "`hs conf install` writes templates/netdata/netdata.conf over /etc/netdata/netdata.conf, printing the lines that change and keeping the previous file under /var/lib/hs/backups: collection every 2 s instead of 1, machine-learning anomaly training off (its periodic CPU/RAM spikes caused the web1 OOM, 2026-07-06), one storage tier, 32 MB page cache, 512 MB on disk. The health engine stays on — EngineLink's alarm polling reads it. It also writes templates/netdata/go.d.conf to /etc/netdata/go.d.conf: go.d runs no collector unless one is named there. Its service discovery pointed collectors at Apache, nginx and PHP-FPM status pages Hestia does not serve, and the 2.12 nightly retried them about 300 times a second (viona, 2026-10-18); EngineLink's charts and the hs alarms come from the built-in proc plugin. Netdata restarts (a few seconds of metrics missing)."
 	// netdataAlarmSteps install hs's health files and make Netdata read them.
 	netdataAlarmSteps := func(env *check.Env) ([]Step, error) {
 		steps := []Step{{Why: "Netdata's directory for the operator's health files", Argv: []string{"install", "-d", "-m", "755", box.NetdataHealthDir}}}
@@ -100,6 +105,11 @@ func init() {
 			}
 			steps = append(steps, confInstall(why, src, box.NetdataHealthDir+"/"+f))
 		}
+		notify, err := repoFile(env, "templates/netdata/health_alarm_notify.conf")
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, confInstall("mail only critical alarms and their recovery (read after the stock file)", notify, box.NetdataNotifyConf))
 		reload := Step{Why: "re-read the health configuration (no restart, no gap in the metrics)", Argv: []string{"netdatacli", "reload-health"}}
 		if !have(env, "netdatacli") {
 			reload = Step{Why: "re-read the health configuration (no netdatacli here: restart)", Argv: []string{"systemctl", "restart", "netdata"}}
@@ -113,11 +123,11 @@ func init() {
 				"printf '%s' \"$a\" | grep -qE '\"name\": *\"used_swap\"' && echo 'used_swap: STILL LOADED' && exit 1; echo 'used_swap: off'"}},
 		), nil
 	}
-	const alarmsHow = "`hs conf install` writes templates/netdata/health.d/swap.conf and hs-pressure.conf to " + box.NetdataHealthDir + " (previous files kept). A file there with a stock file's name takes its place, so swap.conf retires the stock used_swap (swap fill level — parked pages, not pressure) and defines hs_swap_io on mem.swapio: swap traffic in+out averaged over 3 minutes, warning at 1 MiB/s, critical at 8 MiB/s (parked swap moves nothing). hs-pressure.conf reads the kernel's pressure stall information: hs_ram_pressure = share of the last minute in which some task waited for memory (warn 20 %, critical 50 %), hs_ram_stall = share in which every task did (warn 5 %, critical 20 % — the box thrashing), hs_cpu_pressure = share of the last five minutes in which runnable tasks waited for a CPU (warn 30 %, critical 70 %). Each has hysteresis so it does not flap. Stock ram_available (MemAvailable under 10 %) and oom_kill stay as they are — they measure the right thing. `netdatacli reload-health` makes Netdata re-read health files without a restart; the last step lists the hs_ alarms it loaded (PSI ones need a kernel with /proc/pressure) and confirms used_swap is gone. EngineLink shows these names in its alarm list."
+	const alarmsHow = "`hs conf install` writes templates/netdata/health.d/swap.conf and hs-pressure.conf to " + box.NetdataHealthDir + " (previous files kept). A file there with a stock file's name takes its place, so swap.conf retires the stock used_swap (swap fill level — parked pages, not pressure) and defines hs_swap_io on mem.swapio: swap traffic in+out averaged over 3 minutes, warning at 1 MiB/s, critical at 8 MiB/s (parked swap moves nothing). hs-pressure.conf reads the kernel's pressure stall information: hs_ram_pressure = share of the last minute in which some task waited for memory (warn 20 %, critical 50 %), hs_ram_stall = share in which every task did (warn 5 %, critical 20 % — the box thrashing), hs_cpu_pressure = share of the last five minutes in which runnable tasks waited for a CPU (warn 30 %, critical 70 %). Each has hysteresis so it does not flap, and the two memory alarms notify only once raised for a minute or two (`delay: up`). templates/netdata/health_alarm_notify.conf goes to " + box.NetdataNotifyConf + ": DEFAULT_RECIPIENT_EMAIL=\"root|critical\", so Netdata mails critical alarms and their recovery and no warnings (it read the stock file only, which mails every warning); warnings stay in the API EngineLink reads. Stock ram_available (MemAvailable under 10 %) and oom_kill stay as they are — they measure the right thing. `netdatacli reload-health` makes Netdata re-read health files without a restart; the last step lists the hs_ alarms it loaded (PSI ones need a kernel with /proc/pressure) and confirms used_swap is gone. EngineLink shows these names in its alarm list."
 	register(Op{
 		ID: "netdata-install", Resolves: "netdata", Applies: summaryHas("not installed"), Title: "Install Netdata", Section: "monitoring", Risk: Change,
 		Note:    "Netdata's official kickstart installer, non-interactive, then the low-footprint profile and the hs alarms. Port 19999 stays closed to the outside — EngineLink reads Netdata through the streamer.",
-		How:     "wget fetches get.netdata.cloud/kickstart.sh; `sh kickstart.sh --non-interactive` installs Netdata's packages and starts the service. " + tuneHow + " Then the alarms: " + alarmsHow,
+		How:     "wget fetches get.netdata.cloud/kickstart.sh; `sh kickstart.sh --non-interactive --stable-channel` installs Netdata's packages and starts the service. Stable, not the installer's default nightly: the fleet's boxes update themselves daily, and the 2026-10-18 nightly's go.d retry loop reached them overnight. " + tuneHow + " Then the alarms: " + alarmsHow,
 		Undo:    "/usr/libexec/netdata/netdata-uninstaller.sh --yes (or apt purge netdata for a native package install).",
 		Recheck: []string{"netdata", "netdata.alarms"},
 		Plan: func(_ context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
@@ -134,7 +144,7 @@ func init() {
 			}
 			return append(append([]Step{
 				{Why: "the official installer", Argv: []string{"wget", "-q", "-O", "/tmp/netdata-kickstart.sh", "https://get.netdata.cloud/kickstart.sh"}},
-				{Why: "install without prompts", Argv: []string{"sh", "/tmp/netdata-kickstart.sh", "--non-interactive"}},
+				{Why: "install without prompts, from the stable channel", Argv: []string{"sh", "/tmp/netdata-kickstart.sh", "--non-interactive", "--stable-channel"}},
 				{Argv: []string{"rm", "-f", "/tmp/netdata-kickstart.sh"}},
 			}, tune...), alarms...), nil
 		},
@@ -143,7 +153,7 @@ func init() {
 		ID: "netdata-alarms", Resolves: "netdata.alarms", Title: "Netdata alarms on real pressure", Section: "monitoring", Risk: Change,
 		Note:    "Alarms when memory or CPU is actually short (PSI) or swap is moving, in place of the stock alarm on how full the swap file is. EngineLink lists them as hs_ram_pressure, hs_ram_stall, hs_swap_io, hs_cpu_pressure.",
 		How:     alarmsHow,
-		Undo:    "rm " + box.NetdataHealthDir + "/swap.conf " + box.NetdataHealthDir + "/hs-pressure.conf && netdatacli reload-health — the stock swap.conf applies again.",
+		Undo:    "rm " + box.NetdataHealthDir + "/swap.conf " + box.NetdataHealthDir + "/hs-pressure.conf " + box.NetdataNotifyConf + " && netdatacli reload-health — the stock swap.conf and mail settings apply again.",
 		Recheck: []string{"netdata.alarms"},
 		Plan: func(_ context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
 			if !have(env, "netdata") {
@@ -154,15 +164,16 @@ func init() {
 	})
 	register(Op{
 		ID: "netdata-tune", Resolves: "netdata", Applies: summaryHas("stock profile"), Title: "Netdata low-footprint profile", Section: "monitoring", Risk: Change,
-		Note:    "Halves collection frequency, turns ML off and caps memory; keeps health alarms on.",
+		Note:    "Halves collection frequency, turns ML off, caps memory and runs no go.d collector unless named; keeps health alarms on.",
 		How:     tuneHow,
-		Undo:    "cp -p the kept netdata.conf back (path printed) and restart netdata.",
+		Undo:    "cp -p the kept netdata.conf back (path printed), rm " + box.NetdataGoDConf + " (or put the kept one back), and restart netdata.",
 		Recheck: []string{"netdata"},
 		Plan: func(_ context.Context, env *check.Env, _ Target, _ Values) ([]Step, error) {
 			if !have(env, "netdata") {
 				return nil, fmt.Errorf("Netdata is not installed")
 			}
-			if box.NetdataTuned(env) && readFile(env, "/etc/netdata/netdata.conf") == readFile(env, env.RepoDir+"/templates/netdata/netdata.conf") {
+			if box.NetdataTuned(env) && readFile(env, "/etc/netdata/netdata.conf") == readFile(env, env.RepoDir+"/templates/netdata/netdata.conf") &&
+				readFile(env, box.NetdataGoDConf) == readFile(env, env.RepoDir+"/templates/netdata/go.d.conf") {
 				return nil, nil
 			}
 			return netdataTune(env)

@@ -42,6 +42,12 @@ func checkNetdata(ctx context.Context, env *Env) []Result {
 			Because("Stock Netdata's memory footprint triggered the web1 OOM on 2026-07-06.").
 			Fixed("hs op netdata-tune"))
 	}
+	if !sameAsRepo(env, "templates/netdata/go.d.conf", NetdataGoDConf) {
+		rs = append(rs, New(Warn, "go.d runs on the stock profile: a collector for every service it detects").
+			Ev(NetdataGoDConf+" not installed or differs from the repo").
+			Because("Its service discovery points collectors at Apache, nginx and PHP-FPM status pages Hestia does not serve; the 2.12 nightly retried them about 300 times a second (viona, 2026-10-18: conntrack near full, memory pressure, 4.3 GB of Apache errors a day). EngineLink and the hs alarms need none of go.d.").
+			Fixed("hs op netdata-tune"))
+	}
 	// :19999 should only ever answer on localhost — EngineLink reaches it
 	// through the streamer's token-gated /netdata proxy.
 	if out, err := s.Run(ctx, "iptables", "-S", "INPUT"); err == nil {
@@ -70,6 +76,27 @@ func checkNetdata(ctx context.Context, env *Env) []Result {
 // NetdataHealthDir is where Netdata reads the operator's health files; a
 // file there with a stock file's name takes the stock file's place.
 const NetdataHealthDir = "/etc/netdata/health.d"
+
+// The operator's go.d.conf (which collectors run) and health_alarm_notify.conf
+// (read after the stock one: who gets mail, and for what).
+const (
+	NetdataGoDConf    = "/etc/netdata/go.d.conf"
+	NetdataNotifyConf = "/etc/netdata/health_alarm_notify.conf"
+)
+
+// sameAsRepo: the box's file is the repo's template. A missing template
+// (no checkout) counts as the same, so no finding rests on it.
+func sameAsRepo(env *Env, rel, path string) bool {
+	if env.RepoDir == "" {
+		return true
+	}
+	src := env.RepoDir + "/" + rel
+	if _, err := env.Sys.ReadFile(src); err != nil {
+		return true
+	}
+	same, ok := sameFile(env.Sys, src, path)
+	return ok && same
+}
 
 // HSAlarmFiles are the health files hs installs from templates/netdata/health.d/:
 // swap.conf replaces the stock one (its used_swap fired on how full swap is —
@@ -118,11 +145,21 @@ func checkNetdataAlarms(ctx context.Context, env *Env) []Result {
 			missing = append(missing, f)
 		}
 	}
+	var mail []Result
+	if !sameAsRepo(env, "templates/netdata/health_alarm_notify.conf", NetdataNotifyConf) {
+		mail = append(mail, New(Warn, "every alarm is mailed, warnings included").
+			Ev(NetdataNotifyConf+" not installed or differs from the repo").
+			Because("Stock Netdata mails root (tuotanto@) on every warning and its recovery: about 28 mails a day across the fleet, nearly all warnings that cleared within minutes (2026-10-19). Warnings belong in EngineLink's alarm list, which reads them from the API either way.").
+			Fixed("hs op netdata-alarms"))
+	}
 	if len(missing) > 0 {
-		return []Result{New(Warn, "alarms fire on swap fill level, not on pressure").
+		return append([]Result{New(Warn, "alarms fire on swap fill level, not on pressure").
 			Ev("not installed or differs from the repo: " + NetdataHealthDir + "/" + strings.Join(missing, ", ")).
 			Because("Stock Netdata warns when the swap file is nearly full — pages parked during an old peak, harmless while nothing moves (kuumalahde 2026-09-30) — and says nothing when tasks actually stall on memory or the box swaps under load.").
-			Fixed("hs op netdata-alarms")}
+			Fixed("hs op netdata-alarms")}, mail...)
+	}
+	if len(mail) > 0 {
+		return mail
 	}
 	if !active(ctx, s, "netdata") {
 		return []Result{New(Configured, "alarm files installed; Netdata is not running to load them")}

@@ -505,11 +505,13 @@ func TestNetdataAlarmsInstallThenReloadWithoutRestart(t *testing.T) {
 	f.Commands["netdata"], f.Commands["netdatacli"] = true, true
 	f.Files["/repo/templates/netdata/health.d/swap.conf"] = "alarm: hs_swap_io\n"
 	f.Files["/repo/templates/netdata/health.d/hs-pressure.conf"] = "alarm: hs_ram_pressure\n"
+	f.Files["/repo/templates/netdata/health_alarm_notify.conf"] = "DEFAULT_RECIPIENT_EMAIL=\"root|critical\"\n"
 	p := text(planOf(t, "netdata-alarms", f, nil))
 	for _, want := range []string{
 		"install -d -m 755 /etc/netdata/health.d",
 		"conf install /repo/templates/netdata/health.d/swap.conf /etc/netdata/health.d/swap.conf",
 		"conf install /repo/templates/netdata/health.d/hs-pressure.conf /etc/netdata/health.d/hs-pressure.conf",
+		"conf install /repo/templates/netdata/health_alarm_notify.conf /etc/netdata/health_alarm_notify.conf",
 		"netdatacli reload-health", "used_swap",
 	} {
 		if !strings.Contains(p, want) {
@@ -522,6 +524,31 @@ func TestNetdataAlarmsInstallThenReloadWithoutRestart(t *testing.T) {
 	delete(f.Commands, "netdatacli")
 	if p := text(planOf(t, "netdata-alarms", f, nil)); !strings.Contains(p, "systemctl restart netdata") {
 		t.Errorf("without netdatacli a restart is the way:\n%s", p)
+	}
+}
+
+// The profile carries go.d.conf (no service discovery) beside netdata.conf,
+// and is not "done" while go.d.conf differs.
+func TestNetdataTuneInstallsGoDConf(t *testing.T) {
+	f := box8G()
+	f.Commands["netdata"] = true
+	prof := "# hestiascripts-tuned\n"
+	f.Files["/repo/templates/netdata/netdata.conf"] = prof
+	f.Files["/repo/templates/netdata/go.d.conf"] = "default_run: no\n"
+	f.Files["/etc/netdata/netdata.conf"] = prof
+	p := text(planOf(t, "netdata-tune", f, nil))
+	for _, want := range []string{
+		"conf install /repo/templates/netdata/netdata.conf /etc/netdata/netdata.conf",
+		"conf install /repo/templates/netdata/go.d.conf /etc/netdata/go.d.conf",
+		"systemctl restart netdata",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %q in\n%s", want, p)
+		}
+	}
+	f.Files["/etc/netdata/go.d.conf"] = "default_run: no\n"
+	if p := text(planOf(t, "netdata-tune", f, nil)); strings.Contains(p, "conf install") {
+		t.Errorf("both files match the repo, nothing to do:\n%s", p)
 	}
 }
 

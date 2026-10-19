@@ -316,6 +316,27 @@ func TestFPMCeilingNamesTheTemplateAndReadsPSI(t *testing.T) {
 	}
 }
 
+func TestNetdataGoDConfFromRepo(t *testing.T) {
+	f := &sys.Fake{
+		Commands: map[string]bool{"netdata": true},
+		Files: map[string]string{
+			"/etc/netdata/netdata.conf":         "# hestiascripts-tuned\n",
+			"/repo/templates/netdata/go.d.conf": "default_run: no\n",
+		},
+		Cmds: map[string]sys.FakeCmd{"systemctl is-active --quiet netdata": {}},
+		HTTP: map[string]sys.FakeHTTP{"http://127.0.0.1:19999/api/v1/alarms": {Status: 200, Body: "{}"}},
+	}
+	e := env(f)
+	e.RepoDir = "/repo"
+	if rs := checkNetdata(context.Background(), e); states(rs) != "warn" || !strings.Contains(rs[0].Summary, "stock profile") || !strings.Contains(rs[0].Fix, "netdata-tune") {
+		t.Errorf("stock go.d discovery: %+v", rs)
+	}
+	f.Files["/etc/netdata/go.d.conf"] = "default_run: no\n"
+	if rs := checkNetdata(context.Background(), e); states(rs) != "ok" {
+		t.Errorf("go.d.conf from the repo: %+v", rs)
+	}
+}
+
 func TestNetdataAlarmsGreenOnlyWhenLoaded(t *testing.T) {
 	tpl := "alarm: hs_swap_io\n"
 	mk := func(installed bool, alarms string) *sys.Fake {
@@ -344,6 +365,17 @@ func TestNetdataAlarmsGreenOnlyWhenLoaded(t *testing.T) {
 	}
 	if rs := checkNetdataAlarms(context.Background(), withRepo(mk(true, all))); states(rs) != "ok" {
 		t.Errorf("installed and loaded: %+v", rs)
+	}
+	// The mail settings: a template in the repo the box does not have is its
+	// own warning, beside an otherwise green alarm set.
+	mailed := mk(true, all)
+	mailed.Files["/repo/templates/netdata/health_alarm_notify.conf"] = "DEFAULT_RECIPIENT_EMAIL=\"root|critical\"\n"
+	if rs := checkNetdataAlarms(context.Background(), withRepo(mailed)); states(rs) != "warn" || !strings.Contains(rs[0].Summary, "mailed") {
+		t.Errorf("stock mail settings: %+v", rs)
+	}
+	mailed.Files["/etc/netdata/health_alarm_notify.conf"] = mailed.Files["/repo/templates/netdata/health_alarm_notify.conf"]
+	if rs := checkNetdataAlarms(context.Background(), withRepo(mailed)); states(rs) != "ok" {
+		t.Errorf("mail settings installed: %+v", rs)
 	}
 	stale := strings.Replace(all, `"mem.available.ram_available"`, `"mem.swap.used_swap":{"name":"used_swap"},"mem.available.ram_available"`, 1)
 	if rs := checkNetdataAlarms(context.Background(), withRepo(mk(true, stale))); states(rs) != "warn" || !strings.Contains(rs[0].Summary, "used_swap") {
