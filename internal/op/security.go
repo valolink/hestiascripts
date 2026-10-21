@@ -290,7 +290,9 @@ func init() {
 				Step{Why: "origins now", Argv: []string{"sh", "-c", `grep -hn 'origin=' ` + uuFile + ` /etc/apt/apt.conf.d/5[1-9]*unattended* 2>/dev/null; exit 0`}},
 				Step{Why: "the timers that run it", Argv: []string{"systemctl", "enable", "--now", "apt-daily.timer", "apt-daily-upgrade.timer"}},
 				Step{Argv: []string{"systemctl", "list-timers", "--no-pager", "apt-daily*"}},
-				Step{Why: "what the next run will install (dry run, changes nothing)", Argv: []string{"sh", "-c", "unattended-upgrade --dry-run -v 2>&1 | grep -E '^(Allowed origins|Initial blacklist|Packages that will be upgraded|No packages found)'; exit 0"}},
+				// Enabling the timers can start apt-daily.service at once
+				// (hzdemolink 2026-10-21); its apt lock made the dry run print nothing.
+				Step{Why: "what the next run will install (dry run, changes nothing)", Argv: []string{"sh", "-c", "for i in $(seq 60); do systemctl is-active --quiet apt-daily.service || break; sleep 2; done; unattended-upgrade --dry-run -v 2>&1 | grep -E '^(Allowed origins|Initial blacklist|Packages that will be upgraded|No packages found)|[Ll]ock|ERROR'; exit 0"}},
 			), nil
 		},
 	})
