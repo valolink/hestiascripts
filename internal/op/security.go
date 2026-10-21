@@ -231,7 +231,7 @@ func init() {
 		How: "apt installs unattended-upgrades and apt-listchanges if missing. `hs conf install` writes /etc/apt/apt.conf.d/20auto-upgrades from templates/apt/ (the two lines `dpkg-reconfigure -plow unattended-upgrades` would write — no dialog). The scope is the Debian origin line in 50unattended-upgrades: security-only comments it out with `//`, all uncomments it (sed). " +
 			"PHP from Sury: " + box.SuryUUFile + " adds the origin deb.sury.org and holds back apache2* and the two Apache modules Sury builds (same origin; Debian's libapache2-mod-fcgid is not touched) — within a PHP version Sury ships upstream's patch releases, and 8.3 now gets security fixes only; a new PHP version is a separate package and never arrives this way. " +
 			"nginx from nginx.org: " + box.NginxUUFile + " adds the origin nginx (label nginx); the package tests the config and then swaps the binary in place (USR2), so no connection drops, and a failed test leaves the old binary running (check updates.nginx-binary). " +
-			box.KeepConfigFile + " sets dpkg's --force-confdef --force-confold: unattended-upgrades otherwise skips any package that ships a new version of a config file changed here (web1: every php8.3-* package, because of php-fpm.conf), and dpkg keeps the local file — for manual apt runs too. " +
+			box.KeepConfigFile + " sets dpkg's --force-confdef --force-confold: unattended-upgrades otherwise skips any package that ships a new version of a config file changed here (web1: every php8.3-* package, because of php-fpm.conf), and dpkg keeps the local file — for manual apt runs too. The same file sets MinimalSteps \"false\": one dpkg run, so php-fpm restarts once or twice instead of once per extension. " +
 			"Two systemd drop-ins move apt-daily-upgrade.timer to 01:00 UTC (+ up to 30 min) and refresh the package lists just before the upgrade, so a fix published in the evening is installed that night. The last step is unattended-upgrade's own --dry-run: what the next run will install.",
 		Undo: "systemctl disable --now apt-daily-upgrade.timer, or set both lines in 20auto-upgrades to \"0\". PHP from Sury / nginx: run again with php=debian / nginx=manual (the file is moved to " + swapMovedDir + "/<date>/). Night time: rm -r /etc/systemd/system/apt-daily-upgrade.{timer,service}.d/hs-*.conf && systemctl daemon-reload.",
 		Fields: []Field{{Key: "scope", Label: "Apply", Kind: Choice,
@@ -318,7 +318,8 @@ func init() {
 				Step{Argv: []string{"systemctl", "list-timers", "--no-pager", "apt-daily*"}},
 				// Enabling the timers can start apt-daily.service at once
 				// (hzdemolink 2026-10-21); its apt lock made the dry run print nothing.
-				Step{Why: "what the next run will install (dry run, changes nothing)", Argv: []string{"sh", "-c", "for i in $(seq 60); do systemctl is-active --quiet apt-daily.service || break; sleep 2; done; unattended-upgrade --dry-run -v 2>&1 | grep -E '^(Allowed origins|Initial blacklist|Packages that will be upgraded|No packages found)|[Ll]ock|ERROR'; exit 0"}},
+				// alavus: it was still "activating" when first asked.
+				Step{Why: "what the next run will install (dry run, changes nothing)", Argv: []string{"sh", "-c", "sleep 2; for i in $(seq 60); do case $(systemctl is-active apt-daily.service) in active|activating|deactivating) sleep 2 ;; *) break ;; esac; done; unattended-upgrade --dry-run -v 2>&1 | grep -E '^(Allowed origins|Initial blacklist|Packages that will be upgraded|No packages found)|[Ll]ock|ERROR'; exit 0"}},
 			), nil
 		},
 	})

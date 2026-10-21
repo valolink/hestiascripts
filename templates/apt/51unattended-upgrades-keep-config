@@ -12,3 +12,10 @@ Dpkg::Options {
         "--force-confdef";
         "--force-confold";
 };
+
+// One dpkg run instead of many small ones. With the default (MinimalSteps
+// "true") alavus's PHP round on 2026-10-21 restarted php8.3-fpm six times in
+// 51 s — every extension (igbinary, redis, apcu, imagick) was its own step —
+// and the live site answered 503 to 8 of 59 requests. Minimal steps only exist
+// so a shutdown can interrupt the run; the run is at 01:00 UTC.
+Unattended-Upgrade::MinimalSteps "false";
