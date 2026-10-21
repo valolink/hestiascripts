@@ -9,6 +9,13 @@
 //     200 over IPv6). HS_IN6 mirrors the public part of Hestia's rules:
 //     ports Hestia opens to 0.0.0.0/0 stay open on IPv6, everything it limits
 //     to addresses is closed unless an admin IPv6 range is configured.
+//   - The Hestia panel. With PANEL_GATE=on its port answers only addresses
+//     in the hs-panel/hs-panel6 ipsets, which EngineLink fills through the
+//     streamer (`hs panel allow`, v-server-panel-allow) for PANEL_TTL seconds
+//     at a time: an "Open panel" button, so the panel needs no fixed admin
+//     address and is closed to the internet. Hestia's own rule (8083 open to
+//     0.0.0.0/0) stays; HS_PANEL runs before it. The sets live in memory, so
+//     after a reboot the panel is closed until the button is used again.
 //   - Outbound. Known command-and-control hosts are always dropped; the
 //     optional port filter (hardening plan §4) logs, then rejects, traffic to
 //     ports outside a short allowlist — every connection the May 2026
@@ -23,6 +30,7 @@ package fwgen
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/valolink/hestiascripts/internal/hestia"
@@ -46,7 +54,23 @@ type Config struct {
 	Egress      string   // "off" | "log" | "drop"
 	EgressExtra []string // extra allowed outbound TCP ports
 	BlockHosts  []string // always dropped outbound (and inbound)
+	PanelGate   string   // "on" | "off"
+	PanelTTL    int      // seconds an allowed address stays allowed
 }
+
+// The panel gate's ipsets and defaults. phpMyAdmin is served on every site's
+// own ports (Apache's /phpmyadmin alias), so a port rule cannot close it:
+// `hs panel sync` writes the same addresses into PMAGateConf as Require ip.
+const (
+	PMAGateConf = "/etc/apache2/conf.d/hs-phpmyadmin-gate.conf"
+	PMADir      = "/usr/share/phpmyadmin"
+	SyncUnit    = "/etc/systemd/system/hs-panel-sync.service"
+	SyncTimer   = "/etc/systemd/system/hs-panel-sync.timer"
+	PanelSet4   = "hs-panel"
+	PanelSet6   = "hs-panel6"
+	PanelTTL    = 8 * 3600
+	PanelPortD  = "8083"
+)
 
 // Default outbound allowlist: DNS, NTP, HTTP(S), mail submission to the
 // relay, the Storage Box (23), SSH/git (22).
@@ -56,7 +80,7 @@ var (
 )
 
 func ParseConfig(text string) Config {
-	c := Config{IPv6Input: "off", Egress: "off"}
+	c := Config{IPv6Input: "off", Egress: "off", PanelGate: "off", PanelTTL: PanelTTL}
 	for _, line := range strings.Split(text, "\n") {
 		// KEY='v' or KEY="v" (hs conf set writes double quotes), one per line.
 		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
@@ -78,6 +102,12 @@ func ParseConfig(text string) Config {
 				c.EgressExtra = strings.Fields(strings.ReplaceAll(v, ",", " "))
 			case "BLOCK_HOSTS":
 				c.BlockHosts = strings.Fields(v)
+			case "PANEL_GATE":
+				c.PanelGate = v
+			case "PANEL_TTL":
+				if n, err := strconv.Atoi(v); err == nil && n >= 60 {
+					c.PanelTTL = n
+				}
 			}
 		}
 	}
@@ -135,8 +165,12 @@ func PublicPorts(rules []Rule) map[string][]string {
 
 func isV6(ip string) bool { return strings.Contains(ip, ":") }
 
-// Script renders /etc/hs/firewall.sh.
-func Script(c Config, rules []Rule) string {
+// Script renders /etc/hs/firewall.sh. panelPort is Hestia's BACKEND_PORT
+// ("" = 8083).
+func Script(c Config, rules []Rule, panelPort string) string {
+	if panelPort == "" {
+		panelPort = PanelPortD
+	}
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format+"\n", a...) }
 	w("#!/bin/sh")
@@ -189,6 +223,34 @@ func Script(c Config, rules []Rule) string {
 		w("fi")
 	} else {
 		w("[ -n \"$HAVE6\" ] && unchain ip6tables HS_IN6 INPUT")
+	}
+	w("")
+
+	// --- the panel gate: after HS_IN6 so it lands before it in INPUT; before
+	// HS_BLOCK so the block list stays first.
+	w("# --- Hestia panel (:%s): %s", panelPort, c.PanelGate)
+	if c.PanelGate == "on" {
+		w("# Only addresses in the timed ipsets (hs panel allow, from EngineLink's Open panel); the box itself via lo.")
+		w("# ipset -exist create never empties a set that is there, so re-running this keeps who is allowed.")
+		for _, fam := range []struct{ tool, set, family, chain, ind string }{
+			{"iptables", PanelSet4, "inet", "HS_PANEL", ""},
+			{"ip6tables", PanelSet6, "inet6", "HS_PANEL6", "  "},
+		} {
+			if fam.ind != "" {
+				w("if [ -n \"$HAVE6\" ]; then")
+			}
+			w("%sipset -exist create %s hash:ip family %s timeout %d", fam.ind, fam.set, fam.family, c.PanelTTL)
+			w("%schain %s %s INPUT", fam.ind, fam.tool, fam.chain)
+			w("%s%s -w -A %s -i lo -j RETURN", fam.ind, fam.tool, fam.chain)
+			w("%s%s -w -A %s -p tcp --dport %s -m set --match-set %s src -j RETURN", fam.ind, fam.tool, fam.chain, panelPort, fam.set)
+			w("%s%s -w -A %s -p tcp --dport %s -j DROP", fam.ind, fam.tool, fam.chain, panelPort)
+			if fam.ind != "" {
+				w("fi")
+			}
+		}
+	} else {
+		w("unchain iptables HS_PANEL INPUT")
+		w("[ -n \"$HAVE6\" ] && unchain ip6tables HS_PANEL6 INPUT")
 	}
 	w("")
 
@@ -289,5 +351,38 @@ ExecStart=` + ScriptPath + `
 
 [Install]
 WantedBy=multi-user.target
+`
+}
+
+// PMAGate renders PMAGateConf for the allowed addresses (none: denied to all).
+func PMAGate(ips []string) string {
+	req := "Require all denied"
+	if len(ips) > 0 {
+		req = "Require ip " + strings.Join(ips, " ")
+	}
+	return "# hs panel sync: phpMyAdmin only from the addresses EngineLink's Open panel allowed\n" +
+		"# (the hs-panel/hs-panel6 ipsets). Generated every 5 minutes and on every allow; do not edit.\n" +
+		"<Directory " + PMADir + ">\n\t" + req + "\n</Directory>\n"
+}
+
+// SyncUnits: the service and timer that keep PMAGateConf in step with the
+// ipsets as entries expire, and empty it after a reboot (the sets are gone).
+func SyncUnits() (service, timer string) {
+	return `[Unit]
+Description=hs panel gate: phpMyAdmin allow list from the panel ipsets
+After=hs-firewall.service apache2.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hs panel sync
+`, `[Unit]
+Description=hs panel gate: keep phpMyAdmin's allow list in step with expiring entries
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
 `
 }

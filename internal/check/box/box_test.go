@@ -546,3 +546,23 @@ func TestNginxBinary(t *testing.T) {
 		t.Errorf("replaced binary still running: %+v", rs)
 	}
 }
+
+func TestPanelExposureWithGate(t *testing.T) {
+	rules := "RULE='2' ACTION='ACCEPT' PROTOCOL='TCP' PORT='8083' IP='0.0.0.0/0' COMMENT='HESTIA' SUSPENDED='no'\n"
+	f := &sys.Fake{Files: map[string]string{
+		"/usr/local/hestia/data/firewall/rules.conf": rules,
+		"/usr/local/hestia/conf/hestia.conf":         "BACKEND_PORT='8083'\n",
+	}}
+	if rs := checkPanelExposure(context.Background(), env(f)); rs[0].State != Warn || !strings.Contains(rs[0].Fix, "panel-gate") {
+		t.Fatalf("no gate: %+v", rs)
+	}
+	f.Files["/etc/hs/firewall.conf"] = "PANEL_GATE=\"on\"\n"
+	if rs := checkPanelExposure(context.Background(), env(f)); rs[0].State != Warn {
+		t.Errorf("configured but not live is still open: %+v", rs)
+	}
+	f.Cmds["iptables -w -S INPUT"] = sys.FakeCmd{Out: "-P INPUT DROP\n-A INPUT -j HS_PANEL\n"}
+	f.Cmds["iptables -w -S HS_PANEL"] = sys.FakeCmd{Out: "-N HS_PANEL\n-A HS_PANEL -p tcp -m tcp --dport 8083 -j DROP\n"}
+	if rs := checkPanelExposure(context.Background(), env(f)); rs[0].State != OK {
+		t.Errorf("gate live (no ip6tables): %+v", rs)
+	}
+}

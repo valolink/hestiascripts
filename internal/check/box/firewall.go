@@ -13,6 +13,7 @@ import (
 
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/fwgen"
+	"github.com/valolink/hestiascripts/internal/hestia"
 )
 
 func firewallChecks() []Check {
@@ -90,18 +91,44 @@ func checkIPv6(ctx context.Context, env *Env) []Result {
 		Fixed("hs op firewall-ipv6")}
 }
 
+// PanelGateLive: the gate's chains are in force for IPv4 (and IPv6 when the
+// box has ip6tables) — what the kernel holds, not what the config says.
+func PanelGateLive(ctx context.Context, env *Env, port string) bool {
+	in, _ := env.Sys.Run(ctx, "iptables", "-w", "-S", "INPUT")
+	ch, _ := env.Sys.Run(ctx, "iptables", "-w", "-S", "HS_PANEL")
+	if !strings.Contains(in, "-j HS_PANEL") || !strings.Contains(ch, "--dport "+port+" -j DROP") {
+		return false
+	}
+	if !env.Sys.Have("ip6tables") {
+		return true
+	}
+	in6, _ := env.Sys.Run(ctx, "ip6tables", "-w", "-S", "INPUT")
+	ch6, _ := env.Sys.Run(ctx, "ip6tables", "-w", "-S", "HS_PANEL6")
+	return strings.Contains(in6, "-j HS_PANEL6") && strings.Contains(ch6, "--dport "+port+" -j DROP")
+}
+
 func checkPanelExposure(ctx context.Context, env *Env) []Result {
 	var rs []Result
+	port := hestia.Conf(env.Sys)["BACKEND_PORT"]
+	if port == "" {
+		port = fwgen.PanelPortD
+	}
+	gate := fwgen.ParseConfig(readString(env.Sys, fwgen.ConfPath)).PanelGate == "on" && PanelGateLive(ctx, env, port)
 	for _, r := range rulesConf(env) {
 		if !r.Public() {
 			continue
 		}
 		for _, p := range strings.Split(r.Port, ",") {
 			switch strings.TrimSpace(p) {
-			case "8083":
-				rs = append(rs, New(Warn, "panel (:8083) open to every address").For("panel").Ev(fmt.Sprintf("rule %s %s", r.ID, r.Comment)).
+			case port:
+				if gate {
+					rs = append(rs, New(OK, "panel (:"+port+") only from EngineLink's Open panel").For("panel").
+						Ev("Hestia's rule "+r.ID+" opens it; HS_PANEL/HS_PANEL6 drop every address not in "+fwgen.PanelSet4+"/"+fwgen.PanelSet6))
+					continue
+				}
+				rs = append(rs, New(Warn, "panel (:"+port+") open to every address").For("panel").Ev(fmt.Sprintf("rule %s %s", r.ID, r.Comment)).
 					Because("The next panel bug is the web-terminal story again: an unauthenticated flaw reachable by the whole internet.").
-					Fixed("hs op panel-restrict"))
+					Fixed("hs op panel-gate state=on"))
 			case "22":
 				rs = append(rs, New(Warn, "SSH open to every address").For("ssh").Ev(fmt.Sprintf("rule %s %s", r.ID, r.Comment)).
 					Because("Continuous brute force in every auth log; one weak key or password away from root.").

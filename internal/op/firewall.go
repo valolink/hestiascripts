@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/valolink/hestiascripts/internal/check"
@@ -189,6 +190,36 @@ func init() {
 			if fwConf(env).IPv6Input == "mirror" {
 				steps = append(steps, fwApply())
 			}
+			return steps, nil
+		},
+	})
+
+	register(Op{
+		ID: "panel-gate", Title: "Panel and phpMyAdmin only via EngineLink", Section: "security", Risk: Change,
+		Resolves: "panel.exposure",
+		Note:     "Closes the Hestia panel port and phpMyAdmin to every address except those EngineLink's Open panel button allowed in the last hours. SSH is not touched. After a reboot both stay closed until the button is used. Break-glass without EngineLink: SSH in and run `hs panel allow YOUR.IP`.",
+		How:      "Sets PANEL_GATE and PANEL_TTL in " + fwgen.ConfPath + "; `hs firewall apply` adds HS_PANEL (IPv4) and HS_PANEL6 (IPv6) at the top of INPUT: the panel port is dropped unless the source is in the " + fwgen.PanelSet4 + "/" + fwgen.PanelSet6 + " ipset (entries expire after PANEL_TTL). Hestia's own rule stays as it is. EngineLink fills the sets through the streamer (v-server-panel-allow → `hs panel allow`). phpMyAdmin is served on every site's ports, so " + fwgen.PMAGateConf + " gives Apache the same addresses as `Require ip` (`Require all denied` when none), rewritten on each allow and every 5 minutes by hs-panel-sync.timer, with a graceful reload only when it changed.",
+		Undo:     "hs op panel-gate state=off (chains, timer and the phpMyAdmin file are removed).",
+		Fields: []Field{
+			{Key: "state", Label: "Gate", Kind: Choice,
+				Current: func(_ context.Context, env *check.Env, _ Target) string { return fwConf(env).PanelGate },
+				Choices: func(context.Context, *check.Env, Target) [][2]string {
+					return [][2]string{{"on", "only addresses EngineLink allowed"}, {"off", "panel and phpMyAdmin open to all"}}
+				}},
+			{Key: "hours", Label: "Allowed for (hours)", Kind: Number, Min: 1, Max: 72,
+				Help: "How long one press of Open panel lets an address in; pressing again resets it.",
+				Default: func(_ context.Context, env *check.Env, _ Target) string {
+					return strconv.Itoa(fwConf(env).PanelTTL / 3600)
+				}},
+		},
+		Recheck: []string{"panel.exposure"},
+		Plan: func(_ context.Context, env *check.Env, _ Target, v Values) ([]Step, error) {
+			if v["state"] == "on" && !env.Sys.Have("ipset") {
+				return nil, fmt.Errorf("ipset is not installed (apt-get install ipset) — the gate needs it")
+			}
+			h, _ := strconv.Atoi(v["hours"])
+			steps := fwSet("panel gate "+v["state"], "PANEL_GATE", v["state"], "PANEL_TTL", strconv.Itoa(h*3600))
+			steps = append(steps, fwApply(), Step{Why: "who is allowed now", Argv: []string{self(), "panel", "list"}})
 			return steps, nil
 		},
 	})

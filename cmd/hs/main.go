@@ -62,6 +62,8 @@ Usage:
                            security checks, reporting (and mailing) only what is new since
                            the accepted state; last line is JSON; exit 2 new critical, 1 new warning
   hs firewall show|apply   rules Hestia does not make: IPv6 inbound, outbound filter, C2 blocks
+  hs panel allow IP | list | revoke IP
+                           the panel gate's timed allow list (EngineLink's Open panel calls allow)
   hs templates install     write and verify the web templates (needs the cache-headers drop-in)
   hs conf set|install|get  edit a config file, printing before → after, backup kept (hs conf)
   hs robots show|write DOMAIN
@@ -117,6 +119,8 @@ func main() {
 		os.Exit(cmdTemplates(env.RepoDir, os.Args[2:]))
 	case "firewall":
 		os.Exit(cmdFirewall(env.RepoDir, os.Args[2:]))
+	case "panel":
+		os.Exit(cmdPanel(ctx, os.Args[2:]))
 	case "watch":
 		os.Exit(cmdWatch(ctx, env, os.Args[2:]))
 	case "site-php":

@@ -126,6 +126,37 @@ covered, and shows the break-glass path (the provider's web console) before aski
 recommended source (100.64.0.0/10 once every admin machine is on it); fixed office or admin addresses
 work the same way. EngineLink is unaffected (it uses the streamer, :8091, which has its own rule).
 
+### 2a. The panel gate: panel and phpMyAdmin only via EngineLink — built 2026-10-21
+
+`panel-restrict` needs fixed admin addresses, and there are none: the phone, whatever wifi the
+laptop is on, a dynamic office IP. Everyone who needs the panel can log into EngineLink, so
+EngineLink opens the door. **`hs op panel-gate state=on`** (`PANEL_GATE`, `PANEL_TTL` in
+`/etc/hs/firewall.conf`) puts `HS_PANEL`/`HS_PANEL6` at the top of INPUT: the panel port
+(`BACKEND_PORT`, 8083) is dropped unless the source is in the `hs-panel`/`hs-panel6` ipset, whose
+entries expire after `PANEL_TTL` (8 h). Loopback passes, so the box's own probes still reach it.
+Hestia's rule (8083 from 0.0.0.0/0) stays as it is; the gate runs before it.
+
+EngineLink's **Open panel** (server page) reads the visitor's address (Caddy's
+`X-Forwarded-For`, last entry) and calls **`v-server-panel-allow IP`** through the streamer, which
+runs **`hs panel allow IP`**: the address goes into the set (pressing again resets its clock); a
+private or local address is refused — that would be a proxy's address, not the visitor's. The last
+stdout line is JSON with the box's FQDN and whether DNS knows it (alavus's does not; EngineLink then
+uses the server IP). `hs panel list` shows who is in, `hs panel revoke IP` cuts one off. Every
+allow/revoke goes to `/var/log/hs/panel.log`.
+
+**phpMyAdmin** is served by Apache at `/phpmyadmin` on every site's own ports, so a port rule
+cannot close it. `hs panel sync` writes the same addresses into
+`/etc/apache2/conf.d/hs-phpmyadmin-gate.conf` (`<Directory /usr/share/phpmyadmin> Require ip …`,
+`Require all denied` when none) and reloads Apache gracefully only when the list changed; a config
+Apache rejects is put back. It runs on every allow/revoke and from `hs-panel-sync.timer` (every 5
+minutes, and a minute after boot), which follows expiries. Apache sees the visitor's address because
+Hestia sets `RemoteIPHeader X-Real-IP` for nginx in front of it. Hestia only rewrites its own
+`phpmyadmin.inc`, which sets no `Require`.
+
+The sets live in memory: after a reboot the panel and phpMyAdmin are closed until the button is
+used. Break-glass without EngineLink: SSH in, `hs panel allow YOUR.IP`. `panel.exposure` reports OK
+for the panel only when the chains are in the kernel, not just configured.
+
 ### 2b. IPv6 bypasses Hestia's firewall — built (found 2026-09-25)
 
 Hestia's firewall is IPv4-only (its rules take an `IPV4_CIDR`) and leaves ip6tables at policy ACCEPT

@@ -8,7 +8,9 @@ import (
 
 	"github.com/valolink/hestiascripts/internal/conf"
 	"github.com/valolink/hestiascripts/internal/fwgen"
+	"github.com/valolink/hestiascripts/internal/hestia"
 	"github.com/valolink/hestiascripts/internal/ioc"
+	"github.com/valolink/hestiascripts/internal/sys"
 )
 
 // blockHosts: the indicator list's hosts (built in + /etc/hs/indicators.local)
@@ -31,7 +33,7 @@ func firewallScript(repo string) string {
 	rb, _ := os.ReadFile(fwgen.RulesConf)
 	c := fwgen.ParseConfig(string(cb))
 	c.BlockHosts = blockHosts(c)
-	return fwgen.Script(c, fwgen.ParseRules(string(rb)))
+	return fwgen.Script(c, fwgen.ParseRules(string(rb)), hestia.Conf(sys.Real{})["BACKEND_PORT"])
 }
 
 // cmdFirewall: `hs firewall show` prints the generated rules; `apply` writes
@@ -89,12 +91,31 @@ func cmdFirewall(repo string, args []string) int {
 		fmt.Println("✗ could not enable hs-firewall.service")
 		return 1
 	}
+	// The panel gate's phpMyAdmin sync: a timer while the gate is on.
+	cb, _ := os.ReadFile(fwgen.ConfPath)
+	gateOn := fwgen.ParseConfig(string(cb)).PanelGate == "on"
+	svc, tmr := fwgen.SyncUnits()
+	if gateOn {
+		b1, e1 := conf.Write(fwgen.SyncUnit, svc, 0o644)
+		report(fwgen.SyncUnit, b1, e1)
+		b2, e2 := conf.Write(fwgen.SyncTimer, tmr, 0o644)
+		report(fwgen.SyncTimer+" (phpMyAdmin allow list every 5 min and at boot)", b2, e2)
+		run("systemctl", "daemon-reload")
+		run("systemctl", "enable", "--quiet", "--now", "hs-panel-sync.timer")
+	} else if _, err := os.Stat(fwgen.SyncTimer); err == nil {
+		run("systemctl", "disable", "--quiet", "--now", "hs-panel-sync.timer")
+	}
 	fmt.Println("→ applying now")
 	if err := run(fwgen.ScriptPath); err != nil {
 		fmt.Println("✗ the rules did not apply:", err)
 		return 1
 	}
+	if gateOn || fileExists(fwgen.PMAGateConf) {
+		run("/usr/local/bin/hs", "panel", "sync")
+	}
 	fmt.Println("\nnow in force:")
-	run("sh", "-c", "iptables -S HS_OUT 2>/dev/null; ip6tables -S HS_IN6 2>/dev/null; ip6tables -S HS_OUT 2>/dev/null")
+	run("sh", "-c", "iptables -S HS_PANEL 2>/dev/null; iptables -S HS_OUT 2>/dev/null; ip6tables -S HS_PANEL6 2>/dev/null; ip6tables -S HS_IN6 2>/dev/null; ip6tables -S HS_OUT 2>/dev/null")
 	return 0
 }
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }

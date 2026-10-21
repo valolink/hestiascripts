@@ -605,3 +605,18 @@ func TestUnattendedAddsSuryAndRunsAtNight(t *testing.T) {
 		t.Errorf("php=debian moves the Sury file away:\n%s", got)
 	}
 }
+
+func TestPanelGatePlan(t *testing.T) {
+	f := &sys.Fake{Clock: time.Now(), Commands: map[string]bool{"ipset": true}}
+	got := text(planOf(t, "panel-gate", f, Values{"state": "on", "hours": "8"}))
+	for _, want := range []string{"PANEL_GATE on PANEL_TTL 28800", "firewall apply", "panel list"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan lacks %q:\n%s", want, got)
+		}
+	}
+	f.Commands = map[string]bool{}
+	o, _ := ByID("panel-gate")
+	if _, err := o.Plan(context.Background(), &check.Env{Sys: f, RepoDir: "/repo"}, Target{}, Values{"state": "on", "hours": "8"}); err == nil {
+		t.Error("without ipset the gate must be refused")
+	}
+}
