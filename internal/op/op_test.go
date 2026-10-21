@@ -578,14 +578,15 @@ func TestResendGuardFiles(t *testing.T) {
 
 func TestUnattendedAddsSuryAndRunsAtNight(t *testing.T) {
 	f := &sys.Fake{Clock: time.Now(), Files: map[string]string{
-		"/etc/apt/apt.conf.d/50unattended-upgrades":          "Unattended-Upgrade::Origins-Pattern {\n        \"origin=Debian,codename=${distro_codename},label=Debian-Security\";\n};\n",
-		"/etc/apt/sources.list.d/php.list":                   "deb [arch=amd64 signed-by=/usr/share/keyrings/sury-keyring.gpg] https://packages.sury.org/php/ bookworm main\n",
-		"/repo/templates/apt/20auto-upgrades":                "x",
-		"/repo/templates/apt/52unattended-upgrades-sury":     "x",
-		"/repo/templates/apt/apt-daily-upgrade-night.conf":   "x",
-		"/repo/templates/apt/apt-daily-upgrade-refresh.conf": "x",
-		"/repo/templates/apt/53unattended-upgrades-nginx":    "x",
-		"/etc/apt/sources.list.d/nginx.list":                 "deb [arch=amd64 signed-by=/usr/share/keyrings/nginx-keyring.gpg] https://nginx.org/packages/mainline/debian/ bookworm nginx\n",
+		"/etc/apt/apt.conf.d/50unattended-upgrades":             "Unattended-Upgrade::Origins-Pattern {\n        \"origin=Debian,codename=${distro_codename},label=Debian-Security\";\n};\n",
+		"/etc/apt/sources.list.d/php.list":                      "deb [arch=amd64 signed-by=/usr/share/keyrings/sury-keyring.gpg] https://packages.sury.org/php/ bookworm main\n",
+		"/repo/templates/apt/20auto-upgrades":                   "x",
+		"/repo/templates/apt/52unattended-upgrades-sury":        "x",
+		"/repo/templates/apt/apt-daily-upgrade-night.conf":      "x",
+		"/repo/templates/apt/apt-daily-upgrade-refresh.conf":    "x",
+		"/repo/templates/apt/53unattended-upgrades-nginx":       "x",
+		"/repo/templates/apt/51unattended-upgrades-keep-config": "x",
+		"/etc/apt/sources.list.d/nginx.list":                    "deb [arch=amd64 signed-by=/usr/share/keyrings/nginx-keyring.gpg] https://nginx.org/packages/mainline/debian/ bookworm nginx\n",
 	}, Cmds: map[string]sys.FakeCmd{
 		"dpkg-query -W -f=${Status} unattended-upgrades": {Out: "install ok installed"},
 	}}
