@@ -4,11 +4,15 @@
 // Sury's Apache repository has the same origin, so Apache is held back here
 // for the monthly update round: its security releases have changed behaviour
 // before (2.4.60's mod_rewrite, 2024), and nginx sits in front of it.
-// Package-Blacklist entries are prefixes (Python re.match on the name).
+// Package-Blacklist entries are regexes matched from the start of the name:
+// "apache2" covers apache2, -bin, -data, -utils, -suexec-custom. Only the two
+// modules Sury builds are named, so Debian's libapache2-mod-fcgid still gets
+// Debian's security fixes.
 Unattended-Upgrade::Origins-Pattern {
         "origin=deb.sury.org";
 };
 Unattended-Upgrade::Package-Blacklist {
         "apache2";
-        "libapache2-";
+        "libapache2-mod-md$";
+        "libapache2-mod-proxy-uwsgi$";
 };
