@@ -1,0 +1,14 @@
+// hs op unattended: keep locally changed config files on every upgrade.
+// Hestia and hs rewrite php.ini, php-fpm.conf and the like; when a package
+// ships a new version of such a file, dpkg would ask, and unattended-upgrades
+// skips the package instead ("has conffile prompt and needs to be upgraded
+// manually"). web1 2026-10-21: php8.3-fpm 8.3.30 -> 8.3.35 skipped that way,
+// so every php8.3-* package stayed behind. With --force-confold unattended-
+// upgrades does not hold such packages back (dpkg_conffile_prompt) and dpkg
+// keeps the local file; --force-confdef takes the new file where nothing was
+// changed locally. hs op updates-apply runs apt with the same options.
+// This applies to manual apt runs too: no config-file questions, local wins.
+Dpkg::Options {
+        "--force-confdef";
+        "--force-confold";
+};

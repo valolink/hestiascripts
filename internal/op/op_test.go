@@ -590,7 +590,7 @@ func TestUnattendedAddsSuryAndRunsAtNight(t *testing.T) {
 		"dpkg-query -W -f=${Status} unattended-upgrades": {Out: "install ok installed"},
 	}}
 	got := text(planOf(t, "unattended", f, Values{"scope": "security"}))
-	for _, want := range []string{"/etc/apt/apt.conf.d/52unattended-upgrades-sury", "/etc/apt/apt.conf.d/53unattended-upgrades-nginx", "apt-daily-upgrade.timer.d/hs-night.conf", "apt-daily-upgrade.service.d/hs-refresh.conf", "daemon-reload", "unattended-upgrade --dry-run"} {
+	for _, want := range []string{"/etc/apt/apt.conf.d/51unattended-upgrades-keep-config", "/etc/apt/apt.conf.d/52unattended-upgrades-sury", "/etc/apt/apt.conf.d/53unattended-upgrades-nginx", "apt-daily-upgrade.timer.d/hs-night.conf", "apt-daily-upgrade.service.d/hs-refresh.conf", "daemon-reload", "unattended-upgrade --dry-run"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plan lacks %q:\n%s", want, got)
 		}

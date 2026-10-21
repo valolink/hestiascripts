@@ -369,6 +369,10 @@ func SuryUnattended(env *Env) bool {
 	return uuAllows(env, `(origin|o)=deb\.sury\.org[",]`)
 }
 
+// KeepConfigFile: dpkg keeps locally changed config files, so unattended-
+// upgrades does not skip packages that ship a new version of one.
+const KeepConfigFile = "/etc/apt/apt.conf.d/51unattended-upgrades-keep-config"
+
 // NginxUUFile is where hs op unattended adds nginx.org's origin.
 const NginxUUFile = "/etc/apt/apt.conf.d/53unattended-upgrades-nginx"
 

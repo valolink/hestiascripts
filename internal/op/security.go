@@ -231,6 +231,7 @@ func init() {
 		How: "apt installs unattended-upgrades and apt-listchanges if missing. `hs conf install` writes /etc/apt/apt.conf.d/20auto-upgrades from templates/apt/ (the two lines `dpkg-reconfigure -plow unattended-upgrades` would write — no dialog). The scope is the Debian origin line in 50unattended-upgrades: security-only comments it out with `//`, all uncomments it (sed). " +
 			"PHP from Sury: " + box.SuryUUFile + " adds the origin deb.sury.org and holds back apache2* and the two Apache modules Sury builds (same origin; Debian's libapache2-mod-fcgid is not touched) — within a PHP version Sury ships upstream's patch releases, and 8.3 now gets security fixes only; a new PHP version is a separate package and never arrives this way. " +
 			"nginx from nginx.org: " + box.NginxUUFile + " adds the origin nginx (label nginx); the package tests the config and then swaps the binary in place (USR2), so no connection drops, and a failed test leaves the old binary running (check updates.nginx-binary). " +
+			box.KeepConfigFile + " sets dpkg's --force-confdef --force-confold: unattended-upgrades otherwise skips any package that ships a new version of a config file changed here (web1: every php8.3-* package, because of php-fpm.conf), and dpkg keeps the local file — for manual apt runs too. " +
 			"Two systemd drop-ins move apt-daily-upgrade.timer to 01:00 UTC (+ up to 30 min) and refresh the package lists just before the upgrade, so a fix published in the evening is installed that night. The last step is unattended-upgrade's own --dry-run: what the next run will install.",
 		Undo: "systemctl disable --now apt-daily-upgrade.timer, or set both lines in 20auto-upgrades to \"0\". PHP from Sury / nginx: run again with php=debian / nginx=manual (the file is moved to " + swapMovedDir + "/<date>/). Night time: rm -r /etc/systemd/system/apt-daily-upgrade.{timer,service}.d/hs-*.conf && systemctl daemon-reload.",
 		Fields: []Field{{Key: "scope", Label: "Apply", Kind: Choice,
@@ -268,8 +269,8 @@ func init() {
 			}}},
 		Recheck: []string{"updates.unattended"},
 		Plan: func(ctx context.Context, env *check.Env, _ Target, v Values) ([]Step, error) {
-			var tpl [5]string
-			for i, f := range []string{"20auto-upgrades", "52unattended-upgrades-sury", "apt-daily-upgrade-night.conf", "apt-daily-upgrade-refresh.conf", "53unattended-upgrades-nginx"} {
+			var tpl [6]string
+			for i, f := range []string{"20auto-upgrades", "52unattended-upgrades-sury", "apt-daily-upgrade-night.conf", "apt-daily-upgrade-refresh.conf", "53unattended-upgrades-nginx", "51unattended-upgrades-keep-config"} {
 				p, err := repoFile(env, "templates/apt/"+f)
 				if err != nil {
 					return nil, err
@@ -280,7 +281,8 @@ func init() {
 			if !box.PkgInstalled(ctx, env.Sys, "unattended-upgrades") {
 				steps = append(steps, aptUpdate(), aptInstall("the package", "unattended-upgrades", "apt-listchanges"))
 			}
-			steps = append(steps, confInstall("run daily", tpl[0], "/etc/apt/apt.conf.d/20auto-upgrades"))
+			steps = append(steps, confInstall("run daily", tpl[0], "/etc/apt/apt.conf.d/20auto-upgrades"),
+				confInstall("keep locally changed config files (else a package with one is skipped)", tpl[5], box.KeepConfigFile))
 			switch cur := box.UnattendedScope(ctx, env); {
 			case v["scope"] == "security" && cur == "security-only", v["scope"] == "all" && cur == "all":
 				// scope already right
