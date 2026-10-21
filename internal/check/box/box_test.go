@@ -483,3 +483,31 @@ func TestResendGuard(t *testing.T) {
 		t.Errorf("guarded: %+v", rs)
 	}
 }
+
+// 2026-10-21: PHP from Sury sat on 8.3.30/8.3.31 under a security-only
+// unattended-upgrades that never looks at Sury's origin.
+func TestUnattendedSuryPHP(t *testing.T) {
+	f := &sys.Fake{Files: map[string]string{
+		"/etc/apt/apt.conf.d/50unattended-upgrades":            "Unattended-Upgrade::Origins-Pattern {\n        \"origin=Debian,codename=${distro_codename},label=Debian-Security\";\n};\n",
+		"/etc/apt/apt.conf.d/20auto-upgrades":                  "APT::Periodic::Update-Package-Lists \"1\";\nAPT::Periodic::Unattended-Upgrade \"1\";\n",
+		"/var/log/unattended-upgrades/unattended-upgrades.log": "2026-09-24 06:27:24,000 INFO No packages found that can be upgraded unattended and no pending auto-removals\n",
+	}, Cmds: map[string]sys.FakeCmd{
+		"dpkg-query -W -f=${Status} unattended-upgrades": {Out: "install ok installed"},
+	}}
+	if rs := checkUnattended(context.Background(), env(f)); rs[0].State != OK || strings.Contains(rs[0].Summary, "Sury") {
+		t.Fatalf("no Sury repository: plain security-only OK expected: %+v", rs)
+	}
+	f.Files["/etc/apt/sources.list.d/php.list"] = "deb [arch=amd64 signed-by=/usr/share/keyrings/sury-keyring.gpg] https://packages.sury.org/php/ bookworm main\n"
+	rs := checkUnattended(context.Background(), env(f))
+	if rs[0].State != Warn || rs[0].Data["cause"] != "sury" || !strings.Contains(rs[0].Fix, "php=sury") {
+		t.Errorf("Sury PHP not covered: %+v", rs)
+	}
+	f.Files["/etc/apt/apt.conf.d/52unattended-upgrades-sury"] = "// \"origin=deb.sury.org\";\n"
+	if rs := checkUnattended(context.Background(), env(f)); rs[0].Data["cause"] != "sury" {
+		t.Errorf("a commented-out origin does not count: %+v", rs)
+	}
+	f.Files["/etc/apt/apt.conf.d/52unattended-upgrades-sury"] = "Unattended-Upgrade::Origins-Pattern {\n        \"origin=deb.sury.org\";\n};\n"
+	if rs := checkUnattended(context.Background(), env(f)); rs[0].State != OK || !strings.Contains(rs[0].Summary, "PHP from Sury") {
+		t.Errorf("Sury covered: %+v", rs)
+	}
+}

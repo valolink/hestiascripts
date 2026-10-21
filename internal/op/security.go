@@ -227,25 +227,45 @@ func init() {
 	register(Op{
 		ID: "unattended", Title: "Automatic security updates", Section: "security", Risk: Change,
 		Resolves: "updates.unattended",
-		Note:     "unattended-upgrades applying Debian security updates daily. The PHP, nginx, MariaDB and Hestia stack is left for a planned upgrade.",
-		How:      "apt installs unattended-upgrades and apt-listchanges if missing. `hs conf install` writes /etc/apt/apt.conf.d/20auto-upgrades from templates/apt/ (the two lines `dpkg-reconfigure -plow unattended-upgrades` would write — no dialog). The scope is the Debian origin line in 50unattended-upgrades: security-only comments it out with `//`, all uncomments it (sed). The apt timers are enabled and listed.",
-		Undo:     "systemctl disable --now apt-daily-upgrade.timer, or set both lines in 20auto-upgrades to \"0\".",
+		Note:     "unattended-upgrades applying Debian security updates and PHP's patch releases from packages.sury.org every night at 01:00–01:30 UTC. Apache (also from Sury), nginx, MariaDB and Hestia wait for the monthly update round.",
+		How: "apt installs unattended-upgrades and apt-listchanges if missing. `hs conf install` writes /etc/apt/apt.conf.d/20auto-upgrades from templates/apt/ (the two lines `dpkg-reconfigure -plow unattended-upgrades` would write — no dialog). The scope is the Debian origin line in 50unattended-upgrades: security-only comments it out with `//`, all uncomments it (sed). " +
+			"PHP from Sury: " + box.SuryUUFile + " adds the origin deb.sury.org and holds back apache2*/libapache2-* (same origin) — within a PHP version Sury ships upstream's patch releases, and 8.3 now gets security fixes only; a new PHP version is a separate package and never arrives this way. " +
+			"Two systemd drop-ins move apt-daily-upgrade.timer to 01:00 UTC (+ up to 30 min) and refresh the package lists just before the upgrade, so a fix published in the evening is installed that night. The last step is unattended-upgrade's own --dry-run: what the next run will install.",
+		Undo: "systemctl disable --now apt-daily-upgrade.timer, or set both lines in 20auto-upgrades to \"0\". PHP from Sury: run again with php=debian (the file is moved to " + swapMovedDir + "/<date>/). Night time: rm -r /etc/systemd/system/apt-daily-upgrade.{timer,service}.d/hs-*.conf && systemctl daemon-reload.",
 		Fields: []Field{{Key: "scope", Label: "Apply", Kind: Choice,
 			Current: func(ctx context.Context, env *check.Env, _ Target) string { return box.UnattendedScope(ctx, env) },
 			Choices: func(context.Context, *check.Env, Target) [][2]string {
 				return [][2]string{{"security", "security updates only"}, {"all", "all Debian updates — can restart PHP, nginx, MariaDB unattended"}}
+			}}, {Key: "php", Label: "PHP", Kind: Choice,
+			Help: "Sury's PHP patch releases restart php-fpm for a second or two when they install.",
+			Current: func(_ context.Context, env *check.Env, _ Target) string {
+				switch {
+				case !box.SuryPHP(env):
+					return "not from Sury"
+				case box.SuryUnattended(env):
+					return "sury"
+				}
+				return "debian"
+			},
+			Default: func(context.Context, *check.Env, Target) string { return "sury" },
+			Choices: func(context.Context, *check.Env, Target) [][2]string {
+				return [][2]string{{"sury", "PHP's patch releases from packages.sury.org too (Apache held back)"}, {"debian", "Debian's origins only — PHP waits for a manual upgrade"}}
 			}}},
 		Recheck: []string{"updates.unattended"},
 		Plan: func(ctx context.Context, env *check.Env, _ Target, v Values) ([]Step, error) {
-			tpl, err := repoFile(env, "templates/apt/20auto-upgrades")
-			if err != nil {
-				return nil, err
+			var tpl [4]string
+			for i, f := range []string{"20auto-upgrades", "52unattended-upgrades-sury", "apt-daily-upgrade-night.conf", "apt-daily-upgrade-refresh.conf"} {
+				p, err := repoFile(env, "templates/apt/"+f)
+				if err != nil {
+					return nil, err
+				}
+				tpl[i] = p
 			}
 			var steps []Step
 			if !box.PkgInstalled(ctx, env.Sys, "unattended-upgrades") {
 				steps = append(steps, aptUpdate(), aptInstall("the package", "unattended-upgrades", "apt-listchanges"))
 			}
-			steps = append(steps, confInstall("run daily", tpl, "/etc/apt/apt.conf.d/20auto-upgrades"))
+			steps = append(steps, confInstall("run daily", tpl[0], "/etc/apt/apt.conf.d/20auto-upgrades"))
 			switch cur := box.UnattendedScope(ctx, env); {
 			case v["scope"] == "security" && cur == "security-only", v["scope"] == "all" && cur == "all":
 				// scope already right
@@ -254,10 +274,23 @@ func init() {
 			default:
 				steps = append(steps, Step{Why: "all Debian updates: uncomment the plain Debian origin", Argv: []string{"sed", "-i", `s|^//\(` + uuOriginSed + `\)$|\1|`, uuFile}})
 			}
+			switch {
+			case v["php"] == "sury" && box.SuryPHP(env):
+				steps = append(steps, confInstall("PHP from packages.sury.org, Apache held back", tpl[1], box.SuryUUFile))
+			case v["php"] != "sury" && exists(env, box.SuryUUFile):
+				dest := swapMovedDir + "/" + env.Sys.Now().Format("20060102")
+				steps = append(steps, Step{Why: "Debian's origins only: move the Sury file out of apt.conf.d", Argv: []string{"sh", "-c", `install -d -m 700 "$1" && mv -n -v -- ` + box.SuryUUFile + ` "$1/"`, "sh", dest}})
+			}
+			const timerD, serviceD = "/etc/systemd/system/apt-daily-upgrade.timer.d", "/etc/systemd/system/apt-daily-upgrade.service.d"
 			return append(steps,
-				Step{Why: "origins now", Argv: []string{"sh", "-c", `grep -n 'origin=Debian' ` + uuFile}},
+				Step{Why: "systemd drop-in directories", Argv: []string{"install", "-d", "-m", "755", timerD, serviceD}},
+				confInstall("upgrade at 01:00–01:30 UTC", tpl[2], timerD+"/hs-night.conf"),
+				confInstall("refresh package lists just before it", tpl[3], serviceD+"/hs-refresh.conf"),
+				Step{Argv: []string{"systemctl", "daemon-reload"}},
+				Step{Why: "origins now", Argv: []string{"sh", "-c", `grep -hn 'origin=' ` + uuFile + ` /etc/apt/apt.conf.d/5[1-9]*unattended* 2>/dev/null; exit 0`}},
 				Step{Why: "the timers that run it", Argv: []string{"systemctl", "enable", "--now", "apt-daily.timer", "apt-daily-upgrade.timer"}},
 				Step{Argv: []string{"systemctl", "list-timers", "--no-pager", "apt-daily*"}},
+				Step{Why: "what the next run will install (dry run, changes nothing)", Argv: []string{"sh", "-c", "unattended-upgrade --dry-run -v 2>&1 | grep -E '^(Allowed origins|Initial blacklist|Packages that will be upgraded|No packages found)'; exit 0"}},
 			), nil
 		},
 	})

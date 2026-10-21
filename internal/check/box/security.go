@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/valolink/hestiascripts/internal/aptrepo"
 	. "github.com/valolink/hestiascripts/internal/check"
 	"github.com/valolink/hestiascripts/internal/fwgen"
 	"github.com/valolink/hestiascripts/internal/hestia"
@@ -347,7 +348,51 @@ func UnattendedScope(ctx context.Context, env *Env) string {
 	return "security-only"
 }
 
+// SuryUUFile is where hs op unattended adds Sury's origin.
+const SuryUUFile = "/etc/apt/apt.conf.d/52unattended-upgrades-sury"
+
+// SuryPHP: PHP comes from packages.sury.org (Hestia's installer adds it), so
+// Debian's security origin never updates it.
+func SuryPHP(env *Env) bool {
+	for _, r := range aptrepo.Sources(env.Sys) {
+		if strings.Contains(r.URI, "packages.sury.org/php") {
+			return true
+		}
+	}
+	return false
+}
+
+// SuryUnattended: an uncommented Origins-Pattern entry in apt.conf.d allows
+// Sury's origin. The entries of every file add up, so any file counts.
+func SuryUnattended(env *Env) bool {
+	re := regexp.MustCompile(`^\s*"(origin|o)=deb\.sury\.org[",]`)
+	for _, f := range aptConfFiles(env) {
+		for _, l := range strings.Split(readString(env.Sys, f), "\n") {
+			if re.MatchString(l) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func checkUnattended(ctx context.Context, env *Env) []Result {
+	r := checkUnattendedRuns(ctx, env)
+	if r[0].State != OK || !SuryPHP(env) {
+		return r
+	}
+	if !SuryUnattended(env) {
+		// 2026-10-21, PHP's pre-announced critical release: every box ran
+		// PHP from Sury and sat on 8.3.30/8.3.31 while 8.3.35 was out.
+		return []Result{New(Warn, "security-only, but PHP from packages.sury.org is not included").With("cause", "sury").
+			Because("Hestia installs PHP from Sury, so Debian's security origin never updates it: PHP's security releases wait for someone to run apt by hand.").
+			Fixed("hs op unattended php=sury")}
+	}
+	r[0].Summary = strings.Replace(r[0].Summary, "security-only", "security-only + PHP from Sury", 1)
+	return r
+}
+
+func checkUnattendedRuns(ctx context.Context, env *Env) []Result {
 	switch UnattendedScope(ctx, env) {
 	case "missing":
 		return []Result{New(Warn, "not installed").
@@ -391,11 +436,8 @@ func checkUnattended(ctx context.Context, env *Env) []Result {
 		Fixed("journalctl -u apt-daily-upgrade.service --since -3d --no-pager | tail -40")}
 }
 
-// periodicOff: the APT::Periodic settings unattended-upgrades needs that are
-// missing or "0". apt reads apt.conf.d in lexical order, later files win.
-func periodicOff(env *Env) []string {
-	want := []string{"APT::Periodic::Update-Package-Lists", "APT::Periodic::Unattended-Upgrade"}
-	val := map[string]string{}
+// aptConfFiles: apt.conf, then apt.conf.d in the lexical order apt reads it.
+func aptConfFiles(env *Env) []string {
 	files := []string{"/etc/apt/apt.conf"}
 	if ents, err := env.Sys.ReadDir("/etc/apt/apt.conf.d"); err == nil {
 		for _, e := range ents {
@@ -404,8 +446,16 @@ func periodicOff(env *Env) []string {
 			}
 		}
 	}
+	return files
+}
+
+// periodicOff: the APT::Periodic settings unattended-upgrades needs that are
+// missing or "0". apt reads apt.conf.d in lexical order, later files win.
+func periodicOff(env *Env) []string {
+	want := []string{"APT::Periodic::Update-Package-Lists", "APT::Periodic::Unattended-Upgrade"}
+	val := map[string]string{}
 	re := regexp.MustCompile(`(?m)^\s*(APT::Periodic::[A-Za-z-]+)\s+"([^"]*)"\s*;`)
-	for _, f := range files {
+	for _, f := range aptConfFiles(env) {
 		for _, m := range re.FindAllStringSubmatch(readString(env.Sys, f), -1) {
 			val[m[1]] = m[2]
 		}

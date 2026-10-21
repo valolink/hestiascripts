@@ -1,0 +1,14 @@
+// hs op unattended (php=sury): PHP's patch releases from packages.sury.org.
+// Hestia installs PHP from Sury, so Debian's security updates never reach it;
+// without this the boxes sat on 8.3.30/8.3.31 while 8.3.35 was out (2026-10-21).
+// Sury's Apache repository has the same origin, so Apache is held back here
+// for the monthly update round: its security releases have changed behaviour
+// before (2.4.60's mod_rewrite, 2024), and nginx sits in front of it.
+// Package-Blacklist entries are prefixes (Python re.match on the name).
+Unattended-Upgrade::Origins-Pattern {
+        "origin=deb.sury.org";
+};
+Unattended-Upgrade::Package-Blacklist {
+        "apache2";
+        "libapache2-";
+};

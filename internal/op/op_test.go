@@ -575,3 +575,30 @@ func TestResendGuardFiles(t *testing.T) {
 		t.Errorf("plan: %v\n%s", err, text(st))
 	}
 }
+
+func TestUnattendedAddsSuryAndRunsAtNight(t *testing.T) {
+	f := &sys.Fake{Clock: time.Now(), Files: map[string]string{
+		"/etc/apt/apt.conf.d/50unattended-upgrades":          "Unattended-Upgrade::Origins-Pattern {\n        \"origin=Debian,codename=${distro_codename},label=Debian-Security\";\n};\n",
+		"/etc/apt/sources.list.d/php.list":                   "deb [arch=amd64 signed-by=/usr/share/keyrings/sury-keyring.gpg] https://packages.sury.org/php/ bookworm main\n",
+		"/repo/templates/apt/20auto-upgrades":                "x",
+		"/repo/templates/apt/52unattended-upgrades-sury":     "x",
+		"/repo/templates/apt/apt-daily-upgrade-night.conf":   "x",
+		"/repo/templates/apt/apt-daily-upgrade-refresh.conf": "x",
+	}, Cmds: map[string]sys.FakeCmd{
+		"dpkg-query -W -f=${Status} unattended-upgrades": {Out: "install ok installed"},
+	}}
+	got := text(planOf(t, "unattended", f, Values{"scope": "security"}))
+	for _, want := range []string{"/etc/apt/apt.conf.d/52unattended-upgrades-sury", "apt-daily-upgrade.timer.d/hs-night.conf", "apt-daily-upgrade.service.d/hs-refresh.conf", "daemon-reload", "unattended-upgrade --dry-run"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plan lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "sed -i") {
+		t.Errorf("scope is already security-only, nothing to sed:\n%s", got)
+	}
+	f.Files["/etc/apt/apt.conf.d/52unattended-upgrades-sury"] = "Unattended-Upgrade::Origins-Pattern {\n        \"origin=deb.sury.org\";\n};\n"
+	got = text(planOf(t, "unattended", f, Values{"scope": "security", "php": "debian"}))
+	if !strings.Contains(got, "mv -n -v -- /etc/apt/apt.conf.d/52unattended-upgrades-sury") || strings.Contains(got, "conf install /repo/templates/apt/52") {
+		t.Errorf("php=debian moves the Sury file away:\n%s", got)
+	}
+}
