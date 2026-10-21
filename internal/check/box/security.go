@@ -27,6 +27,7 @@ func securityChecks() []Check {
 		{ID: "updates.unattended", Section: "security", Title: "Unattended upgrades", Run: checkUnattended},
 		{ID: "updates.pending", Section: "security", Title: "Security updates", Timeout: 30 * time.Second, Run: checkPendingUpdates},
 		{ID: "updates.reboot", Section: "security", Title: "Reboot", Run: checkReboot},
+		{ID: "updates.nginx-binary", Section: "security", Title: "nginx running its installed version", Run: checkNginxBinary},
 		// A network probe per repository (a few KB each): not every 15 minutes.
 		{ID: "updates.repos", Section: "security", Title: "Package repositories", Timeout: 90 * time.Second, MinInterval: 6 * time.Hour, Run: checkRepos},
 		{ID: "hestia.version", Section: "security", Title: "HestiaCP version", Run: checkHestiaVersion},
@@ -365,7 +366,29 @@ func SuryPHP(env *Env) bool {
 // SuryUnattended: an uncommented Origins-Pattern entry in apt.conf.d allows
 // Sury's origin. The entries of every file add up, so any file counts.
 func SuryUnattended(env *Env) bool {
-	re := regexp.MustCompile(`^\s*"(origin|o)=deb\.sury\.org[",]`)
+	return uuAllows(env, `(origin|o)=deb\.sury\.org[",]`)
+}
+
+// NginxUUFile is where hs op unattended adds nginx.org's origin.
+const NginxUUFile = "/etc/apt/apt.conf.d/53unattended-upgrades-nginx"
+
+// NginxOrg: nginx comes from nginx.org's repository (Hestia's installer adds it).
+func NginxOrg(env *Env) bool {
+	for _, r := range aptrepo.Sources(env.Sys) {
+		if strings.Contains(r.URI, "nginx.org/packages") {
+			return true
+		}
+	}
+	return false
+}
+
+// NginxUnattended: an apt.conf.d file allows nginx.org's origin.
+func NginxUnattended(env *Env) bool {
+	return uuAllows(env, `(origin|o)=nginx[",]`)
+}
+
+func uuAllows(env *Env, origin string) bool {
+	re := regexp.MustCompile(`^\s*"` + origin)
 	for _, f := range aptConfFiles(env) {
 		for _, l := range strings.Split(readString(env.Sys, f), "\n") {
 			if re.MatchString(l) {
@@ -378,18 +401,56 @@ func SuryUnattended(env *Env) bool {
 
 func checkUnattended(ctx context.Context, env *Env) []Result {
 	r := checkUnattendedRuns(ctx, env)
-	if r[0].State != OK || !SuryPHP(env) {
+	if r[0].State != OK {
 		return r
 	}
-	if !SuryUnattended(env) {
-		// 2026-10-21, PHP's pre-announced critical release: every box ran
-		// PHP from Sury and sat on 8.3.30/8.3.31 while 8.3.35 was out.
-		return []Result{New(Warn, "security-only, but PHP from packages.sury.org is not included").With("cause", "sury").
-			Because("Hestia installs PHP from Sury, so Debian's security origin never updates it: PHP's security releases wait for someone to run apt by hand.").
-			Fixed("hs op unattended php=sury")}
+	// 2026-10-21: PHP from Sury sat on 8.3.30/8.3.31 while 8.3.35 was out,
+	// and six of nine boxes ran an nginx open to CVE-2026-42533 since July.
+	var missing, fix, covered []string
+	if SuryPHP(env) {
+		if SuryUnattended(env) {
+			covered = append(covered, "PHP from Sury")
+		} else {
+			missing, fix = append(missing, "PHP from packages.sury.org"), append(fix, "php=sury")
+		}
 	}
-	r[0].Summary = strings.Replace(r[0].Summary, "security-only", "security-only + PHP from Sury", 1)
+	if NginxOrg(env) {
+		if NginxUnattended(env) {
+			covered = append(covered, "nginx")
+		} else {
+			missing, fix = append(missing, "nginx from nginx.org"), append(fix, "nginx=auto")
+		}
+	}
+	if len(missing) > 0 {
+		return []Result{New(Warn, "security-only, but "+strings.Join(missing, " and ")+" not included").With("cause", "vendor").
+			Because("Hestia installs PHP and nginx from their vendors' repositories, so Debian's security origin never updates them: their security releases wait for someone to run apt by hand.").
+			Fixed("hs op unattended " + strings.Join(fix, " "))}
+	}
+	if len(covered) > 0 {
+		r[0].Summary = strings.Replace(r[0].Summary, "security-only", "security-only + "+strings.Join(covered, " + "), 1)
+	}
 	return r
+}
+
+// checkNginxBinary: nginx.org's package swaps the binary in place only after
+// its config test passes; if the test fails, the old binary keeps serving
+// while dpkg reports the new version installed.
+func checkNginxBinary(ctx context.Context, env *Env) []Result {
+	pid := strings.TrimSpace(readString(env.Sys, "/run/nginx.pid"))
+	if pid == "" {
+		return []Result{New(NA, "nginx is not running")}
+	}
+	exe, err := env.Sys.Run(ctx, "readlink", "/proc/"+pid+"/exe")
+	exe = strings.TrimSpace(exe)
+	if err != nil || exe == "" {
+		return []Result{New(Unknown, "cannot read nginx's running binary").Ev("pid " + pid)}
+	}
+	if strings.HasSuffix(exe, " (deleted)") {
+		return []Result{New(Warn, "nginx still runs the binary an upgrade replaced").Ev("pid " + pid + " → " + exe).
+			Because("The upgrade swaps the binary only when `nginx -t` passes; otherwise the old version keeps serving and every fix in the new one is missing.").
+			Fixed("nginx -t && /etc/init.d/nginx upgrade")}
+	}
+	return []Result{New(OK, "running the installed binary").Ev("pid " + pid + " → " + exe)}
 }
 
 func checkUnattendedRuns(ctx context.Context, env *Env) []Result {
@@ -486,14 +547,30 @@ func disabledTimers(ctx context.Context, env *Env) []string {
 	return off
 }
 
+// lastUnattendedRun: the end of the newest real run that finished — dry runs
+// log the same "All upgrades installed" (hzdemolink 2026-10-21, an hs op
+// dry run read as "last ran"), and a lock failure is not a run.
 func lastUnattendedRun(env *Env) time.Time {
-	var last time.Time
+	var last, end time.Time
+	dry := false
 	for _, line := range strings.Split(readString(env.Sys, "/var/log/unattended-upgrades/unattended-upgrades.log"), "\n") {
 		if len(line) < 19 || !strings.Contains(line, "INFO") {
 			continue
 		}
-		if ts, err := time.ParseInLocation("2006-01-02 15:04:05", line[:19], time.Local); err == nil && ts.After(last) {
-			last = ts
+		ts, err := time.ParseInLocation("2006-01-02 15:04:05", line[:19], time.Local)
+		if err != nil {
+			continue
+		}
+		switch {
+		case strings.Contains(line, "Starting unattended upgrades script"):
+			dry = false
+		case strings.Contains(line, "Option --dry-run given"):
+			dry = true
+		case !dry && (strings.Contains(line, "All upgrades installed") || strings.Contains(line, "No packages found that can be upgraded")):
+			end = ts
+		}
+		if end.After(last) {
+			last = end
 		}
 	}
 	return last

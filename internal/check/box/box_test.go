@@ -499,15 +499,50 @@ func TestUnattendedSuryPHP(t *testing.T) {
 	}
 	f.Files["/etc/apt/sources.list.d/php.list"] = "deb [arch=amd64 signed-by=/usr/share/keyrings/sury-keyring.gpg] https://packages.sury.org/php/ bookworm main\n"
 	rs := checkUnattended(context.Background(), env(f))
-	if rs[0].State != Warn || rs[0].Data["cause"] != "sury" || !strings.Contains(rs[0].Fix, "php=sury") {
+	if rs[0].State != Warn || rs[0].Data["cause"] != "vendor" || !strings.Contains(rs[0].Fix, "php=sury") || strings.Contains(rs[0].Fix, "nginx") {
 		t.Errorf("Sury PHP not covered: %+v", rs)
 	}
 	f.Files["/etc/apt/apt.conf.d/52unattended-upgrades-sury"] = "// \"origin=deb.sury.org\";\n"
-	if rs := checkUnattended(context.Background(), env(f)); rs[0].Data["cause"] != "sury" {
+	if rs := checkUnattended(context.Background(), env(f)); rs[0].Data["cause"] != "vendor" {
 		t.Errorf("a commented-out origin does not count: %+v", rs)
 	}
 	f.Files["/etc/apt/apt.conf.d/52unattended-upgrades-sury"] = "Unattended-Upgrade::Origins-Pattern {\n        \"origin=deb.sury.org\";\n};\n"
 	if rs := checkUnattended(context.Background(), env(f)); rs[0].State != OK || !strings.Contains(rs[0].Summary, "PHP from Sury") {
 		t.Errorf("Sury covered: %+v", rs)
+	}
+	f.Files["/etc/apt/sources.list.d/nginx.list"] = "deb [arch=amd64 signed-by=/usr/share/keyrings/nginx-keyring.gpg] https://nginx.org/packages/mainline/debian/ bookworm nginx\n"
+	if rs := checkUnattended(context.Background(), env(f)); rs[0].State != Warn || rs[0].Fix != "hs op unattended nginx=auto" {
+		t.Errorf("nginx.org not covered: %+v", rs)
+	}
+	f.Files["/etc/apt/apt.conf.d/53unattended-upgrades-nginx"] = "Unattended-Upgrade::Origins-Pattern {\n        \"origin=nginx,label=nginx\";\n};\n"
+	if rs := checkUnattended(context.Background(), env(f)); rs[0].State != OK || !strings.Contains(rs[0].Summary, "PHP from Sury + nginx") {
+		t.Errorf("both covered: %+v", rs)
+	}
+}
+
+func TestLastUnattendedRunSkipsDryRuns(t *testing.T) {
+	f := &sys.Fake{Files: map[string]string{"/var/log/unattended-upgrades/unattended-upgrades.log": `2026-10-21 06:27:20,000 INFO Starting unattended upgrades script
+2026-10-21 06:27:24,000 INFO All upgrades installed
+2026-10-21 11:12:15,740 INFO Starting unattended upgrades script
+2026-10-21 11:12:15,740 ERROR Lock could not be acquired (another package manager running?)
+2026-10-21 11:12:23,319 INFO Starting unattended upgrades script
+2026-10-21 11:12:32,014 INFO Option --dry-run given, *not* performing real actions
+2026-10-21 11:12:34,444 INFO All upgrades installed
+`}}
+	if got := lastUnattendedRun(env(f)); got.Format("15:04:05") != "06:27:24" {
+		t.Errorf("last real run = %v", got)
+	}
+}
+
+func TestNginxBinary(t *testing.T) {
+	f := &sys.Fake{Files: map[string]string{"/run/nginx.pid": "812\n"}, Cmds: map[string]sys.FakeCmd{
+		"readlink /proc/812/exe": {Out: "/usr/sbin/nginx\n"},
+	}}
+	if rs := checkNginxBinary(context.Background(), env(f)); rs[0].State != OK {
+		t.Errorf("current binary: %+v", rs)
+	}
+	f.Cmds["readlink /proc/812/exe"] = sys.FakeCmd{Out: "/usr/sbin/nginx (deleted)\n"}
+	if rs := checkNginxBinary(context.Background(), env(f)); rs[0].State != Warn {
+		t.Errorf("replaced binary still running: %+v", rs)
 	}
 }

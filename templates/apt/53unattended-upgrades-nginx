@@ -1,0 +1,11 @@
+// hs op unattended (nginx=auto): nginx from nginx.org's own repository.
+// Hestia installs nginx from nginx.org (mainline), so Debian's security
+// updates never reach it. On 2026-10-21 six of nine boxes still ran a version
+// open to CVE-2026-42533 (RCE, public exploit since July; fixed in 1.31.3).
+// The package upgrade tests the config first, then swaps the binary in place
+// (USR2): no connection drops. If the test fails the old binary keeps running;
+// hs check (updates.nginx-binary) reports that.
+// The panel's own nginx (hestia-nginx) comes from apt.hestiacp.com, not here.
+Unattended-Upgrade::Origins-Pattern {
+        "origin=nginx,label=nginx";
+};

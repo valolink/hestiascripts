@@ -584,11 +584,13 @@ func TestUnattendedAddsSuryAndRunsAtNight(t *testing.T) {
 		"/repo/templates/apt/52unattended-upgrades-sury":     "x",
 		"/repo/templates/apt/apt-daily-upgrade-night.conf":   "x",
 		"/repo/templates/apt/apt-daily-upgrade-refresh.conf": "x",
+		"/repo/templates/apt/53unattended-upgrades-nginx":    "x",
+		"/etc/apt/sources.list.d/nginx.list":                 "deb [arch=amd64 signed-by=/usr/share/keyrings/nginx-keyring.gpg] https://nginx.org/packages/mainline/debian/ bookworm nginx\n",
 	}, Cmds: map[string]sys.FakeCmd{
 		"dpkg-query -W -f=${Status} unattended-upgrades": {Out: "install ok installed"},
 	}}
 	got := text(planOf(t, "unattended", f, Values{"scope": "security"}))
-	for _, want := range []string{"/etc/apt/apt.conf.d/52unattended-upgrades-sury", "apt-daily-upgrade.timer.d/hs-night.conf", "apt-daily-upgrade.service.d/hs-refresh.conf", "daemon-reload", "unattended-upgrade --dry-run"} {
+	for _, want := range []string{"/etc/apt/apt.conf.d/52unattended-upgrades-sury", "/etc/apt/apt.conf.d/53unattended-upgrades-nginx", "apt-daily-upgrade.timer.d/hs-night.conf", "apt-daily-upgrade.service.d/hs-refresh.conf", "daemon-reload", "unattended-upgrade --dry-run"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plan lacks %q:\n%s", want, got)
 		}

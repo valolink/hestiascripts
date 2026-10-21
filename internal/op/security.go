@@ -227,11 +227,12 @@ func init() {
 	register(Op{
 		ID: "unattended", Title: "Automatic security updates", Section: "security", Risk: Change,
 		Resolves: "updates.unattended",
-		Note:     "unattended-upgrades applying Debian security updates and PHP's patch releases from packages.sury.org every night at 01:00–01:30 UTC. Apache (also from Sury), nginx, MariaDB and Hestia wait for the monthly update round.",
+		Note:     "unattended-upgrades applying Debian security updates, PHP's patch releases from packages.sury.org and nginx from nginx.org every night at 01:00–01:30 UTC. Apache (also from Sury), MariaDB and Hestia wait for the monthly update round.",
 		How: "apt installs unattended-upgrades and apt-listchanges if missing. `hs conf install` writes /etc/apt/apt.conf.d/20auto-upgrades from templates/apt/ (the two lines `dpkg-reconfigure -plow unattended-upgrades` would write — no dialog). The scope is the Debian origin line in 50unattended-upgrades: security-only comments it out with `//`, all uncomments it (sed). " +
 			"PHP from Sury: " + box.SuryUUFile + " adds the origin deb.sury.org and holds back apache2* and the two Apache modules Sury builds (same origin; Debian's libapache2-mod-fcgid is not touched) — within a PHP version Sury ships upstream's patch releases, and 8.3 now gets security fixes only; a new PHP version is a separate package and never arrives this way. " +
+			"nginx from nginx.org: " + box.NginxUUFile + " adds the origin nginx (label nginx); the package tests the config and then swaps the binary in place (USR2), so no connection drops, and a failed test leaves the old binary running (check updates.nginx-binary). " +
 			"Two systemd drop-ins move apt-daily-upgrade.timer to 01:00 UTC (+ up to 30 min) and refresh the package lists just before the upgrade, so a fix published in the evening is installed that night. The last step is unattended-upgrade's own --dry-run: what the next run will install.",
-		Undo: "systemctl disable --now apt-daily-upgrade.timer, or set both lines in 20auto-upgrades to \"0\". PHP from Sury: run again with php=debian (the file is moved to " + swapMovedDir + "/<date>/). Night time: rm -r /etc/systemd/system/apt-daily-upgrade.{timer,service}.d/hs-*.conf && systemctl daemon-reload.",
+		Undo: "systemctl disable --now apt-daily-upgrade.timer, or set both lines in 20auto-upgrades to \"0\". PHP from Sury / nginx: run again with php=debian / nginx=manual (the file is moved to " + swapMovedDir + "/<date>/). Night time: rm -r /etc/systemd/system/apt-daily-upgrade.{timer,service}.d/hs-*.conf && systemctl daemon-reload.",
 		Fields: []Field{{Key: "scope", Label: "Apply", Kind: Choice,
 			Current: func(ctx context.Context, env *check.Env, _ Target) string { return box.UnattendedScope(ctx, env) },
 			Choices: func(context.Context, *check.Env, Target) [][2]string {
@@ -250,11 +251,25 @@ func init() {
 			Default: func(context.Context, *check.Env, Target) string { return "sury" },
 			Choices: func(context.Context, *check.Env, Target) [][2]string {
 				return [][2]string{{"sury", "PHP's patch releases from packages.sury.org too (Apache held back)"}, {"debian", "Debian's origins only — PHP waits for a manual upgrade"}}
+			}}, {Key: "nginx", Label: "nginx", Kind: Choice,
+			Help: "nginx.org's package swaps the binary in place after a config test: no dropped connections.",
+			Current: func(_ context.Context, env *check.Env, _ Target) string {
+				switch {
+				case !box.NginxOrg(env):
+					return "not from nginx.org"
+				case box.NginxUnattended(env):
+					return "auto"
+				}
+				return "manual"
+			},
+			Default: func(context.Context, *check.Env, Target) string { return "auto" },
+			Choices: func(context.Context, *check.Env, Target) [][2]string {
+				return [][2]string{{"auto", "nginx's releases from nginx.org too"}, {"manual", "nginx waits for a manual upgrade"}}
 			}}},
 		Recheck: []string{"updates.unattended"},
 		Plan: func(ctx context.Context, env *check.Env, _ Target, v Values) ([]Step, error) {
-			var tpl [4]string
-			for i, f := range []string{"20auto-upgrades", "52unattended-upgrades-sury", "apt-daily-upgrade-night.conf", "apt-daily-upgrade-refresh.conf"} {
+			var tpl [5]string
+			for i, f := range []string{"20auto-upgrades", "52unattended-upgrades-sury", "apt-daily-upgrade-night.conf", "apt-daily-upgrade-refresh.conf", "53unattended-upgrades-nginx"} {
 				p, err := repoFile(env, "templates/apt/"+f)
 				if err != nil {
 					return nil, err
@@ -274,12 +289,21 @@ func init() {
 			default:
 				steps = append(steps, Step{Why: "all Debian updates: uncomment the plain Debian origin", Argv: []string{"sed", "-i", `s|^//\(` + uuOriginSed + `\)$|\1|`, uuFile}})
 			}
+			moveAway := func(why, file string) Step {
+				dest := swapMovedDir + "/" + env.Sys.Now().Format("20060102")
+				return Step{Why: why, Argv: []string{"sh", "-c", `install -d -m 700 "$1" && mv -n -v -- ` + file + ` "$1/"`, "sh", dest}}
+			}
 			switch {
 			case v["php"] == "sury" && box.SuryPHP(env):
 				steps = append(steps, confInstall("PHP from packages.sury.org, Apache held back", tpl[1], box.SuryUUFile))
 			case v["php"] != "sury" && exists(env, box.SuryUUFile):
-				dest := swapMovedDir + "/" + env.Sys.Now().Format("20060102")
-				steps = append(steps, Step{Why: "Debian's origins only: move the Sury file out of apt.conf.d", Argv: []string{"sh", "-c", `install -d -m 700 "$1" && mv -n -v -- ` + box.SuryUUFile + ` "$1/"`, "sh", dest}})
+				steps = append(steps, moveAway("PHP waits for a manual upgrade: move the Sury file out of apt.conf.d", box.SuryUUFile))
+			}
+			switch {
+			case v["nginx"] == "auto" && box.NginxOrg(env):
+				steps = append(steps, confInstall("nginx from nginx.org", tpl[4], box.NginxUUFile))
+			case v["nginx"] != "auto" && exists(env, box.NginxUUFile):
+				steps = append(steps, moveAway("nginx waits for a manual upgrade: move the nginx file out of apt.conf.d", box.NginxUUFile))
 			}
 			const timerD, serviceD = "/etc/systemd/system/apt-daily-upgrade.timer.d", "/etc/systemd/system/apt-daily-upgrade.service.d"
 			return append(steps,
