@@ -343,22 +343,38 @@ cat > "$WORK/prefetch.php" <<'PHP'
 <?php
 // v-wp-update: download update packages while the site is still open.
 require_once ABSPATH . 'wp-admin/includes/file.php';
-list($kind, $exclude, $work) = array_pad($args, 3, '');
+list($kind, $exclude, $work, $wanted) = array_pad($args, 4, '');
 $skip = array_filter(explode(',', $exclude));
+$want = $wanted === 'none' ? [] : array_filter(explode(',', $wanted));
 $map_file = $work . '/map.json';
 $map = is_readable($map_file) ? (json_decode((string) file_get_contents($map_file), true) ?: []) : [];
-$todo = [];
-if ($kind === 'plugins') {
-    $t = get_site_transient('update_plugins');
-    foreach ((array) ($t->response ?? []) as $file => $u) {
-        $slug = strpos($file, '/') !== false ? dirname($file) : basename($file, '.php');
-        $todo[$slug] = is_object($u) ? (string) ($u->package ?? '') : (string) ($u['package'] ?? '');
+$read = function () use ($kind): array {
+    $todo = [];
+    if ($kind === 'plugins') {
+        $t = get_site_transient('update_plugins');
+        foreach ((array) ($t->response ?? []) as $file => $u) {
+            $slug = strpos($file, '/') !== false ? dirname($file) : basename($file, '.php');
+            $todo[$slug] = is_object($u) ? (string) ($u->package ?? '') : (string) ($u['package'] ?? '');
+        }
+    } else {
+        $t = get_site_transient('update_themes');
+        foreach ((array) ($t->response ?? []) as $slug => $u) {
+            $todo[$slug] = is_array($u) ? (string) ($u['package'] ?? '') : (string) ($u->package ?? '');
+        }
     }
-} else {
-    $t = get_site_transient('update_themes');
-    foreach ((array) ($t->response ?? []) as $slug => $u) {
-        $todo[$slug] = is_array($u) ? (string) ($u['package'] ?? '') : (string) ($u->package ?? '');
-    }
+    return $todo;
+};
+$todo = $read();
+// The stored update data can lack packages WP-CLI's own listing showed
+// (kovanen.com 2026-10-29: 1 of 15): refresh it once, as WordPress does
+// after installing a plugin, and read again.
+if ($want && array_diff($want, array_keys($todo))) {
+    if ($kind === 'plugins') { wp_clean_plugins_cache(true); wp_update_plugins(); }
+    else { delete_site_transient('update_themes'); wp_update_themes(); }
+    $todo = $read();
+}
+if ($want) {
+    $todo = array_intersect_key($todo, array_flip($want));
 }
 foreach ($todo as $slug => $package) {
     if (in_array($slug, $skip, true) || isset($map[$package]) || !preg_match('#^https?://#i', $package)) continue;
@@ -400,9 +416,11 @@ PHP
 own "$WORK"/*.php
 # Only prefetch.php's own lines (and WP-CLI errors): some plugins print
 # markup whenever WordPress loads (soutuveneet.fi, 2026-10-29).
-prefetch() { # plugins|themes
-  echo "Downloading $1 before the site closes..."
-  $WP eval-file "$WORK/prefetch.php" "$1" "${EXCLUDE:-none}" "$WORK" 2>&1 | mask | grep -E "^(   [^ ]|Error:)"
+prefetch() { # plugins|themes slug...
+  local kind=$1; shift
+  local wanted; wanted=$(IFS=,; echo "$*")
+  echo "Downloading $kind before the site closes..."
+  $WP eval-file "$WORK/prefetch.php" "$kind" "${EXCLUDE:-none}" "$WORK" "${wanted:-none}" 2>&1 | mask | grep -E "^(   [^ ]|Error:)"
 }
 USE_PREFETCHED="--require=$WORK/use-prefetched.php"
 
@@ -471,7 +489,7 @@ failed_names() { printf '%s\n' "$1" | grep -P '\tError\s*$' | cut -f1 | paste -s
 PLUGINS_DONE=0; THEMES_DONE=0
 
 update_plugins() { # slug...
-  prefetch plugins
+  prefetch plugins "$@"
   backup_or_stop backup_packages plugin "$@"
   run_live $WP plugin update "$@" "$USE_PREFETCHED"
   PLUGINS_DONE=$((PLUGINS_DONE + $(count_status "$OUT" Updated)))
@@ -506,7 +524,7 @@ fi
 # --- Theme Updates ---
 if [ "$THEME_UPDATES" -gt 0 ]; then
   echo "[ Theme Updates ]"
-  prefetch themes
+  prefetch themes "${THEME_LIST[@]}"
   backup_or_stop backup_packages theme "${THEME_LIST[@]}"
   run_live $WP theme update "${THEME_LIST[@]}" "$USE_PREFETCHED"
   THEMES_DONE=$(count_status "$OUT" Updated)
