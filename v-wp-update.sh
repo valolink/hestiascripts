@@ -1,7 +1,9 @@
 #!/bin/bash
 
-if [ "$EUID" -ne 0 ]; then
-  echo "❌ ERROR: Please run as root."
+# Standalone mode (--path=…): a site on a host that is not ours (cPanel,
+# CloudLinux …), run as its own user over SSH — no root, no Hestia.
+if [ "$EUID" -ne 0 ] && [[ " $* " != *" --path="* ]]; then
+  echo "❌ ERROR: Please run as root (or as the site user with --path)."
   exit 1
 fi
 
@@ -29,6 +31,11 @@ OPTIONS:
   --exclude=LIST   Comma-separated plugin / theme slugs to leave as they are;
                    "core" leaves WordPress core
   --skip-backup    Skip the backup set (staging copies)
+  --path=DIR       Standalone: the WordPress directory of a site on a host
+                   that is not ours, run as the site user (no root, no
+                   Hestia); backup sets go to ~/.vl-pre-update/ (newest 2)
+  --wp-cli=CMD     Standalone: the WP-CLI command, e.g. on CloudLinux
+                   "/opt/alt/php84/usr/bin/php /usr/local/bin/wp" (default wp)
   --dry-run        Show what would be updated without applying any changes
   -h, --help       Show this help
 
@@ -47,12 +54,16 @@ DOMAIN=""
 SKIP_BACKUP=false
 DRY_RUN=false
 EXCLUDE=""
+STANDALONE_PATH=""
+WP_CLI="wp"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --user=*)      HESTIA_USER="${1#*=}" ;;
     --domain=*)    DOMAIN="${1#*=}" ;;
     --exclude=*)   EXCLUDE="${1#*=}" ;;
+    --path=*)      STANDALONE_PATH="${1#*=}" ;;
+    --wp-cli=*)    WP_CLI="${1#*=}" ;;
     --skip-backup) SKIP_BACKUP=true ;;
     --dry-run)     DRY_RUN=true ;;
     -h|--help)     show_help; exit 0 ;;
@@ -70,7 +81,10 @@ fi
 is_excluded() { [[ ",$EXCLUDE," == *",$1,"* ]]; }
 
 # --- Interactive prompts for missing values ---
-if [ -z "$HESTIA_USER" ]; then
+if [ -n "$STANDALONE_PATH" ]; then
+  [ -n "$DOMAIN" ] || { echo "❌ ERROR: --path needs --domain (it names the backup sets)."; exit 1; }
+  HESTIA_USER=$(id -un)
+elif [ -z "$HESTIA_USER" ]; then
   mapfile -t USERS < <(v-list-users plain | cut -f1)
   PS3="Select user: "
   select HESTIA_USER in "${USERS[@]}"; do
@@ -79,7 +93,7 @@ if [ -z "$HESTIA_USER" ]; then
   done
 fi
 
-if [ -z "$DOMAIN" ]; then
+if [ -z "$DOMAIN" ] && [ -z "$STANDALONE_PATH" ]; then
   mapfile -t DOMAINS < <(v-list-web-domains "$HESTIA_USER" plain | cut -f1)
   if [ ${#DOMAINS[@]} -eq 0 ]; then
     echo "❌ ERROR: No web domains found for user $HESTIA_USER."
@@ -93,15 +107,22 @@ if [ -z "$DOMAIN" ]; then
 fi
 
 DOMAIN="${DOMAIN#www.}"
-WP_PATH="/home/$HESTIA_USER/web/$DOMAIN/public_html"
-WP="sudo -u $HESTIA_USER wp --path=$WP_PATH"
+if [ -n "$STANDALONE_PATH" ]; then
+  WP_PATH="${STANDALONE_PATH%/}"
+  WP="$WP_CLI --path=$WP_PATH"
+  own() { :; } # everything is the site user's already
+else
+  WP_PATH="/home/$HESTIA_USER/web/$DOMAIN/public_html"
+  WP="sudo -u $HESTIA_USER wp --path=$WP_PATH"
+  own() { chown "$HESTIA_USER:$HESTIA_USER" "$@"; }
+fi
 
 if [ ! -f "$WP_PATH/wp-config.php" ]; then
   echo "❌ ERROR: No WordPress installation found at $WP_PATH"
   exit 1
 fi
 
-if ! command -v wp &>/dev/null; then
+if ! command -v ${WP_CLI%% *} &>/dev/null; then
   echo "❌ ERROR: WP-CLI is not installed."
   exit 1
 fi
@@ -181,7 +202,7 @@ mask() { sed -u -E 's/([?&](code|license_key|licence_key|license|licence|purchas
 
 # --- Work dir (prefetched packages, helpers run as the site user) ---
 WORK=$(mktemp -d /tmp/vl-wp-update.XXXXXX)
-chown "$HESTIA_USER:$HESTIA_USER" "$WORK"
+own "$WORK"
 chmod 700 "$WORK"
 UPDATE_LOG="$WORK/step.log"
 WATCH_PID=""
@@ -215,7 +236,7 @@ header('Content-Type: text/html; charset=utf-8');
 <p>We are updating the site. This page reloads in a moment.</p>
 </div></body></html>
 PHP
-  chown "$HESTIA_USER:$HESTIA_USER" "$MAINT_PAGE"
+  own "$MAINT_PAGE"
   chmod 644 "$MAINT_PAGE"
 }
 remove_maintenance_page() {
@@ -242,11 +263,17 @@ SET=""
 if [ "$SKIP_BACKUP" = false ]; then
   echo ""
   echo "---------------------------------------------------"
-  BACKUP_DIR="/root/pre-update/$HESTIA_USER"
+  if [ -n "$STANDALONE_PATH" ]; then
+    # Hosting accounts have quotas: keep two sets, outside the web root.
+    BACKUP_DIR="$HOME/.vl-pre-update"; KEEP_SETS=2
+  else
+    BACKUP_DIR="/root/pre-update/$HESTIA_USER"; KEEP_SETS=3
+    mkdir -p /root/pre-update; chmod 700 /root/pre-update
+  fi
   TIMESTAMP=$(date +%Y%m%d_%H%M%S)
   SET="$BACKUP_DIR/${DOMAIN}_pre_update_${TIMESTAMP}"
   mkdir -p "$SET"
-  chmod 700 /root/pre-update "$BACKUP_DIR" "$SET"
+  chmod 700 "$BACKUP_DIR" "$SET"
 
   echo "Backing up the database to $SET/db.sql.gz ..."
   $WP db export - 2>/dev/null | gzip > "$SET/db.sql.gz"
@@ -259,7 +286,7 @@ if [ "$SKIP_BACKUP" = false ]; then
     echo "✅ Database backed up ($(du -sh "$SET/db.sql.gz" | cut -f1))"
     # Newest 3 per domain (a set with WooCommerce runs to ~300 MB): sets,
     # and the plain dumps from before 2026-10-29.
-    ls -1dt "$BACKUP_DIR/${DOMAIN}_pre_update_"* 2>/dev/null | tail -n +4 | xargs -r rm -rf
+    ls -1dt "$BACKUP_DIR/${DOMAIN}_pre_update_"* 2>/dev/null | tail -n +$((KEEP_SETS + 1)) | xargs -r rm -rf
   else
     echo "❌ ERROR: Database backup failed. Aborting."
     echo "   Use --skip-backup to proceed without a backup."
@@ -369,7 +396,7 @@ WP_CLI::add_wp_hook('upgrader_pre_download', function ($reply, $package) {
     return (isset($map[$package]) && is_readable($map[$package])) ? $map[$package] : $reply;
 }, 99, 2);
 PHP
-chown "$HESTIA_USER:$HESTIA_USER" "$WORK"/*.php
+own "$WORK"/*.php
 # Only prefetch.php's own lines (and WP-CLI errors): some plugins print
 # markup whenever WordPress loads (soutuveneet.fi, 2026-10-29).
 prefetch() { # plugins|themes
@@ -519,6 +546,10 @@ if $WP plugin is-active wp-rocket 2>/dev/null; then
     && echo "✅ WP Rocket page cache and minified files cleared" \
     || echo "⚠️  WP Rocket cache clear failed"
 fi
+# LiteSpeed hosts (Hostingpalvelu) cache pages in the server; the plugin purges them.
+if $WP plugin is-active litespeed-cache 2>/dev/null; then
+  $WP litespeed-purge all &>/dev/null && echo "✅ LiteSpeed cache purged" || echo "⚠️  LiteSpeed cache purge failed"
+fi
 
 # --- Open (normally already open; the trap does the same on any exit) ---
 release_maintenance
@@ -542,7 +573,11 @@ mark() { [ "$1" -ge "$2" ] && echo "✅" || echo "⚠️ "; }
 echo "  🔒 Site closed: ${CLOSED_S} s (maintenance mode)"
 if [ -n "$SET" ]; then
   echo "  💾 Backup: $SET (database + $(grep -c . "$SET/items") package(s), $(du -sh "$SET" | cut -f1))"
-  echo "     Roll back: v-wp-rollback --user=$HESTIA_USER --domain=$DOMAIN --backup=$(basename "$SET")"
+  if [ -n "$STANDALONE_PATH" ]; then
+    echo "     Roll back: v-wp-rollback --path=$WP_PATH --wp-cli=\"$WP_CLI\" --domain=$DOMAIN --backup=$(basename "$SET")"
+  else
+    echo "     Roll back: v-wp-rollback --user=$HESTIA_USER --domain=$DOMAIN --backup=$(basename "$SET")"
+  fi
 fi
 
 if [ ${#ERRORS[@]} -gt 0 ]; then

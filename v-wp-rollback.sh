@@ -1,7 +1,7 @@
 #!/bin/bash
 
-if [ "$EUID" -ne 0 ]; then
-  echo "❌ ERROR: Please run as root."
+if [ "$EUID" -ne 0 ] && [[ " $* " != *" --path="* ]]; then
+  echo "❌ ERROR: Please run as root (or as the site user with --path)."
   exit 1
 fi
 
@@ -28,6 +28,9 @@ OPTIONS:
   --dry-run        Show what would be restored and what the database restore
                    would discard, change nothing
   --list           List the backup sets for the domain
+  --path=DIR       Standalone (a site on a host that is not ours, run as its
+                   user): the WordPress directory; sets in ~/.vl-pre-update/
+  --wp-cli=CMD     Standalone: the WP-CLI command (default wp)
   -h, --help       Show this help
 
 EXAMPLES:
@@ -42,6 +45,8 @@ BACKUP="latest"
 NO_DB=false
 DRY_RUN=false
 LIST=false
+STANDALONE_PATH=""
+WP_CLI="wp"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -51,12 +56,15 @@ while [[ $# -gt 0 ]]; do
     --no-db)    NO_DB=true ;;
     --dry-run)  DRY_RUN=true ;;
     --list)     LIST=true ;;
+    --path=*)   STANDALONE_PATH="${1#*=}" ;;
+    --wp-cli=*) WP_CLI="${1#*=}" ;;
     -h|--help)  show_help; exit 0 ;;
     *) echo "❌ ERROR: Unknown option: $1"; exit 1 ;;
   esac
   shift
 done
 
+[ -n "$STANDALONE_PATH" ] && HESTIA_USER=$(id -un)
 if [ -z "$HESTIA_USER" ] || [ -z "$DOMAIN" ]; then
   echo "❌ ERROR: --user and --domain are required."
   exit 1
@@ -66,9 +74,15 @@ if ! [[ "$HESTIA_USER" =~ ^[a-z0-9_.-]+$ ]] || ! [[ "$DOMAIN" =~ ^[a-z0-9.-]+$ ]
   exit 1
 fi
 DOMAIN="${DOMAIN#www.}"
-WP_PATH="/home/$HESTIA_USER/web/$DOMAIN/public_html"
-WP="sudo -u $HESTIA_USER wp --path=$WP_PATH"
-BACKUP_DIR="/root/pre-update/$HESTIA_USER"
+if [ -n "$STANDALONE_PATH" ]; then
+  WP_PATH="${STANDALONE_PATH%/}"
+  WP="$WP_CLI --path=$WP_PATH"
+  BACKUP_DIR="$HOME/.vl-pre-update"
+else
+  WP_PATH="/home/$HESTIA_USER/web/$DOMAIN/public_html"
+  WP="sudo -u $HESTIA_USER wp --path=$WP_PATH"
+  BACKUP_DIR="/root/pre-update/$HESTIA_USER"
+fi
 
 if [ ! -f "$WP_PATH/wp-config.php" ]; then
   echo "❌ ERROR: No WordPress installation found at $WP_PATH"
@@ -243,6 +257,9 @@ echo "Flushing caches..."
 $WP cache flush --quiet 2>/dev/null
 if $WP plugin is-active wp-rocket 2>/dev/null; then
   $WP eval 'rocket_clean_domain(); rocket_clean_minify();' &>/dev/null
+fi
+if $WP plugin is-active litespeed-cache 2>/dev/null; then
+  $WP litespeed-purge all &>/dev/null
 fi
 
 $WP maintenance-mode deactivate &>/dev/null
