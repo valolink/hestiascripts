@@ -350,7 +350,7 @@ echo ""
 echo "======================================================"
 echo "  Summary: $DOMAIN"
 echo "======================================================"
-[ -n "$CORE_UPDATE" ] && [ ! " ${ERRORS[*]} " =~ "Core" ] && echo "  ✅ Core updated to $($WP core version 2>/dev/null)"
+[ -n "$CORE_UPDATE" ] && [[ " ${ERRORS[*]} " != *" Core"* ]] && echo "  ✅ Core updated to $($WP core version 2>/dev/null)"
 mark() { [ "$1" -ge "$2" ] && echo "✅" || echo "⚠️ "; }
 [ "$PLUGIN_UPDATES" -gt 0 ] && echo "  $(mark "$PLUGINS_DONE" "$PLUGIN_UPDATES") $PLUGINS_DONE of $PLUGIN_UPDATES plugin update(s) applied"
 [ "$THEME_UPDATES" -gt 0 ] && echo "  $(mark "$THEMES_DONE" "$THEME_UPDATES") $THEMES_DONE of $THEME_UPDATES theme update(s) applied"
