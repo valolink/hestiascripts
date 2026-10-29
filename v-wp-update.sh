@@ -145,7 +145,8 @@ if $WP plugin is-active elementor-pro 2>/dev/null; then
   $WP eval 'if (class_exists("\\ElementorPro\\Core\\Upgrade\\Upgrades")) { \ElementorPro\Core\Upgrade\Upgrades::_remove_remote_info_api_data(); }' &>/dev/null
 fi
 
-# What is on offer, minus --exclude. WP-CLI's names are the plugin / theme
+# What is on offer, minus --exclude (slug lines only: a LiteSpeed host printed
+# "Success: Purged all caches" into the list, 2026-10-29). WP-CLI's names are the plugin / theme
 # folders, the same slugs --exclude takes; the update steps below name the
 # packages explicitly, so an excluded one is never touched.
 CORE_UPDATE=$($WP core check-update --format=csv --fields=version 2>/dev/null | tail -n +2 | head -n1)
@@ -154,10 +155,10 @@ if [ -n "$CORE_UPDATE" ] && { is_excluded core || is_excluded wordpress; }; then
   SKIPPED+=("core"); CORE_UPDATE=""
 fi
 PLUGIN_LIST=(); THEME_LIST=()
-for s in $($WP plugin list --update=available --field=name 2>/dev/null); do
+for s in $($WP plugin list --update=available --field=name 2>/dev/null | grep -E "^[A-Za-z0-9._-]+$"); do
   if is_excluded "$s"; then SKIPPED+=("$s"); else PLUGIN_LIST+=("$s"); fi
 done
-for s in $($WP theme list --update=available --field=name 2>/dev/null); do
+for s in $($WP theme list --update=available --field=name 2>/dev/null | grep -E "^[A-Za-z0-9._-]+$"); do
   if is_excluded "$s"; then SKIPPED+=("$s"); else THEME_LIST+=("$s"); fi
 done
 PLUGIN_UPDATES=${#PLUGIN_LIST[@]}
@@ -522,7 +523,7 @@ if [ "$THEME_UPDATES" -gt 0 ]; then
   # 2026-10-29: ACF Pro + Complianz twice).
   if [ "$THEMES_DONE" -gt 0 ]; then
     MORE_LIST=()
-    for s in $($WP plugin list --update=available --field=name 2>/dev/null); do
+    for s in $($WP plugin list --update=available --field=name 2>/dev/null | grep -E "^[A-Za-z0-9._-]+$"); do
       [[ " ${PLUGIN_LIST[*]} " == *" $s "* ]] && continue
       if is_excluded "$s"; then [[ " ${SKIPPED[*]} " == *" $s "* ]] || SKIPPED+=("$s"); else MORE_LIST+=("$s"); fi
     done
