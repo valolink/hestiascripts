@@ -489,10 +489,14 @@ if [ "$THEME_UPDATES" -gt 0 ]; then
 
   # Themes that bundle plugins (Avada → Fusion Core / Fusion Builder) only
   # offer those updates once the theme itself is updated, so the plugin step
-  # above never saw them (logscale + operaria, 2026-10-06). Look again.
+  # above never saw them (logscale + operaria, 2026-10-06). Look again —
+  # for the new ones only: a plugin the first pass already tried (a refused
+  # licence) would only fail again, with the site closed (soutuveneet.fi
+  # 2026-10-29: ACF Pro + Complianz twice).
   if [ "$THEMES_DONE" -gt 0 ]; then
     MORE_LIST=()
     for s in $($WP plugin list --update=available --field=name 2>/dev/null); do
+      [[ " ${PLUGIN_LIST[*]} " == *" $s "* ]] && continue
       if is_excluded "$s"; then [[ " ${SKIPPED[*]} " == *" $s "* ]] || SKIPPED+=("$s"); else MORE_LIST+=("$s"); fi
     done
     if [ ${#MORE_LIST[@]} -gt 0 ]; then
