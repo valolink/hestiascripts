@@ -470,7 +470,8 @@ if [ -n "$CORE_UPDATE" ]; then
       echo ""
       echo "   Running database upgrade (site closed)..."
       hold_maintenance
-      $WP core update-db 2>&1
+      # A multisite upgrades every site's tables, not only the main one.
+      if $WP core is-installed --network 2>/dev/null; then $WP core update-db --network 2>&1; else $WP core update-db 2>&1; fi
       release_maintenance
     fi
   else
