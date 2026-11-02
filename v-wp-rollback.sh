@@ -196,12 +196,21 @@ ERRORS=()
 cleanup() { $WP maintenance-mode deactivate &>/dev/null; }
 trap cleanup EXIT
 
+# The mysql tools may not reach the server the way PHP does (moneybee.fi on
+# Zoner: no default socket in the shell): find the arguments that work once.
+DBARGS=()
+if [ "$NO_DB" = false ] && ! $WP db query "SELECT 1" &>/dev/null; then
+  SOCK=$($WP eval 'echo ini_get("mysqli.default_socket");' 2>/dev/null | tail -1)
+  if [ -n "$SOCK" ] && $WP db query "SELECT 1" --socket="$SOCK" &>/dev/null; then DBARGS=(--socket="$SOCK")
+  elif $WP db query "SELECT 1" --host=127.0.0.1 &>/dev/null; then DBARGS=(--host=127.0.0.1); fi
+fi
+
 # The current database is saved with the site still open; the site closes
 # only for the copying and the import.
 echo ""
 if [ "$NO_DB" = false ]; then
   echo "Saving the current database to $ASIDE/db.sql.gz ..."
-  $WP db export - 2>/dev/null | gzip > "$ASIDE/db.sql.gz"
+  $WP db export - "${DBARGS[@]}" 2>/dev/null | gzip > "$ASIDE/db.sql.gz"
   if [ "${PIPESTATUS[0]}" -ne 0 ] || [ ! -s "$ASIDE/db.sql.gz" ]; then
     echo "❌ ERROR: Could not save the current database. Nothing changed."
     exit 1
@@ -245,7 +254,7 @@ done < <(printf "%s\n" "${RESTORE[@]}")
 
 if [ "$NO_DB" = false ]; then
   echo "Restoring the database..."
-  if gunzip -c "$SET/db.sql.gz" | $WP db import - &>/dev/null; then
+  if gunzip -c "$SET/db.sql.gz" | $WP db import - "${DBARGS[@]}" &>/dev/null; then
     echo "  ✅ database as of $CREATED"
   else
     ERRORS+=("database import failed — the pre-rollback dump is $ASIDE/db.sql.gz")
