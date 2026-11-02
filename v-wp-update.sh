@@ -276,20 +276,23 @@ if [ "$SKIP_BACKUP" = false ]; then
   mkdir -p "$SET"
   chmod 700 "$BACKUP_DIR" "$SET"
 
+  # The mysql tools WP-CLI calls may not find the server the way PHP does: with
+  # DB_HOST localhost they look for a default socket a hosting account's shell
+  # may not have (moneybee.fi on Zoner: /tmp/mysql.sock missing, PHP uses
+  # /var/lib/mysql/mysql.sock). Point them at PHP's socket (MYSQL_UNIX_PORT
+  # also covers WP-CLI's own preflight queries).
+  db_reachable() {
+    $WP db query "SELECT 1" &>/dev/null && return 0
+    local sock; sock=$($WP eval 'echo ini_get("mysqli.default_socket");' 2>/dev/null | tail -1)
+    [ -n "$sock" ] || return 1
+    export MYSQL_UNIX_PORT="$sock"
+    $WP db query "SELECT 1" &>/dev/null && { echo "   (database through PHP's socket $sock)"; return 0; }
+    unset MYSQL_UNIX_PORT; return 1
+  }
   echo "Backing up the database to $SET/db.sql.gz ..."
-  # With DB_HOST localhost the dump tool looks for the default socket, which a
-  # hosting account's shell may not have (moneybee.fi on Zoner: /tmp/mysql.sock
-  # missing, PHP uses /var/lib/mysql/mysql.sock). Retry with PHP's socket,
-  # then over TCP.
-  dump_db() { $WP db export - "$@" 2>/dev/null | gzip > "$SET/db.sql.gz"; [ "${PIPESTATUS[0]}" -eq 0 ] && [ -s "$SET/db.sql.gz" ]; }
-  DUMPED=false
-  if dump_db; then DUMPED=true
-  else
-    SOCK=$($WP eval 'echo ini_get("mysqli.default_socket");' 2>/dev/null | tail -1)
-    if [ -n "$SOCK" ] && dump_db --socket="$SOCK"; then DUMPED=true; echo "   (through PHP's socket $SOCK)"
-    elif dump_db --host=127.0.0.1; then DUMPED=true; echo "   (over TCP, 127.0.0.1)"; fi
-  fi
-  if $DUMPED && gzip -t "$SET/db.sql.gz" 2>/dev/null; then
+  db_reachable
+  $WP db export - 2>/dev/null | gzip > "$SET/db.sql.gz"
+  if [ "${PIPESTATUS[0]}" -eq 0 ] && [ -s "$SET/db.sql.gz" ] && gzip -t "$SET/db.sql.gz" 2>/dev/null; then
     date -u +%Y-%m-%dT%H:%M:%SZ > "$SET/created"
     $WP core version > "$SET/core-version" 2>/dev/null
     $WP plugin list --fields=name,version,status --format=csv > "$SET/plugins.csv" 2>/dev/null
