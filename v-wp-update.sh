@@ -445,11 +445,18 @@ ERRORS=()
 hold_maintenance() { $WP maintenance-mode activate &>/dev/null; }
 release_maintenance() { $WP maintenance-mode deactivate &>/dev/null; }
 install_maintenance_page
+# Measured as elapsed time between looks, not as a count of looks: a chroot
+# without `sleep` (rahoitusturva.fi on Hostaan, 2026-11-02) made a tick
+# counter spin and report 1343 s for a few seconds. The pause falls back to
+# PHP's usleep there.
 touch "$WORK/watching"
-( n=0
+nap() { sleep 0.2 2>/dev/null || php -r "usleep(200000);" 2>/dev/null || read -rt 0.2 _ <> <(:) 2>/dev/null; }
+( ms=0; prev=$(date +%s%3N)
   while [ -e "$WORK/watching" ]; do
-    [ -e "$WP_PATH/.maintenance" ] && n=$((n + 1)) && echo "$n" > "$WORK/closed-ticks"
-    sleep 0.2
+    now=$(date +%s%3N)
+    [ -e "$WP_PATH/.maintenance" ] && ms=$((ms + now - prev)) && echo "$ms" > "$WORK/closed-ms"
+    prev=$now
+    nap
   done ) &
 WATCH_PID=$!
 echo ""
@@ -576,8 +583,8 @@ release_maintenance
 remove_maintenance_page
 rm -f "$WORK/watching"
 wait "$WATCH_PID" 2>/dev/null
-CLOSED_TICKS=$(cat "$WORK/closed-ticks" 2>/dev/null || echo 0)
-CLOSED_S=$(awk -v t="$CLOSED_TICKS" 'BEGIN { printf "%.1f", t / 5 }')
+CLOSED_MS=$(cat "$WORK/closed-ms" 2>/dev/null || echo 0)
+CLOSED_S=$(awk -v t="$CLOSED_MS" 'BEGIN { printf "%.1f", t / 1000 }')
 WATCH_PID=""
 
 # --- Summary ---
