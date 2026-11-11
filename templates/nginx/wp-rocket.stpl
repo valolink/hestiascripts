@@ -13,7 +13,9 @@ server {
 
     # --- Valolink security rules: bad-bot UA block (from wp-secure-snippet) ---
     # Short-circuits before any cache logic so abusive crawlers cost ~nothing.
-    if ($http_user_agent ~* (SemrushBot|AhrefsBot|MJ12bot|DotBot|PetalBot|MegaIndex|HTTrack|masscan)) {
+    # AhrefsBot and SemrushBot are allowed: marketing agencies rely on them and both
+    # honour robots.txt + Crawl-delay. If one hammers, rate-limit it (valolink-crawlers.conf).
+    if ($http_user_agent ~* (MJ12bot|DotBot|PetalBot|MegaIndex|HTTrack|masscan)) {
         return 403;
     }
 

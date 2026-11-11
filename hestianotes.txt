@@ -641,7 +641,7 @@ Nginx
 
     }
 
-    if ($http_user_agent ~* (SemrushBot|AhrefsBot|MJ12bot|DotBot|PetalBot|MegaIndex|HTTrack|masscan)) {
+    if ($http_user_agent ~* (MJ12bot|DotBot|PetalBot|MegaIndex|HTTrack|masscan)) {
 
         return 403;
 
