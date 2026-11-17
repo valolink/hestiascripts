@@ -15,25 +15,37 @@
 #   4. Pre-stop non-web services      (best-effort)
 #   5. Redis BGSAVE + wait            (best-effort, auth-aware)
 #   6. MariaDB InnoDB dirty-page flush (best-effort)
-#   7. sync + reboot                  (with fallbacks)
+#   7. sync + reboot (or power off)   (with fallbacks)
 #
 # Install: cp safe-reboot.sh /usr/local/sbin/safe-reboot && chmod 700 /usr/local/sbin/safe-reboot
 # Usage:   safe-reboot            # interactive: prompts for hostname confirmation
 #          safe-reboot --yes      # non-interactive: skip the prompt (for scripted use)
 #          safe-reboot --force    # proceed even if a backup appears to be running
+#          safe-reboot --shutdown # same pre-flight, then power off instead of rebooting
+#                                 # (e.g. before resizing a droplet; the box stays down
+#                                 # until it is started from the provider's console)
 
 set -uo pipefail
 
 ASSUME_YES=0
 FORCE=0
+ACTION=reboot
 for arg in "${@:-}"; do
     case "$arg" in
         -y|--yes)   ASSUME_YES=1 ;;
         -f|--force) FORCE=1 ;;
+        --shutdown|--poweroff) ACTION=poweroff ;;
         "")         ;;
         *) echo "[safe-reboot] Unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
+if [ "$ACTION" = "poweroff" ]; then
+    ACTION_TEXT="POWER OFF"
+    ACTION_NOTE="All websites on this box stay down until it is started again from the provider's console."
+else
+    ACTION_TEXT="REBOOT"
+    ACTION_NOTE="All websites on this box go down for the reboot."
+fi
 
 HOST_SHORT=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo "this-host")
 
@@ -95,9 +107,9 @@ fi
 # ===========================================================================
 if [ "$ASSUME_YES" -ne 1 ]; then
     if [ ! -t 0 ]; then
-        die "not a terminal and --yes not given. Refusing to reboot without confirmation."
+        die "not a terminal and --yes not given. Refusing to $ACTION without confirmation."
     fi
-    echo "[safe-reboot] About to REBOOT '$HOST_SHORT'. All websites on this box go down for the reboot."
+    echo "[safe-reboot] About to $ACTION_TEXT '$HOST_SHORT'. $ACTION_NOTE"
     read -r -p "[safe-reboot] Type the hostname ('$HOST_SHORT') to confirm: " reply
     if [ "$reply" != "$HOST_SHORT" ] && [ "$reply" != "$(hostname 2>/dev/null)" ]; then
         die "confirmation did not match — nothing changed."
@@ -105,12 +117,12 @@ if [ "$ASSUME_YES" -ne 1 ]; then
 fi
 
 # ===========================================================================
-# --- COMMIT POINT: past here we always proceed to the reboot. No aborts, so we
-#     can never leave the box with services stopped but not rebooted. ---
+# --- COMMIT POINT: past here we always proceed to the reboot (or power-off). No
+#     aborts, so we can never leave the box with services stopped but still up. ---
 # ===========================================================================
 SECONDS=0   # reset the elapsed clock; every log line below is now stamped +Ns
 TIMING=1
-log "Confirmed. Beginning pre-flight for '$HOST_SHORT'."
+log "Confirmed ($ACTION). Beginning pre-flight for '$HOST_SHORT'."
 
 # Stage 4: pre-stop services that don't affect website availability.
 # Web stack stays UP (nginx/apache2/php-fpm/mariadb/redis). 'named' stays up too
@@ -224,17 +236,18 @@ else
     log "MariaDB/MySQL pre-flush skipped (client='${DB_CLI:-none}', active service='${DB_SVC:-none}')."
 fi
 
-# Stage 7: flush filesystem buffers and reboot.
+# Stage 7: flush filesystem buffers and reboot (or power off).
 log "Syncing filesystems..."
 sync
 
-log "All pre-flight done in ${SECONDS}s. Rebooting '$HOST_SHORT' NOW."
+log "All pre-flight done in ${SECONDS}s. $ACTION_TEXT '$HOST_SHORT' NOW."
 sleep 1   # give stdout/journald a moment to flush the line above
 
-if ! systemctl reboot 2>/dev/null; then
-    log "WARN: 'systemctl reboot' failed — trying 'reboot'."
-    if ! reboot 2>/dev/null; then
-        log "WARN: 'reboot' failed — forcing via 'systemctl reboot --force'."
-        systemctl reboot --force
+# $ACTION is reboot or poweroff: the same name for the systemctl verb and the plain command.
+if ! systemctl "$ACTION" 2>/dev/null; then
+    log "WARN: 'systemctl $ACTION' failed — trying '$ACTION'."
+    if ! "$ACTION" 2>/dev/null; then
+        log "WARN: '$ACTION' failed — forcing via 'systemctl $ACTION --force'."
+        systemctl "$ACTION" --force
     fi
 fi
