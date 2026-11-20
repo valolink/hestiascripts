@@ -115,6 +115,19 @@ func TestOpcacheSkipsAGoodVersionAndNeverLowersFiles(t *testing.T) {
 	}
 }
 
+func TestPHPMemoryRaisesOnlyWhatIsLower(t *testing.T) {
+	f := box8G()
+	f.Files["/etc/php/8.2/fpm/php.ini"] = "[PHP]\nmemory_limit = 128M\n"
+	f.Files["/etc/php/8.3/fpm/php.ini"] = "[PHP]\nmemory_limit = 512M\n"
+	p := text(planOf(t, "php-memory", f, Values{"version": "all", "limit": "256M"}))
+	if !strings.Contains(p, "/etc/php/8.2/fpm/php.ini memory_limit 256M") || !strings.Contains(p, "try-reload-or-restart php8.2-fpm") {
+		t.Errorf("8.2 not raised:\n%s", p)
+	}
+	if strings.Contains(p, "8.3") {
+		t.Errorf("8.3 has more already and must not be lowered:\n%s", p)
+	}
+}
+
 func TestMariaDBResizesOnline(t *testing.T) {
 	p := text(planOf(t, "mariadb-buffer", box8G(), Values{"size": "3G"}))
 	if strings.Contains(p, "systemctl restart") || !strings.Contains(p, "SET GLOBAL innodb_buffer_pool_size = 3221225472") ||

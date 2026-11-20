@@ -18,6 +18,7 @@ func performanceChecks() []Check {
 		{ID: "redis", Section: "performance", Title: "Redis", Run: checkRedis},
 		{ID: "redis.sites", Section: "performance", Title: "Redis object cache per site", Run: checkRedisSites},
 		{ID: "php.opcache", Section: "performance", Title: "OpCache", Run: checkOpcache},
+		{ID: "php.memory-limit", Section: "performance", Title: "PHP memory limit", Run: checkPHPMemory},
 		{ID: "php.fpm-profiles", Section: "performance", Title: "PHP-FPM profiles", Run: checkFPMProfiles},
 		{ID: "mariadb.buffer", Section: "performance", Title: "MariaDB buffer pool", Run: checkMariaDB},
 	}
@@ -306,6 +307,59 @@ func checkOpcache(ctx context.Context, env *Env) []Result {
 	// Configured, not OK: the ini says so; hit rate would need a request
 	// through FPM to prove it, which a read-only check does not make.
 	return []Result{New(Configured, "enabled with ≥ 256 MB on PHP "+strings.Join(good, ", "))}
+}
+
+// PHPMemoryMinMB is what WordPress itself asks for in wp-admin
+// (WP_MAX_MEMORY_LIMIT). UpdraftPlus raised every request to it; when the
+// plugin was removed (2026-11-20) a page-builder site on the 128M default
+// answered 500 on every uncached request.
+const PHPMemoryMinMB = 256
+
+// PHPMemoryLimitMB returns memory_limit from the FPM php.ini of ver in MB
+// (-1 = unlimited) and whether the ini sets one at all. A pool with its own
+// php_admin_value[memory_limit] (the staging profile) overrides it.
+func PHPMemoryLimitMB(env *Env, ver string) (mb int, present bool) {
+	m := regexp.MustCompile(`(?m)^\s*memory_limit\s*=\s*(-?\d+)\s*([KMG]?)`).FindStringSubmatch(readString(env.Sys, "/etc/php/"+ver+"/fpm/php.ini"))
+	if m == nil {
+		return 0, false
+	}
+	n, _ := strconv.Atoi(m[1])
+	switch {
+	case n < 0:
+		return -1, true
+	case m[2] == "G":
+		return n << 10, true
+	case m[2] == "K":
+		return n >> 10, true
+	case m[2] == "":
+		return n >> 20, true
+	}
+	return n, true
+}
+
+func checkPHPMemory(ctx context.Context, env *Env) []Result {
+	var rs []Result
+	var good []string
+	for _, v := range PHPVersions(env.Sys) {
+		pools, _ := env.Sys.Glob("/etc/php/" + v + "/fpm/pool.d/*.conf")
+		mb, present := PHPMemoryLimitMB(env, v)
+		if !present || len(pools) == 0 {
+			continue
+		}
+		if mb >= 0 && mb < PHPMemoryMinMB {
+			rs = append(rs, New(Warn, fmt.Sprintf("PHP %s: memory limit %d MB", v, mb)).For("php"+v).
+				Because("A site with a page builder needs more for ordinary pages; it works only while some plugin raises the limit itself.").Fixed("hs op php-memory"))
+		} else {
+			good = append(good, v)
+		}
+	}
+	if len(rs) > 0 {
+		return rs
+	}
+	if len(good) == 0 {
+		return []Result{New(NA, "no PHP-FPM versions with pools")}
+	}
+	return []Result{New(Configured, fmt.Sprintf("≥ %d MB on PHP %s", PHPMemoryMinMB, strings.Join(good, ", ")))}
 }
 
 var fpmProfiles = []string{"production", "standard", "staging", "small"}

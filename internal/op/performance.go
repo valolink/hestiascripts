@@ -431,6 +431,60 @@ func init() {
 	})
 
 	register(Op{
+		ID: "php-memory", Resolves: "php.memory-limit", Title: "PHP memory limit", Section: "performance", Risk: Change,
+		Note: "Raises the default PHP memory limit per request for every site on the version. A default, not a cap: a site can still set its own (WP_MEMORY_LIMIT), and the staging profile's pools keep their fixed 512M.",
+		How:  "`hs conf set` rewrites memory_limit in /etc/php/<ver>/fpm/php.ini where it is lower than the value given (never lowered; before → after printed, previous file kept). `systemctl try-reload-or-restart` re-reads php.ini with a graceful reload — running requests finish.",
+		Undo: "cp -p the kept php.ini back (the path is printed) and reload php<ver>-fpm.",
+		Fields: []Field{
+			versionField("PHP version", "", true,
+				func(ctx context.Context, env *check.Env) string {
+					for _, v := range fpmVersions(env) {
+						if mb, ok := box.PHPMemoryLimitMB(env, v); ok && mb >= 0 && mb < box.PHPMemoryMinMB && servesPools(env, v) {
+							return v
+						}
+					}
+					if vs := fpmVersions(env); len(vs) > 0 {
+						return vs[len(vs)-1]
+					}
+					return ""
+				},
+				func(_ context.Context, env *check.Env, v string) string {
+					s := "not set"
+					if mb, ok := box.PHPMemoryLimitMB(env, v); ok && mb < 0 {
+						s = "unlimited"
+					} else if ok {
+						s = fmt.Sprintf("%d MB", mb)
+					}
+					if !servesPools(env, v) {
+						s += ", no sites"
+					}
+					return s
+				}),
+			{Key: "limit", Label: "Memory limit", Kind: Text, Pattern: sizeRe,
+				Help:    "e.g. 256M — what WordPress asks for in wp-admin. Every worker may use this much at once: check the PHP-FPM ceiling in the Memory audit before going higher.",
+				Default: func(context.Context, *check.Env, Target) string { return fmt.Sprintf("%dM", box.PHPMemoryMinMB) }},
+		},
+		Recheck: []string{"php.memory-limit"},
+		Plan: func(ctx context.Context, env *check.Env, _ Target, v Values) ([]Step, error) {
+			var steps []Step
+			want := int(sizeBytes(v["limit"]) >> 20)
+			for _, ver := range pickVersions(env, v["version"]) {
+				ini := "/etc/php/" + ver + "/fpm/php.ini"
+				if readFile(env, ini) == "" {
+					return nil, fmt.Errorf("%s not found", ini)
+				}
+				if mb, ok := box.PHPMemoryLimitMB(env, ver); ok && (mb < 0 || mb >= want) {
+					continue
+				}
+				steps = append(steps,
+					confSet("PHP "+ver, ini, conf.Opts{Style: conf.INI, Comment: ";"}, "memory_limit", v["limit"]),
+					Step{Why: "graceful reload re-reads php.ini", Argv: []string{"systemctl", "try-reload-or-restart", "php" + ver + "-fpm"}})
+			}
+			return steps, nil
+		},
+	})
+
+	register(Op{
 		ID: "mariadb-buffer", Resolves: "mariadb.buffer", Title: "MariaDB buffer pool size", Section: "performance", Risk: Change,
 		Note: "Sets innodb_buffer_pool_size — resized on the running server, no restart (run.sh restarted MariaDB, taking every site down for the moment).",
 		How:  "`SET GLOBAL innodb_buffer_pool_size` resizes the pool online (MariaDB 10.2+; done in chunks, queries keep running). `hs conf set` writes the same value under [mysqld] in " + mariadbCnf + " so it survives a restart, printing before → after and keeping the previous file. The last step reads the running size back.",
