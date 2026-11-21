@@ -78,6 +78,10 @@ RC=$?
 if [ "$RC" -eq 0 ] && [ "$ACTION" != "status" ]; then
   # Stale caches after a plugin change bite hard — flush best-effort.
   wp_cmd cache flush > /dev/null 2>&1
+  # With a Redis drop-in the flush also empties WordPress's update lists
+  # (site transients live in the object cache), and EngineLink's sync right
+  # after this would read "no updates" for every other plugin. Check again.
+  wp_cmd eval 'wp_version_check(); wp_update_plugins(); wp_update_themes();' > /dev/null 2>&1
 fi
 
 exit $RC

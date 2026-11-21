@@ -88,6 +88,9 @@ if ! wp_cmd config has WP_REDIS_DATABASE >/dev/null 2>&1; then
   echo "  ⚠️  WP_REDIS_DATABASE is not set: this flush is FLUSHDB on the shared database 0 and empties every other site's cache in it too (v-wp-redis-install sets a database per site)."
 fi
 wp_cmd cache flush || echo "  (object cache flush failed — no drop-in?)"
+# The flush took WordPress's update lists with it (site transients live in the
+# object cache); check again, or EngineLink's next sync reads "no updates".
+wp_cmd eval 'wp_version_check(); wp_update_plugins(); wp_update_themes();' > /dev/null 2>&1
 
 echo "→ Expired transients..."
 wp_cmd transient delete --expired || echo "  (transient cleanup failed)"
